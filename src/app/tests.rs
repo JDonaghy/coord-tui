@@ -4,6 +4,10 @@
     // feature for an external integration-test crate, while staying private
     // here for the in-crate `#[cfg(test)]` suite.
     use super::fixtures::*;
+    // #6: backend-agnostic driver surface — lets one test body run against
+    // both `TuiDriver` and `GtkDriver` (see
+    // `assert_toolbar_add_click_opens_repo_picker`).
+    use quadraui::testing::ConformanceDriver;
 
     /// Collect every `ToolbarButton::Action` label from a toolbar.
     /// Test-only convenience for assertions that previously walked
@@ -17831,13 +17835,26 @@
         assert!(!retry.1, "Retry should be disabled (no failed assignments)");
         // Layout records the button so hover state can fire, but the
         // hit-test must refuse clicks landing on it.
-        let layout = bar.layout(0.0, 0.0, 200.0, 1.0, toolbar_tui_measure);
+        //
+        // #6: geometry comes from `Backend::toolbar_layout` — the backend's
+        // own paint-free measurer — not a hand-rolled cell-width copy.
+        let backend = quadraui::tui::TuiBackend::new();
+        let layout = backend.toolbar_layout(Rect::new(0.0, 0.0, 200.0, 1.0), &bar);
         let visible = layout
             .visible_items
             .iter()
             .find(|v| v.action_id.as_ref() == Some(&retry.0))
             .expect("Retry visible entry");
         assert!(!visible.clickable, "Disabled action must not be clickable");
+        // …and a click at the dead centre of that recorded rect must not
+        // resolve to the button.
+        let cx = visible.bounds.x + visible.bounds.width / 2.0;
+        let cy = visible.bounds.y + visible.bounds.height / 2.0;
+        assert_eq!(
+            layout.hit_test(cx, cy),
+            quadraui::ToolbarHit::Empty,
+            "a click on a disabled button must not dispatch",
+        );
     }
 
     #[test]
@@ -17922,6 +17939,125 @@
         assert_eq!(picker.repos.len(), 2);
         assert_eq!(picker.repos[0], "repo-a");
         assert_eq!(picker.repos[1], "repo-b");
+    }
+
+    // ── #6: panel-toolbar hit-test goes through `Backend`, not a local
+    //        cell-width measurer ────────────────────────────────────────────
+    //
+    // The hit-test used to measure toolbar buttons with a hand-copy of
+    // quadraui's `pub(crate) tui::toolbar::tui_item_width`. It ran
+    // unconditionally, so under GTK the toolbar was *painted* with Pango
+    // pixel widths and *hit-tested* in ratatui character cells — clicks
+    // landed on the wrong button, or on nothing. Both are now
+    // `Backend::sidebar_panel_layout`, the paint-free twin of the
+    // `draw_sidebar_panel` `render.rs` calls on the same rect.
+
+    /// Board app whose `[A]dd` toolbar button is enabled and whose click
+    /// lands on the repo picker (2 repos ⇒ picker rather than a direct
+    /// chat dispatch — see `dispatch_toolbar_add_multiple_repos_opens_picker`).
+    fn app_with_two_repos() -> CoordApp {
+        let mut app = make_app_default();
+        app.active_view = SidebarView::Board;
+        app.board_repo_names.push("repo-a".to_string());
+        app.board_repo_names.push("repo-b".to_string());
+        app
+    }
+
+    /// #6 shared cross-backend body: clicking the panel toolbar's `[A]dd`
+    /// button must resolve to the `toolbar:add` action under *every* backend.
+    ///
+    /// Written against quadraui's `ConformanceDriver` so the identical body
+    /// runs on `TuiDriver` and `GtkDriver` — the two measure toolbar buttons
+    /// in different units (ratatui cells vs Pango-measured pixels), which is
+    /// precisely what the old shared TUI measurer got wrong. Per that trait's
+    /// rules the button is located by **text** (`click_text`), never by a
+    /// literal coordinate, and every assertion is on painted text.
+    fn assert_toolbar_add_click_opens_repo_picker<D: ConformanceDriver>(
+        driver: &mut D,
+        backend: &str,
+    ) {
+        assert!(
+            driver.screen_has("[A]dd"),
+            "#6/{backend}: the Board panel toolbar's [A]dd button must paint \
+             before it can be clicked",
+        );
+        assert!(
+            !driver.screen_has("Select Target Repo"),
+            "#6/{backend}: the repo picker must be closed before the click",
+        );
+        driver.click_text("[A]dd");
+        assert!(
+            driver.screen_has("Select Target Repo"),
+            "#6/{backend}: clicking [A]dd must resolve to `toolbar:add` and \
+             open the repo picker. A miss (the GTK mis-hit this issue fixed: \
+             pixel-painted button, cell-measured hit-test) leaves it closed.",
+        );
+    }
+
+    #[test]
+    fn panel_toolbar_add_click_dispatches_under_tui_backend() {
+        let mut driver = quadraui::tui::testing::driver_with_shell(
+            app_with_two_repos(),
+            CoordApp::shell_config(),
+            140,
+            40,
+        );
+        assert_toolbar_add_click_opens_repo_picker(&mut driver, "tui");
+    }
+
+    /// The half that was broken before #6. Gated on `--features gtk` (GTK4
+    /// dev libs); `GtkDriver` is display-free, so it needs no `$DISPLAY`.
+    #[cfg(feature = "gtk")]
+    #[test]
+    fn panel_toolbar_add_click_dispatches_under_gtk_backend() {
+        // 140 cols x 40 rows at `GtkDriver::new_fixture`'s nominal
+        // 8px/16px cell — the same logical viewport the TUI half uses.
+        let mut driver = quadraui::gtk::testing::driver_with_shell(
+            app_with_two_repos(),
+            CoordApp::shell_config(),
+            140 * 8,
+            40 * 16,
+        );
+        assert_toolbar_add_click_opens_repo_picker(&mut driver, "gtk");
+    }
+
+    #[test]
+    fn panel_toolbar_disabled_button_click_does_not_dispatch_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        // `[P]urge` is disabled on a default Board (nothing selected in the
+        // Completed group). Dispatching it anyway pushes a distinctive
+        // toast — so that toast's ABSENCE after a click on the button is
+        // the observable proof the hit-test declined.
+        // Prefix only — the toast title is ellipsised to the toast width.
+        const REFUSAL_TOAST: &str = "Purge only runs";
+
+        // Positive control: prove the needle really is screen-observable, so
+        // the negative assertion below can't pass vacuously.
+        let mut dispatched = make_app_default();
+        dispatched.active_view = SidebarView::Board;
+        dispatched.dispatch_toolbar_action("toolbar:purge");
+        let control = driver_with_shell(dispatched, CoordApp::shell_config(), 140, 40);
+        assert!(
+            control.screen_contains(REFUSAL_TOAST),
+            "control: a dispatched toolbar:purge must paint its toast:\n{}",
+            control.screen(),
+        );
+
+        // The real assertion: clicking the disabled button dispatches nothing.
+        let mut app = make_app_default();
+        app.active_view = SidebarView::Board;
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let (x, y) = driver
+            .find("[P]urge")
+            .unwrap_or_else(|| panic!("[P]urge must paint:\n{}", driver.screen()));
+        driver.click(x, y);
+        assert!(
+            !driver.screen_contains(REFUSAL_TOAST),
+            "#6: a click on the DISABLED [P]urge button must not dispatch \
+             (it still occupies a layout slot so hover tooltips fire):\n{}",
+            driver.screen(),
+        );
     }
 
     #[test]

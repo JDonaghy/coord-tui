@@ -5163,7 +5163,7 @@ impl CoordApp {
                         let main_b = ctx.main_bounds();
                         let lh = backend.line_height();
                         let (tab_main_b, toolbar_consumed) =
-                            self.hit_test_panel_toolbar(pos, main_b, lh);
+                            self.hit_test_panel_toolbar(pos, main_b, lh, &*backend);
                         if toolbar_consumed {
                             return true;
                         }
@@ -5415,7 +5415,8 @@ impl CoordApp {
                 // `mouse_main_click`'s left-click path does — the doc-tab
                 // strip is the first row of `content_main_b`, not of the
                 // raw `main_b` (#272's toolbar sits above it).
-                let (main_b, toolbar_consumed) = self.hit_test_panel_toolbar(pos, main_b, lh);
+                let (main_b, toolbar_consumed) =
+                    self.hit_test_panel_toolbar(pos, main_b, lh, &*backend);
                 if toolbar_consumed {
                     return true;
                 }
@@ -5516,11 +5517,11 @@ impl CoordApp {
                 if ctx.in_sidebar(pos.x, pos.y) {
                     if let Some(sidebar_b) = ctx.sidebar_bounds() {
                         let panel = self.build_sidebar_action_panel(lh);
-                        let layout = panel.layout(
-                            sidebar_b,
-                            quadraui::SidebarPanelMeasure::new(lh, 8.0),
-                            toolbar_tui_measure,
-                        );
+                        // #6: hover must resolve against the SAME geometry
+                        // paint produced, so ask the backend for it rather
+                        // than re-deriving cell widths that are wrong under
+                        // GTK (see `hit_test_sidebar_action_bar`).
+                        let layout = backend.sidebar_panel_layout(sidebar_b, &panel);
                         if let Some(t) = layout.toolbar_layout.as_ref() {
                             redraw |= self.sidebar_action_bar_hover.update(t, pos.x, pos.y);
                         } else {
@@ -5671,11 +5672,11 @@ impl CoordApp {
                             toolbar: Some(toolbar),
                             toolbar_height: Some(self.toolbar_height(lh)),
                         };
-                        let layout = panel.layout(
-                            ctx.main_bounds(),
-                            quadraui::SidebarPanelMeasure::new(lh, 8.0),
-                            toolbar_tui_measure,
-                        );
+                        // #6: same backend-owned measurer the click path
+                        // and `render.rs`'s `draw_sidebar_panel` use — a
+                        // local cell-width copy tints the wrong button
+                        // under GTK (see `hit_test_panel_toolbar`).
+                        let layout = backend.sidebar_panel_layout(ctx.main_bounds(), &panel);
                         if let Some(t) = layout.toolbar_layout.as_ref() {
                             redraw |= self.panel_toolbar_hover.update(t, pos.x, pos.y);
                         } else {
@@ -5835,8 +5836,10 @@ impl CoordApp {
         // we've already dispatched the action.  Pass the shrunken rect
         // to the tree's hit-tester so its math doesn't see the bar row.
         let lh = backend.line_height();
-        let (sidebar_b, consumed) = self.hit_test_sidebar_action_bar(pos, sidebar_b, lh);
-        let _ = backend; // backend reserved for hover updates wired below
+        // #6: `backend` (read-only) supplies the toolbar geometry — see
+        // `hit_test_sidebar_action_bar`.
+        let (sidebar_b, consumed) =
+            self.hit_test_sidebar_action_bar(pos, sidebar_b, lh, &*backend);
         if consumed {
             return true;
         }
@@ -6436,7 +6439,8 @@ impl CoordApp {
         // shrink `main_b` for the rest of the handler so existing
         // tab-bar math (which expects (0..tab_h) from the panel's top)
         // continues to work unchanged.
-        let (content_main_b, toolbar_consumed) = self.hit_test_panel_toolbar(pos, main_b, lh);
+        let (content_main_b, toolbar_consumed) =
+            self.hit_test_panel_toolbar(pos, main_b, lh, backend);
         if toolbar_consumed {
             return true;
         }

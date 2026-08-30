@@ -27,6 +27,18 @@ required-features = ["gtk"]
 name = "acceptance"
 required-features = ["test-support"]
 
+# #4: tests/gtk_cli.rs black-box-tests the coord-tui-gtk binary's
+# `--version`/`-V` wiring, which only exists when the `gtk` feature is on
+# (see the `[[bin]] coord-tui-gtk` stanza above). Without this, a plain
+# `cargo test` (default features = ["tui"], no `gtk`) would fail to build
+# the test at all, since `CARGO_BIN_EXE_coord-tui-gtk` wouldn't exist.
+# Gating it here mirrors the `acceptance` stanza: skipped by default,
+# picked up by `.github/workflows/cargo-test.yml`'s `cargo-test-gtk` job's
+# `cargo test --features gtk`.
+[[test]]
+name = "gtk_cli"
+required-features = ["gtk"]
+
 [features]
 default = ["tui"]
 

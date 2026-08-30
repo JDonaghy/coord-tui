@@ -3309,22 +3309,7 @@ impl CoordApp {
         // Wrap the body to the inner width so a long question is never
         // truncated on a narrow screen — one StyledText per rendered row.
         let content_cells = ((dialog_w - 2.0 * padding) / lh).floor().max(1.0) as usize;
-        dialog.body = dialog
-            .body
-            .iter()
-            .flat_map(|line| {
-                let flat: String = line.spans.iter().map(|s| s.text.as_str()).collect();
-                let wrapped = word_wrap(&flat, content_cells);
-                if wrapped.is_empty() {
-                    vec![StyledText::plain("")]
-                } else {
-                    wrapped
-                        .into_iter()
-                        .map(StyledText::plain)
-                        .collect::<Vec<_>>()
-                }
-            })
-            .collect();
+        dialog.body = wrap_dialog_body(&dialog.body, content_cells);
         let body_h = dialog.body.len() as f32 * lh;
         let input_h = if dialog.input.is_some() { lh } else { 0.0 };
         let btn_h = lh;
@@ -7983,6 +7968,42 @@ impl CoordApp {
             }
         }
     }
+}
+
+/// Wrap a dialog body (one [`StyledText`] per *logical* paragraph, which may
+/// itself carry embedded `\n`/`\n\n` line breaks) to `content_cells` columns,
+/// producing one [`StyledText`] per *rendered* row.
+///
+/// #5: `quadraui::text_util::word_wrap` wraps a single logical line with no
+/// embedded `\n` (per its own doc comment) — several dialog bodies (e.g. the
+/// diagnose-fix-stage modal, PTY-panic modal, Gate A and decompose-chat
+/// dispatch-failure modals) build their body text with literal `\n`/`\n\n`
+/// paragraph breaks, so each paragraph is split on `\n` first and each
+/// resulting line is wrapped independently — the same convention `render.rs`
+/// uses for `text_nl`. Without this split, a short body short-circuits
+/// `word_wrap` unchanged (embedded `\n` rendered raw inside one cell/row),
+/// and a longer one can glue a trailing `\n`-adjacent word into the same
+/// "word" as `word_wrap` only splits on `' '`.
+pub(crate) fn wrap_dialog_body(body: &[StyledText], content_cells: usize) -> Vec<StyledText> {
+    body.iter()
+        .flat_map(|line| {
+            let flat: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+            let mut wrapped = Vec::new();
+            for src_line in flat.split('\n') {
+                let lines = word_wrap(src_line, content_cells);
+                if lines.is_empty() {
+                    wrapped.push(String::new());
+                } else {
+                    wrapped.extend(lines);
+                }
+            }
+            if wrapped.is_empty() {
+                vec![StyledText::plain("")]
+            } else {
+                wrapped.into_iter().map(StyledText::plain).collect::<Vec<_>>()
+            }
+        })
+        .collect()
 }
 
 /// #2147: parse the "Set quiet hours…" dialog buffer into `(window,

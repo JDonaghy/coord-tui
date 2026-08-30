@@ -508,16 +508,10 @@ impl CoordApp {
     /// concept of "scroll to keep selection visible" on its own; that was
     /// the root cause of the fix-iteration-1 "no way to reach rows beyond
     /// the first screenful" report.
+    /// #12/A3: the clamp arithmetic is `tree_nav::scroll_to_visible` now.
     pub(crate) fn fix_audit_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
         let sel = self.audit_selected_idx();
-        if sel < self.audit_scroll {
-            self.audit_scroll = sel;
-        } else if sel >= self.audit_scroll + visible {
-            self.audit_scroll = sel + 1 - visible;
-        }
+        crate::app::tree_nav::scroll_to_visible(&mut self.audit_scroll, sel, visible);
     }
 
     /// Minimum width (cells) a column may be dragged down to — keeps a

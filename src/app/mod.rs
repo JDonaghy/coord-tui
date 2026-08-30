@@ -151,6 +151,13 @@ pub(crate) mod pipeline;
 pub(crate) mod milestone_dag;
 pub(crate) mod plans;
 pub(crate) mod audit;
+// #12 (+ seam-audit finding A3): the two dedup seams the Board / Pipeline /
+// Kanban / Terminal / Sessions / Plans trees all route through, instead of
+// each keeping its own copy. `issue_tree` owns the milestone-bucketing and
+// epic parent→child rules; `tree_nav` owns the scroll-follow and click-row
+// arithmetic (by delegating it to quadraui).
+pub(crate) mod issue_tree;
+pub(crate) mod tree_nav;
 // #1741: Reports panel + the reusable `MultiSectionView` routing it is the
 // first consumer of (epic #571's panel consolidation is the next).
 pub(crate) mod msv;
@@ -6091,52 +6098,19 @@ impl CoordApp {
             None => return Vec::new(),
         };
 
-        let mut milestone_map: std::collections::BTreeMap<
-            (i64, String),
-            (String, String, Vec<usize>),
-        > = std::collections::BTreeMap::new();
+        // #12: same bucketing rules as the Pipeline's
+        // `pipeline_milestones_for_issues`, now stated once in `issue_tree`.
+        // The `board_search` gate stays here — it is Board policy, not a
+        // bucketing rule (and `apply_search` is a caller's choice).
+        let rows = flat
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| !apply_search || self.board_search.matches(g.issue_number, &g.issue_title));
 
-        for (flat_idx, g) in flat.iter().enumerate() {
-            if apply_search && !self.board_search.matches(g.issue_number, &g.issue_title) {
-                continue;
-            }
-            match g.milestone_number {
-                Some(n) => {
-                    let title = g.milestone_title.clone().unwrap_or_default();
-                    let key = n.to_string();
-                    let sort_key = (n, title.clone());
-                    milestone_map
-                        .entry(sort_key)
-                        .or_insert_with(|| (key, title, Vec::new()))
-                        .2
-                        .push(flat_idx);
-                }
-                None => {
-                    let sort_key = (i64::MAX, String::new());
-                    milestone_map
-                        .entry(sort_key)
-                        .or_insert_with(|| {
-                            (
-                                "no-milestone".to_string(),
-                                "No milestone".to_string(),
-                                Vec::new(),
-                            )
-                        })
-                        .2
-                        .push(flat_idx);
-                }
-            }
-        }
-
-        milestone_map
-            .into_values()
-            .filter(|(_, _, idxs)| !idxs.is_empty())
-            .map(|(key, display_title, idxs)| {
-                let group_issues: Vec<(usize, &IssueGroup)> =
-                    idxs.into_iter().map(|fi| (fi, &flat[fi])).collect();
-                (key, display_title, group_issues)
-            })
-            .collect()
+        issue_tree::group_by_milestone(rows, |(_, g)| {
+            g.milestone_number
+                .map(|n| (n, g.milestone_title.clone().unwrap_or_default()))
+        })
     }
 
     /// #1270: every child issue nested under some epic anywhere on the
@@ -6151,34 +6125,33 @@ impl CoordApp {
     /// still suppress a child that DOES match the search, which would
     /// otherwise vanish from the sidebar entirely (nested under a row that
     /// isn't rendered, and skipped as "already nested" everywhere else).
+    ///
+    /// #12: the walk is `issue_tree::nested_children`, shared with the
+    /// Pipeline and Kanban copies; only the `board_search` gate on the parent
+    /// row is Board-specific.
     fn board_globally_nested_children(&self) -> std::collections::HashSet<(String, u64)> {
-        let mut nested = std::collections::HashSet::new();
-        for (repo, issues) in &self.board_issues_cache {
-            for g in issues {
-                if !self.board_search.matches(g.issue_number, &g.issue_title) {
-                    continue;
-                }
-                let Some(children) = self.epic_children_for_repo_issue(repo, g.issue_number)
-                else {
-                    continue;
-                };
-                for child in children {
-                    nested.insert((repo.clone(), child.number));
-                }
-            }
-        }
-        nested
+        let rows = self.board_issues_cache.iter().flat_map(|(repo, issues)| {
+            issues
+                .iter()
+                .filter(|g| self.board_search.matches(g.issue_number, &g.issue_title))
+                .map(move |g| (repo.as_str(), g.issue_number))
+        });
+        issue_tree::nested_children(rows, |repo, number| {
+            self.epic_children_for_repo_issue(repo, number)
+        })
     }
 
     /// #1270: true when `g` (in `repo`) is nested under some epic elsewhere
     /// on the Board (see `board_globally_nested_children`) and should
     /// therefore be skipped when emitting a flat top-level row.
+    ///
+    /// #12: thin adapter over `issue_tree::is_nested`.
     fn board_is_globally_nested(
         repo: &str,
         g: &IssueGroup,
         globally_nested: &std::collections::HashSet<(String, u64)>,
     ) -> bool {
-        globally_nested.contains(&(repo.to_string(), g.issue_number))
+        issue_tree::is_nested(repo, g.issue_number, globally_nested)
     }
 
     /// #1270: maps every child issue number (repo-scoped) to its parent
@@ -6189,20 +6162,17 @@ impl CoordApp {
     /// (`build_kanban_model` doesn't filter today), so filtering here would
     /// just silently drop attribution with nothing else picking up the
     /// slack.
+    ///
+    /// #12: same `issue_tree::epic_child_parents` walk as the suppression
+    /// sets above — the *only* difference between them is the row stream fed
+    /// in, which is exactly what the comment above says it should be.
     fn board_epic_child_parents(&self) -> std::collections::HashMap<(String, u64), u64> {
-        let mut parents = std::collections::HashMap::new();
-        for (repo, issues) in &self.board_issues_cache {
-            for g in issues {
-                let Some(children) = self.epic_children_for_repo_issue(repo, g.issue_number)
-                else {
-                    continue;
-                };
-                for child in children {
-                    parents.insert((repo.clone(), child.number), g.issue_number);
-                }
-            }
-        }
-        parents
+        let rows = self.board_issues_cache.iter().flat_map(|(repo, issues)| {
+            issues.iter().map(move |g| (repo.as_str(), g.issue_number))
+        });
+        issue_tree::epic_child_parents(rows, |repo, number| {
+            self.epic_children_for_repo_issue(repo, number)
+        })
     }
 
     /// Rebuild the SidebarSystem from current data.
@@ -8178,15 +8148,13 @@ impl CoordApp {
     }
 
     /// Clamp `machine_scroll` so that `machine_sel` is inside the visible window.
+    ///
+    /// #12/A3: the clamp itself lives in `tree_nav::scroll_to_visible` (which
+    /// defers to quadraui) — this method only names which offset and which
+    /// selection index the Machines panel means.
     fn fix_machine_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
-        if self.machine_sel < self.machine_scroll {
-            self.machine_scroll = self.machine_sel;
-        } else if self.machine_sel >= self.machine_scroll + visible {
-            self.machine_scroll = self.machine_sel + 1 - visible;
-        }
+        let sel = self.machine_sel;
+        tree_nav::scroll_to_visible(&mut self.machine_scroll, sel, visible);
     }
 
     /// Keep the selected merge-queue entry inside the visible window.
@@ -8198,17 +8166,11 @@ impl CoordApp {
     /// `layout()` skips rows above `scroll_offset`, so `merge_queue_scroll`
     /// must track the display-index of the selected entry (accounting for
     /// milestone-group header rows that precede it in the items array).
-    /// Same structural pattern as `fix_machine_scroll`.
+    /// Same structural pattern as `fix_machine_scroll` — and, since #12/A3,
+    /// literally the same clamp: `tree_nav::scroll_to_visible`.
     fn fix_merge_queue_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
         let sel = self.merge_queue_display_idx_for_sel();
-        if sel < self.merge_queue_scroll {
-            self.merge_queue_scroll = sel;
-        } else if sel >= self.merge_queue_scroll + visible {
-            self.merge_queue_scroll = sel + 1 - visible;
-        }
+        tree_nav::scroll_to_visible(&mut self.merge_queue_scroll, sel, visible);
     }
 
     /// Return the display-list index for the currently selected merge-queue

@@ -2120,11 +2120,8 @@ impl CoordApp {
             .queue_table_visible_rows()
             .unwrap_or(fallback_visible)
             .max(1);
-        if self.queue_sel < self.queue_scroll {
-            self.queue_scroll = self.queue_sel;
-        } else if self.queue_sel >= self.queue_scroll + visible {
-            self.queue_scroll = self.queue_sel + 1 - visible;
-        }
+        let sel = self.queue_sel;
+        crate::app::tree_nav::scroll_to_visible(&mut self.queue_scroll, sel, visible);
     }
 
     /// The right-click target for the selected grid row.

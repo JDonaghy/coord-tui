@@ -3185,42 +3185,45 @@ impl CoordApp {
     /// contribute its children to this suppression set, hiding a child that
     /// *does* match the query (or that lost its only visible parent) with
     /// nothing left to render it nested. See review findings #1/#2 on #1253.
+    ///
+    /// #12: the *walk* (parent → child, repo-scoped) is
+    /// `issue_tree::nested_children`, shared with the Board and Kanban
+    /// copies. What stays Pipeline-specific — deliberately — is the filter
+    /// above: only the Pipeline honours `pipeline_dismissed`, so only the
+    /// Pipeline's row stream applies it.
     pub(crate) fn pipeline_globally_nested_children(&self) -> std::collections::HashSet<(String, u64)> {
-        let mut nested = std::collections::HashSet::new();
-        for issue in &self.pipeline_issues {
-            let Some(repo_name) = issue.coord_repo.as_ref() else {
-                continue;
-            };
+        let rows = self.pipeline_issues.iter().filter_map(|issue| {
+            let repo_name = issue.coord_repo.as_deref()?;
             if self
                 .pipeline_dismissed
                 .contains(&(issue.repo_slug.clone(), issue.number))
             {
-                continue;
+                return None;
             }
             if !self.pipeline_search.matches(issue.number, &issue.title) {
-                continue;
+                return None;
             }
-            let Some(children) = self.epic_children_for(issue) else {
-                continue;
-            };
-            for child in children {
-                nested.insert((repo_name.clone(), child.number));
-            }
-        }
-        nested
+            Some((repo_name, issue.number))
+        });
+        issue_tree::nested_children(rows, |repo, number| {
+            self.epic_children_for_repo_issue(repo, number)
+        })
     }
 
     /// #1253: true when `issue` is nested under some epic elsewhere in the
     /// pipeline (see `pipeline_globally_nested_children`) and should
     /// therefore be skipped when emitting a flat top-level row.
+    ///
+    /// #12: thin adapter over `issue_tree::is_nested` — the Pipeline part is
+    /// only "an untracked row (no `coord_repo`) can never be nested".
     fn is_globally_nested(
         issue: &PipelineIssue,
         globally_nested: &std::collections::HashSet<(String, u64)>,
     ) -> bool {
         issue
             .coord_repo
-            .as_ref()
-            .map(|r| globally_nested.contains(&(r.clone(), issue.number)))
+            .as_deref()
+            .map(|r| issue_tree::is_nested(r, issue.number, globally_nested))
             .unwrap_or(false)
     }
 
@@ -3427,44 +3430,13 @@ impl CoordApp {
         &self,
         issue_idxs: &[usize],
     ) -> Vec<(String, String, Vec<usize>)> {
-        let mut milestone_map: std::collections::BTreeMap<
-            (i64, String),
-            (String, String, Vec<usize>),
-        > = std::collections::BTreeMap::new();
-
-        for &idx in issue_idxs {
-            let issue = &self.pipeline_issues[idx];
-            match self.pipeline_issue_milestone(issue) {
-                Some((n, title)) => {
-                    let key = n.to_string();
-                    let sort_key = (n, title.clone());
-                    milestone_map
-                        .entry(sort_key)
-                        .or_insert_with(|| (key, title, Vec::new()))
-                        .2
-                        .push(idx);
-                }
-                None => {
-                    let sort_key = (i64::MAX, String::new());
-                    milestone_map
-                        .entry(sort_key)
-                        .or_insert_with(|| {
-                            (
-                                "no-milestone".to_string(),
-                                "No milestone".to_string(),
-                                Vec::new(),
-                            )
-                        })
-                        .2
-                        .push(idx);
-                }
-            }
-        }
-
-        milestone_map
-            .into_values()
-            .filter(|(_, _, idxs)| !idxs.is_empty())
-            .collect()
+        // #12: bucketing order, the `No milestone` fallback and its
+        // sinks-to-the-bottom sort key live once, in `issue_tree`, shared with
+        // the Board's `board_milestones_for_repo`. Only "how do I read a
+        // milestone off *my* row type" is left here.
+        issue_tree::group_by_milestone(issue_idxs.iter().copied(), |&idx| {
+            self.pipeline_issue_milestone(&self.pipeline_issues[idx])
+        })
     }
 
     /// Returns a map from GitHub repo slug (`owner/name`) to the count of

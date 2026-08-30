@@ -6118,12 +6118,20 @@ impl CoordApp {
             // uses flat pixel-row math rather than a `SidebarEvent`. No
             // title row (unlike Machines' `ListView.title`), so row 0 maps
             // directly to the first tree row.
+            //
+            // #12/A3: the pixel→row arithmetic itself is
+            // `tree_nav::row_at_y`, shared with the Sessions and Plans trees
+            // below (it was copied three times).
             SidebarView::Terminal => {
-                if pos.y < sidebar_b.y {
-                    return false;
+                match crate::app::tree_nav::row_at_y(
+                    pos.y,
+                    sidebar_b.y,
+                    lh,
+                    self.terminal_tree_scroll,
+                ) {
+                    Some(row) => self.terminal_tree_click_row(row),
+                    None => false,
                 }
-                let row = ((pos.y - sidebar_b.y) / lh).floor() as usize + self.terminal_tree_scroll;
-                self.terminal_tree_click_row(row)
             }
             SidebarView::Pipeline => {
                 let prev = self.pipeline_sel;
@@ -6363,22 +6371,26 @@ impl CoordApp {
             // `SidebarEvent`. No title row, so row 0 maps directly to the
             // first tree row.
             SidebarView::Plans => {
-                if pos.y < sidebar_b.y {
-                    return false;
+                match crate::app::tree_nav::row_at_y(pos.y, sidebar_b.y, lh, self.plans_tree_scroll)
+                {
+                    Some(row) => self.plans_tree_click_row(row),
+                    None => false,
                 }
-                let row = ((pos.y - sidebar_b.y) / lh).floor() as usize + self.plans_tree_scroll;
-                self.plans_tree_click_row(row)
             }
             // #1032: the Sessions-view tree is a raw `TreeView` (not
             // `SidebarSystem`), so — like Terminal above — click dispatch
             // uses flat pixel-row math rather than a `SidebarEvent`. No
             // title row, so row 0 maps directly to the first tree row.
             SidebarView::Sessions => {
-                if pos.y < sidebar_b.y {
-                    return false;
+                match crate::app::tree_nav::row_at_y(
+                    pos.y,
+                    sidebar_b.y,
+                    lh,
+                    self.sessions_tree_scroll,
+                ) {
+                    Some(row) => self.sessions_tree_click_row(row),
+                    None => false,
                 }
-                let row = ((pos.y - sidebar_b.y) / lh).floor() as usize + self.sessions_tree_scroll;
-                self.sessions_tree_click_row(row)
             }
             // #1039: Audit sidebar is a placeholder (count + badge only);
             // the entry list lives in the main panel (`mouse_main_click`).

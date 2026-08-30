@@ -57808,3 +57808,115 @@ Milestone tracking issue.
              over the left pane's content (found at column {col}):\n{screen}"
         );
     }
+
+    // ── #2900: the generated WRITE client (`types::generated_requests`) ──────
+
+    /// The `PATCH /issue/{repo}/{n}` body distinguishes three states per
+    /// field, and the distinction is the whole point of the generated write
+    /// client: `None` omits the key (leave the value alone), `Some(None)`
+    /// sends an explicit `null` (clear it), `Some(Some(v))` sets it.
+    ///
+    /// Hand-built `json!({...})` literals could not express "omit" without a
+    /// per-field `if let`, which is how a drifted write silently records the
+    /// wrong thing (unlike a drifted read, which blanks a panel loudly). This
+    /// asserts the serialized bytes, so a regeneration that dropped the
+    /// `skip_serializing_if` fails here rather than in production.
+    #[test]
+    fn issue_patch_request_omits_absent_fields_but_sends_explicit_null() {
+        use crate::app::types::generated_requests::IssuePatchRequest;
+
+        let req = IssuePatchRequest {
+            title: Some(Some("new title".to_string())),
+            // Explicit clear — must reach the wire as `null`.
+            milestone: Some(None),
+            // Everything else left absent — must not appear at all.
+            ..Default::default()
+        };
+        let body = serde_json::to_value(&req).expect("serializes");
+        let obj = body.as_object().expect("a JSON object");
+
+        assert_eq!(
+            obj.get("title").and_then(|v| v.as_str()),
+            Some("new title"),
+            "#2900: `Some(Some(v))` sets the field:\n{body}"
+        );
+        assert_eq!(
+            obj.get("milestone"),
+            Some(&serde_json::Value::Null),
+            "#2900: `Some(None)` must send an EXPLICIT null (clear), not omit \
+             the key — an omitted `milestone` means 'leave it alone':\n{body}"
+        );
+        assert!(
+            !obj.contains_key("body")
+                && !obj.contains_key("add_labels")
+                && !obj.contains_key("state"),
+            "#2900: `None` must OMIT the key entirely — a null here would \
+             clear a field the caller never touched:\n{body}"
+        );
+    }
+
+    /// #1943's header asymmetry, as the generated client encodes it: the
+    /// resource-shaped route carries `X-Coord-Schema`, the verb routes must
+    /// not (their handlers read an absent header as "today's shape", which is
+    /// what keeps an un-migrated call working unchanged). Sending the header
+    /// on a verb route, or dropping it from the resource route, is a wire
+    /// break the compiler cannot see.
+    #[test]
+    fn generated_request_routes_carry_the_right_schema_header() {
+        use crate::app::types::generated_requests::{
+            IssuePatchRequest, IssueUpsertRequest, TestVerdictRequest,
+        };
+
+        assert_eq!(
+            IssuePatchRequest::SCHEMA_HEADER,
+            Some(1),
+            "#1943: the resource-shaped PATCH route sends X-Coord-Schema"
+        );
+        assert_eq!(
+            IssuePatchRequest::METHOD,
+            "PATCH",
+            "#2900: method comes from the daemon's own route declaration"
+        );
+        assert_eq!(
+            IssuePatchRequest::path("code-coordinator", 2900),
+            "/issue/code-coordinator/2900",
+            "#2900: path params interpolate into the daemon's route template"
+        );
+
+        assert_eq!(
+            TestVerdictRequest::SCHEMA_HEADER,
+            None,
+            "#1943: verb routes send NO X-Coord-Schema header"
+        );
+        assert_eq!(TestVerdictRequest::path(), "/test-verdict");
+        assert_eq!(IssueUpsertRequest::SCHEMA_HEADER, None);
+        assert_eq!(IssueUpsertRequest::path(), "/issue-upsert");
+    }
+
+    /// A verb-route body serializes its `None` fields as explicit `null`s —
+    /// byte-identical to the hand-built `json!` literal each one replaces, so
+    /// migrating a call site to the generated type is not itself a wire
+    /// change. (Contrast the PATCH route above, where absent ≠ null.)
+    #[test]
+    fn verb_route_request_serializes_none_as_explicit_null() {
+        use crate::app::types::generated_requests::TestVerdictRequest;
+
+        let req = TestVerdictRequest {
+            assignment_id: "a1".to_string(),
+            test_state: "pass".to_string(),
+            ..Default::default()
+        };
+        let body = serde_json::to_value(&req).expect("serializes");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "assignment_id": "a1",
+                "test_state": "pass",
+                "test_reason": null,
+                "smoke_test": null,
+                "smoke_test_reason": null,
+            }),
+            "#2900: a verb-route body must match the hand-built json! literal \
+             it replaces, nulls included"
+        );
+    }

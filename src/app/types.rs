@@ -349,6 +349,15 @@ impl SidebarView {
 mod generated;
 pub use generated::Assignment;
 
+/// #2900: the write half of the generated wire contract — request/response
+/// DTOs for every route coord-tui POSTs or PATCHes, emitted by the same
+/// `scripts/codegen.py --rust` invocation that writes `generated.rs` and
+/// byte-compared by `.github/workflows/codegen-drift.yml`. Declared here so
+/// the compiler type-checks it; call sites still hand-build their bodies and
+/// are migrated to these types one endpoint at a time, so every item inside
+/// carries `#[allow(dead_code)]` until then.
+pub(crate) mod generated_requests;
+
 /// Deserialize a boolean the daemon may send as a SQLite-style integer (0/1)
 /// instead of a JSON bool. Accepts bool, int, or null (→ false). One mistyped
 /// boolean would otherwise fail the whole `BoardPayload` parse and blank the

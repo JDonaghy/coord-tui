@@ -30866,7 +30866,7 @@
         assert_eq!(badge_6.unwrap().fg, Some(amber), "depth 6 must be amber");
     }
 
-    // ── #541: issue fuzzy finder ──────────────────────────────────────────────
+    // ── #541 / #16: issue fuzzy finder ──────────────────────────────────────
     //
     // #5: `fuzzy_score` moved from a local `format.rs` clone
     // (`fuzzy_score(query, haystack) -> Option<(u32, Vec<usize>)>`, always
@@ -30875,11 +30875,22 @@
     // Option<(i32, Vec<usize>)>` — argument order and score type both
     // flipped, `positions` are now *byte* offsets, and matching is
     // case-sensitive by design (its doc comment: callers that want
-    // case-insensitive matching lowercase both sides first). The three call
-    // sites (`finder_matches`, `filter_doc_tab_picker_rows`,
-    // `styled_match_spans`) all lowercase both sides to keep the finder's
-    // prior case-insensitive behaviour — see `finder_matches_returns_correct_issues`
-    // below for that composed, case-insensitive behaviour end to end.
+    // case-insensitive matching lowercase both sides first). `finder_matches`
+    // and `filter_doc_tab_picker_rows` both lowercase both sides to keep the
+    // finder's prior case-insensitive behaviour — see
+    // `finder_matches_returns_correct_issues` below for that composed,
+    // case-insensitive behaviour end to end.
+    //
+    // #16: the finder itself now renders on quadraui's shipped `Palette`
+    // primitive (`DualModePaletteController`) instead of a hand-rolled
+    // `IssueFinder` state machine — its own cursor/selection/scroll
+    // book-keeping (and the tests that exercised it directly, e.g. the old
+    // `finder_selection_clamped_after_query_change`) are gone with it;
+    // `DualModePaletteController`'s own up/down-clamp behaviour is already
+    // covered upstream (quadraui's `dual_mode_palette` tests). What remains
+    // worth testing here is the app-specific glue: `finder_matches` (scoring
+    // + `match_positions` positions) and `confirm_issue_finder`'s Board vs.
+    // Pipeline navigation.
 
     #[test]
     fn quadraui_fuzzy_score_empty_query_always_matches() {
@@ -30907,29 +30918,6 @@
         let (score, positions) = quadraui::text_util::fuzzy_score("anything", "").unwrap();
         assert_eq!(score, 0);
         assert!(positions.is_empty());
-    }
-
-    /// #5: `styled_match_spans` now lowercases both sides before calling
-    /// `quadraui::text_util::fuzzy_score` (case-insensitive, matching the
-    /// finder's prior behaviour) and switched from `text.chars().enumerate()`
-    /// (char indices) to `text.char_indices()` (byte offsets) to match the
-    /// byte-offset `positions` quadraui's `fuzzy_score` now returns. Confirm
-    /// a lower-case query still highlights the matched characters of a
-    /// title-cased string, split into exactly the matched/unmatched spans.
-    #[test]
-    fn styled_match_spans_highlights_case_insensitive_match() {
-        let normal_fg = Color::rgb(200, 200, 210);
-        let match_fg = Color::rgb(255, 200, 80);
-        let spans = styled_match_spans("fix", "Fix login", normal_fg, match_fg);
-        // "Fix" (case-insensitively) is a contiguous prefix match, so the
-        // first span should be the matched "Fix" in match_fg, followed by
-        // the unmatched " login" in normal_fg.
-        let rebuilt: String = spans.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(rebuilt, "Fix login", "spans must reconstruct the original text");
-        assert_eq!(spans[0].text, "Fix");
-        assert_eq!(spans[0].fg, Some(match_fg));
-        assert_eq!(spans[1].text, " login");
-        assert_eq!(spans[1].fg, Some(normal_fg));
     }
 
     #[test]
@@ -31002,19 +30990,68 @@
         assert_eq!(matches[0].1, 7);
     }
 
+    /// #16: `finder_matches`'s per-match byte-offset `positions` must line
+    /// up with `issue_finder_items`'s rendered `"#<number> <title>"` text
+    /// unchanged (no remap) — the whole point of scoring against the exact
+    /// same haystack `issue_finder_items` renders.
     #[test]
-    fn finder_selection_clamped_after_query_change() {
-        // After typing a query that returns fewer results than the current
-        // selected_idx, move_down should clamp at the last valid index.
-        let mut f = IssueFinder::default();
-        f.selected_idx = 0;
-        // With 3 matches, move down twice.
-        f.move_down(3);
-        f.move_down(3);
-        assert_eq!(f.selected_idx, 2);
-        // Now restrict matches to 1; move_down should clamp.
-        f.move_down(1);
-        assert_eq!(f.selected_idx, 0, "clamped to 0 when max=1");
+    fn finder_matches_positions_line_up_with_rendered_item_text() {
+        let mut app = make_app_default();
+        app.data.open_issues = vec![OpenIssue {
+            repo_name: "repo-a".to_string(),
+            number: 42,
+            title: "Add telescope fuzzy finder".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: "open".to_string(),
+            milestone_number: None,
+            milestone_title: None,
+            body_truncated: false,
+            body_len: None,
+            synced_at: None,
+        }];
+        let matches = app.finder_matches("telescope");
+        assert_eq!(matches.len(), 1);
+        let (_, number, title, positions) = &matches[0];
+        assert!(!positions.is_empty(), "a non-empty query must produce match positions");
+        let rendered = format!("#{number} {title}");
+        for &p in positions {
+            assert!(p < rendered.len(), "position {p} out of bounds for {rendered:?}");
+        }
+
+        let items = app.issue_finder_items("telescope");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].match_positions, *positions);
+        let item_text: String = items[0].text.spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(item_text, rendered);
+        assert_eq!(
+            items[0].detail.as_ref().unwrap().spans[0].text,
+            "repo-a",
+            "repo name goes in `detail`, rendered right-aligned by the Palette primitive"
+        );
+    }
+
+    /// #16: an empty query must produce no highlighting — `PaletteItem::
+    /// match_positions`'s own "empty means no highlighting" convention.
+    #[test]
+    fn issue_finder_items_empty_query_has_no_match_positions() {
+        let mut app = make_app_default();
+        app.data.open_issues = vec![OpenIssue {
+            repo_name: "repo-a".to_string(),
+            number: 42,
+            title: "Add telescope fuzzy finder".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: "open".to_string(),
+            milestone_number: None,
+            milestone_title: None,
+            body_truncated: false,
+            body_len: None,
+            synced_at: None,
+        }];
+        let items = app.issue_finder_items("");
+        assert_eq!(items.len(), 1);
+        assert!(items[0].match_positions.is_empty());
     }
 
     #[test]
@@ -31036,13 +31073,14 @@
             synced_at: None,
         }];
         app.rebuild_board_sidebar();
-        app.issue_finder = Some(IssueFinder {
-            query: "7".to_string(),
-            cursor: 1,
-            selected_idx: 0,
-        });
-        app.confirm_issue_finder();
-        assert!(app.issue_finder.is_none(), "finder should be closed after confirm");
+        app.open_issue_finder();
+        // #16: `confirm_issue_finder` no longer clears `issue_finder` itself
+        // — `events.rs`'s dispatch already `.take()`s it before calling in
+        // (mirrors `confirm_doc_tab_picker`'s contract), so simulate that
+        // here rather than asserting a behaviour this function no longer
+        // owns.
+        app.issue_finder = None;
+        app.confirm_issue_finder(0, "7");
         assert_eq!(
             app.active_view,
             SidebarView::Board,
@@ -31083,18 +31121,55 @@
             body_len: None,
         }];
         app.rebuild_pipeline_sidebar(None);
-        app.issue_finder = Some(IssueFinder {
-            query: "telescope".to_string(),
-            cursor: 9,
-            selected_idx: 0,
-        });
-        app.confirm_issue_finder();
-        assert!(app.issue_finder.is_none(), "finder should be closed after confirm");
+        app.open_issue_finder();
+        // #16: see the matching comment in
+        // `finder_confirm_navigates_to_board_when_not_in_pipeline`.
+        app.issue_finder = None;
+        app.confirm_issue_finder(0, "telescope");
         assert_eq!(
             app.active_view,
             SidebarView::Pipeline,
             "should switch to Pipeline when issue carries a tracked label"
         );
+    }
+
+    /// #16: opening the finder must seed it from every open issue (empty
+    /// query) — the `DualModePaletteController` replacing `IssueFinder`
+    /// starts life with an explicit item list, unlike the old struct's
+    /// implicit "recompute from `data.open_issues` every render" behaviour.
+    #[test]
+    fn open_issue_finder_seeds_unfiltered_items() {
+        let mut app = make_app_default();
+        app.data.open_issues = vec![
+            OpenIssue {
+                repo_name: "repo-a".to_string(),
+                number: 1,
+                title: "First".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: "open".to_string(),
+                milestone_number: None,
+                milestone_title: None,
+                body_truncated: false,
+                body_len: None,
+                synced_at: None,
+            },
+            OpenIssue {
+                repo_name: "repo-b".to_string(),
+                number: 2,
+                title: "Second".to_string(),
+                body: String::new(),
+                labels: Vec::new(),
+                state: "open".to_string(),
+                milestone_number: None,
+                milestone_title: None,
+                body_truncated: false,
+                body_len: None,
+                synced_at: None,
+            },
+        ];
+        app.open_issue_finder();
+        assert!(app.issue_finder.is_some());
     }
 
     // ── #597: vt100 panic isolation ──────────────────────────────────────────
@@ -56354,6 +56429,132 @@ Milestone tracking issue.
                 && !driver.screen_contains("#102 Auth token refresh bug"),
             "#2642: …never the OTHER pane's tabs:\n{}",
             driver.screen()
+        );
+    }
+
+    // ── #16: Ctrl+P issue finder, rebuilt on quadraui's `Palette` ─────────
+    //
+    // Black-box coverage for the finder's migration off the hand-rolled
+    // `IssueFinder`/`render_issue_finder` onto `DualModePaletteController` —
+    // same "open, type to filter, Enter activates, Esc cancels" shape the
+    // Ctrl+E doc-tab picker's own tests just above exercise, since both now
+    // share the identical primitive.
+
+    fn mk_open_issue(repo: &str, number: u64, title: &str) -> OpenIssue {
+        OpenIssue {
+            repo_name: repo.to_string(),
+            number,
+            title: title.to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: "open".to_string(),
+            milestone_number: None,
+            milestone_title: None,
+            body_truncated: false,
+            body_len: None,
+            synced_at: None,
+        }
+    }
+
+    /// End to end: Ctrl+P opens the finder listing every open issue, typing
+    /// filters it down to a match, and Enter jumps to it — landing on the
+    /// Board view (the issue carries no tracked label, so
+    /// `confirm_issue_finder` takes the Board path).
+    #[test]
+    fn ctrl_p_finder_filters_and_enter_jumps_to_the_matching_issue() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = CoordApp {
+            data: BoardData {
+                open_issues: vec![
+                    mk_open_issue("repo-a", 101, "Fix login race timeout"),
+                    mk_open_issue("repo-a", 102, "Auth token refresh bug"),
+                    mk_open_issue("repo-b", 103, "Race condition in poller"),
+                ],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.rebuild_board_sidebar();
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        driver.render();
+
+        driver.ctrl_char('p');
+        driver.render();
+        assert!(
+            driver.screen_contains("#101 Fix login race timeout"),
+            "#16: Ctrl+P opens a picker listing every open issue:\n{}",
+            driver.screen()
+        );
+        assert!(driver.screen_contains("#102 Auth token refresh bug"));
+        assert!(driver.screen_contains("#103 Race condition in poller"));
+
+        for ch in "102".chars() {
+            driver.type_char(ch);
+        }
+        driver.render();
+        assert!(
+            driver.screen_contains("#102 Auth token refresh bug"),
+            "#16: typing filters the list down to the matching row:\n{}",
+            driver.screen()
+        );
+        assert!(
+            !driver.screen_contains("#101 Fix login race timeout")
+                && !driver.screen_contains("#103 Race condition in poller"),
+            "…and hides every non-matching row:\n{}",
+            driver.screen()
+        );
+
+        driver.press_named(quadraui::NamedKey::Enter);
+        driver.render();
+        assert!(
+            !driver.screen_contains("Find issue"),
+            "#16: Enter closes the finder:\n{}",
+            driver.screen()
+        );
+        assert!(
+            driver.screen_contains("Auth token refresh bug"),
+            "#16: …and lands on issue #102's detail:\n{}",
+            driver.screen()
+        );
+    }
+
+    /// Esc cancels the finder with no navigation — mirrors the doc-tab
+    /// picker's own `typing_in_the_doc_tab_picker_filters_and_esc_cancels_with_no_change`.
+    #[test]
+    fn ctrl_p_finder_esc_cancels_with_no_navigation() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = CoordApp {
+            data: BoardData {
+                open_issues: vec![mk_open_issue("repo-a", 101, "Fix login race timeout")],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.rebuild_board_sidebar();
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        driver.render();
+        let screen_before = driver.screen();
+
+        driver.ctrl_char('p');
+        driver.render();
+        assert!(driver.screen_contains("#101 Fix login race timeout"));
+
+        driver.press_named(quadraui::NamedKey::Escape);
+        driver.render();
+        assert!(
+            !driver.screen_contains("Find issue"),
+            "#16: Esc closes the finder:\n{}",
+            driver.screen()
+        );
+        assert_eq!(
+            driver.screen(),
+            screen_before,
+            "#16: Esc cancels with no navigation — the screen is byte-identical \
+             to before the finder opened"
         );
     }
 

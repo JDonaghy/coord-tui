@@ -362,9 +362,11 @@ impl SidebarFilter {
 // ─── #2642: Ctrl+E doc-tab open-tabs picker ────────────────────────────────────
 
 /// State for the Ctrl+E "open tabs" quick-pick — composes quadraui's
-/// `Palette` primitive (via `DualModePaletteController`, the same wrapper
-/// `command_palette` already drives, see `plans.rs`) rather than a
-/// hand-rolled overlay like [`IssueFinder`] above.
+/// `Palette` primitive via `DualModePaletteController`, the same wrapper
+/// `command_palette` (see `plans.rs`) and, since #16, the Ctrl+P issue
+/// finder (`CoordApp::issue_finder` below) drive too — one shared modal
+/// primitive behind every quick-pick overlay in this app instead of a
+/// hand-rolled `ListView` box per picker.
 ///
 /// Supersedes the dead `‹`/`›` overflow markers baked into the Board/
 /// Pipeline doc-tab strip as the way to reach a tab scrolled out of view.
@@ -379,57 +381,6 @@ struct DocTabPickerState {
     /// for Pipeline (`PaneSet` never splits there) — always `0`.
     pane: usize,
     palette: DualModePaletteController,
-}
-
-// ─── Issue fuzzy finder ───────────────────────────────────────────────────────
-
-/// #541: State for the global Telescope-style issue fuzzy-finder overlay.
-///
-/// Opened with Ctrl+P from any view.  The user types to fuzzy-search across
-/// all issues in `data.open_issues`; j/k (or Up/Down) navigates; Enter jumps
-/// to the selected issue (Pipeline if tracked, otherwise Board); Esc closes.
-#[derive(Default)]
-struct IssueFinder {
-    /// Current search query (as-typed, not lowercased).
-    query: String,
-    /// Byte offset of the text cursor inside `query` (on a char boundary).
-    cursor: usize,
-    /// Index of the highlighted result row within the current match list.
-    selected_idx: usize,
-}
-
-impl IssueFinder {
-    /// Insert a printable character at the cursor position.
-    fn insert_char(&mut self, c: char) {
-        self.query.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-        self.selected_idx = 0; // reset selection on every query change
-    }
-
-    /// Delete the character before the cursor (UTF-8 safe).
-    fn backspace(&mut self) {
-        if self.cursor > 0 {
-            let mut prev = self.cursor - 1;
-            while prev > 0 && !self.query.is_char_boundary(prev) {
-                prev -= 1;
-            }
-            self.query.remove(prev);
-            self.cursor = prev;
-            self.selected_idx = 0;
-        }
-    }
-
-    /// Move the highlight down by one row (wraps at the end of `max`).
-    fn move_down(&mut self, max: usize) {
-        if max > 0 {
-            self.selected_idx = (self.selected_idx + 1).min(max - 1);
-        }
-    }
-
-    /// Move the highlight up by one row (clamps at 0).
-    fn move_up(&mut self) {
-        self.selected_idx = self.selected_idx.saturating_sub(1);
-    }
 }
 
 // ─── Detail panel tabs ────────────────────────────────────────────────────────
@@ -1205,65 +1156,6 @@ pub(crate) fn format_age(ts: Option<f64>, now: f64) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
-}
-
-/// #541: Build styled spans for `text` with per-character fuzzy-match highlights.
-///
-/// Characters at positions returned by `quadraui::text_util::fuzzy_score`
-/// (called case-insensitively, see below) are coloured with `match_fg`; all
-/// other characters use `normal_fg`.  Returns a single span in `normal_fg`
-/// when the query is empty, the text is empty, or no subsequence match
-/// exists (fall-back: caller already filtered to matches).
-fn styled_match_spans(
-    query: &str,
-    text: &str,
-    normal_fg: Color,
-    match_fg: Color,
-) -> Vec<StyledSpan> {
-    if query.is_empty() || text.is_empty() {
-        return vec![StyledSpan::with_fg(text, normal_fg)];
-    }
-    // #5: quadraui::text_util::fuzzy_score is case-sensitive by design;
-    // lowercase both sides (its documented convention) to keep this finder's
-    // prior case-insensitive behaviour. `positions` are then byte offsets
-    // into the *lowercased* haystack — ASCII lowercasing is byte-length
-    // preserving, so they line up with `text`'s own byte offsets below for
-    // every haystack this finder sees (issue titles, repo names).
-    let text_lower = text.to_lowercase();
-    let query_lower = query.to_lowercase();
-    let Some((_score, positions)) = quadraui::text_util::fuzzy_score(&text_lower, &query_lower)
-    else {
-        // No match in this sub-string (possible when query matched across
-        // the number+title boundary but not in title alone).  Fall back to
-        // uniform colouring.
-        return vec![StyledSpan::with_fg(text, normal_fg)];
-    };
-    if positions.is_empty() {
-        return vec![StyledSpan::with_fg(text, normal_fg)];
-    }
-    // Build a set of matched byte positions for O(1) lookup.
-    let pos_set: std::collections::HashSet<usize> = positions.into_iter().collect();
-    let mut spans: Vec<StyledSpan> = Vec::new();
-    let mut current = String::new();
-    let mut current_is_match = false;
-    for (i, c) in text.char_indices() {
-        let is_match = pos_set.contains(&i);
-        if is_match != current_is_match && !current.is_empty() {
-            spans.push(StyledSpan::with_fg(
-                std::mem::take(&mut current),
-                if current_is_match { match_fg } else { normal_fg },
-            ));
-        }
-        current_is_match = is_match;
-        current.push(c);
-    }
-    if !current.is_empty() {
-        spans.push(StyledSpan::with_fg(
-            current,
-            if current_is_match { match_fg } else { normal_fg },
-        ));
-    }
-    spans
 }
 
 /// Build a key-value `ListItem` for the detail panel.
@@ -3719,7 +3611,17 @@ pub struct CoordApp {
     /// Active state of the issue fuzzy-finder overlay.  `None` when the
     /// overlay is closed.  Opened with Ctrl+P from any non-PTY view; closed
     /// with Esc or Enter (Enter also navigates to the selected issue).
-    issue_finder: Option<IssueFinder>,
+    ///
+    /// #16: rebuilt on quadraui's shipped `Palette` primitive (via
+    /// `DualModePaletteController`, the same wrapper `command_palette` and
+    /// `doc_tab_picker` already drive) — replaces the former hand-rolled
+    /// `IssueFinder` state + `render_issue_finder`'s hand-drawn `ListView`
+    /// box, deleting ~430 LOC including a copy-pasted `match_fg` theme
+    /// constant that had drifted from `quadraui::theme::Theme::match_fg`
+    /// in name only (same literal, no shared source of truth). See
+    /// `dialogs.rs`'s `finder_matches` / `issue_finder_items` /
+    /// `render_issue_finder` and `events.rs`'s Ctrl+P block.
+    issue_finder: Option<DualModePaletteController>,
 
     // ── #2642: Ctrl+E doc-tab open-tabs picker ────────────────────────────
     /// Active state of the doc-tab quick-pick. `None` when closed. Opened

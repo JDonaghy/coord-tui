@@ -269,6 +269,8 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         pty_pressed_buttons: 0,
         // #464
         terminal_host_sel_dragging: false,
+        // #17
+        left_mouse_down_seen: false,
         // #790
         terminal_copy_mode: false,
         // #207

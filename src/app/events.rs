@@ -4987,6 +4987,10 @@ impl CoordApp {
                 modifiers,
                 ..
             } => {
+                // #17: mark that a MouseDown for this click cycle actually
+                // arrived, so the MouseUp arm's down-drop-terminal fallback
+                // (below) knows not to re-run — see `left_mouse_down_seen`.
+                self.left_mouse_down_seen = true;
                 let pos = *position;
                 let lh = backend.line_height();
                 // #369/#329: an open prompt dialog intercepts all clicks
@@ -5732,25 +5736,33 @@ impl CoordApp {
                 let pos = *position;
                 let btn = *button;
                 // #17 (sibling of quadraui#429, fixed there by
-                // `MenuSystem::handle()` in ebb4ab7): the dialog/context-menu
-                // outside-click-dismiss and item-activation hit-tests below
-                // only ever ran from the `MouseDown` arm above. On a
-                // "down-drop" terminal that swallows MouseDown and delivers
-                // only MouseUp, a click on — or outside — an open dialog or
-                // context menu was never handled at all: the overlay could
-                // be neither activated nor dismissed by mouse. Mirror the
-                // quadraui fix by re-running the same highest-z-order
-                // hit-tests here. On a terminal that delivers both events
-                // normally, MouseDown already consumed and cleared the
-                // dialog/menu by the time this arm runs, so
-                // `handle_dialog_click`/`handle_context_menu_click` see
-                // nothing open, return `None`, and fall through — no double
-                // dispatch.
-                if btn == MouseButton::Left {
-                    if let Some(handled) = self.handle_dialog_click(pos, backend) {
+                // `MenuSystem::handle()` in ebb4ab7): on a "down-drop"
+                // terminal that swallows MouseDown and delivers only
+                // MouseUp, a click outside an open dialog or context menu
+                // was never handled at all — the overlay could never be
+                // dismissed by mouse. `left_mouse_down_seen` (set by the
+                // `MouseDown` arm above, consumed here) tells us whether the
+                // MouseDown for *this* click cycle actually arrived.
+                //
+                // When it did (the normal case), we do NOT re-run any
+                // hit-test here: `MouseDown` may have opened a brand-new
+                // dialog/menu (e.g. a context-menu item that opens a
+                // capture dialog) or deliberately left one open (the #722
+                // blocking-dialog guard), and re-hitting that fresh layout
+                // at this same click's coordinates would dismiss or
+                // re-activate it a second time for one physical click (see
+                // the #17 review). quadraui's own `MenuSystem::handle()`
+                // fix has the same restraint — it never re-runs item/button
+                // activation on `MouseUp`, only the outside-everything
+                // dismiss check — so we only run that same narrow check,
+                // and only for the down-drop case where MouseDown never
+                // ran at all.
+                let had_mouse_down = std::mem::take(&mut self.left_mouse_down_seen);
+                if btn == MouseButton::Left && !had_mouse_down {
+                    if let Some(handled) = self.handle_dialog_click_outside_only(pos) {
                         return handled;
                     }
-                    if let Some(handled) = self.handle_context_menu_click(pos, backend) {
+                    if let Some(handled) = self.handle_context_menu_click_outside_only(pos) {
                         return handled;
                     }
                 }

@@ -1600,6 +1600,51 @@ impl CoordApp {
         Some(true)
     }
 
+    /// `MouseUp`-only counterpart to [`Self::handle_context_menu_click`],
+    /// used by the #17 down-drop-terminal fallback. Deliberately narrower
+    /// than the full hit-test: it only replicates the "click landed outside
+    /// every open level" → dismiss branch, mirroring quadraui's own
+    /// `MenuSystem::handle()` MouseUp fix (`ebb4ab7`, #429), which likewise
+    /// never re-runs item activation on `MouseUp` — only the
+    /// outside-everything dismiss check. It must NOT also re-run the
+    /// `Item`/parent-submenu branches: on a terminal that delivers both
+    /// `MouseDown` and `MouseUp` normally, this is only reached when
+    /// `MouseDown` never fired for this click (see the caller), but if it
+    /// *were* also called after a normal `MouseDown` that already activated
+    /// an item (dispatching an action, possibly opening an unrelated
+    /// dialog elsewhere on screen) or opened a submenu, re-hitting this
+    /// same click's coordinates against the freshly-rebuilt layout would
+    /// dismiss that new dialog or re-open the submenu a second time for one
+    /// physical click — the regression the #17 review caught.
+    ///
+    /// Returns `Some(true)` when the click dismissed the menu, `Some(false)`
+    /// when a menu is open but the click landed on one of its levels (swallow,
+    /// no action taken), and `None` when no menu is showing.
+    pub(crate) fn handle_context_menu_click_outside_only(&mut self, pos: Point) -> Option<bool> {
+        if self.pending_context_menu.is_none() {
+            return None;
+        }
+        let stack = self.context_menu_layout.borrow().clone();
+        if stack.is_empty() {
+            return None;
+        }
+
+        // If the click lands inside any open level (an actionable item, an
+        // inert row, or elsewhere within the level's own bounds), leave
+        // everything untouched — matches quadraui's "inside the bar or an
+        // open dropdown level → Ignored".
+        for (_, layout) in stack.iter() {
+            if !matches!(layout.hit_test(pos.x, pos.y), ContextMenuHit::Empty) {
+                return Some(false);
+            }
+        }
+
+        // Outside every open level → dismiss.
+        self.pending_context_menu = None;
+        *self.context_menu_layout.borrow_mut() = Vec::new();
+        Some(true)
+    }
+
     /// Move the keyboard selection within the currently-deepest open menu level,
     /// skipping separators and disabled items.  No-op when no menu is open.
     pub(crate) fn context_menu_move_selection(&mut self, delta: i32) {
@@ -3378,6 +3423,33 @@ impl CoordApp {
                 self.fire_dialog_button(&id_str, backend);
                 Some(true)
             }
+        }
+    }
+
+    /// `MouseUp`-only counterpart to [`Self::handle_dialog_click`], used by
+    /// the #17 down-drop-terminal fallback (a terminal that swallows
+    /// `MouseDown` and delivers only `MouseUp`). Deliberately narrower than
+    /// the full hit-test: it only replicates the "click landed outside the
+    /// dialog" → dismiss branch, mirroring quadraui's own `MenuSystem::
+    /// handle()` MouseUp fix (`ebb4ab7`, #429). It must NOT also replicate
+    /// the `Button`/`Body` branches — on a terminal that delivers both
+    /// `MouseDown` and `MouseUp` normally, this is only reached when
+    /// `MouseDown` never fired for this click (see the caller), but if it
+    /// *were* also called after a normal `MouseDown` that opened or fired a
+    /// button on some dialog, re-running full hit-testing here would
+    /// dismiss the freshly-opened dialog or fire the button a second time
+    /// for one physical click — the regression the #17 review caught.
+    ///
+    /// Returns `Some(true)` when the click dismissed the dialog,
+    /// `Some(false)` when a dialog is open but the click landed on it (swallow,
+    /// no action taken), and `None` when no dialog is showing.
+    pub(crate) fn handle_dialog_click_outside_only(&mut self, pos: Point) -> Option<bool> {
+        let layout = self.dialog_layout.borrow().clone()?;
+        if matches!(layout.hit_test(pos.x, pos.y), DialogHit::Outside) {
+            self.dismiss_prompt_dialog();
+            Some(true)
+        } else {
+            Some(false)
         }
     }
 

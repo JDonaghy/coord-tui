@@ -1,22 +1,18 @@
 name: Release coord-tui binaries
 
 # ┌────────────────────────────────────────────────────────────────────────┐
-# │ #2898 (phase 3 of #2894): THIS FILE BELONGS TO THE coord-tui REPO.     │
+# │ #2898 (phase 3 of #2894) / #2 (post-split): THIS FILE BELONGS TO THE   │
+# │ coord-tui REPO.                                                        │
 # │                                                                        │
-# │ It is staged here at `tui/.github/workflows/` — NOT the repo root's    │
-# │ `.github/workflows/` — deliberately. GitHub only reads workflows from  │
-# │ the root `.github/workflows/`, so while it sits here it is INERT in    │
-# │ code-coordinator: it cannot fire, and it cannot race publish.yml. It   │
-# │ lives inside `tui/` so the #2894 move story carries it across with the │
-# │ crate instead of having to reconstruct it.                             │
+# │ Originally staged at `tui/.github/workflows/` inside code-coordinator  │
+# │ — NOT that repo's root `.github/workflows/` — deliberately, so it      │
+# │ stayed inert there (GitHub only reads workflows from the root) and     │
+# │ could not race publish.yml, while still letting the #2894 move story   │
+# │ carry it across with the crate.                                       │
 # │                                                                        │
-# │ THE MOVE STORY STILL OWES THIS FILE ONE EDIT: every path below is      │
-# │ written for code-coordinator's layout (`tui/Cargo.toml`,               │
-# │ `tui/target/release/...`, `working-directory: tui`). When the crate    │
-# │ becomes the root of its own repo, drop that `tui/` prefix. Left        │
-# │ deliberately unguessed here — re-rooting paths against a repo layout   │
-# │ that does not exist yet is how you ship a workflow that looks right    │
-# │ and builds nothing.                                                    │
+# │ Since the #2899 split, the crate IS the repo root here, so every path  │
+# │ below is rooted at `.` (`Cargo.toml`, `target/release/...`, no         │
+# │ `working-directory:`) — there is no `tui/` prefix left to drop.        │
 # └────────────────────────────────────────────────────────────────────────┘
 #
 # #1239 (PKG-3): coord-tui is the single biggest "offer it to someone else"
@@ -27,11 +23,11 @@ name: Release coord-tui binaries
 # `coord tui update` (coord/tui_release.py) resolves from.
 #
 # Hand-written matrix, not cargo-dist (the issue's preferred option): coord-tui
-# depends on quadraui via a `git`/`rev` dependency (`tui/Cargo.toml`, #1973) —
+# depends on quadraui via a `git`/`rev` dependency (`Cargo.toml`, #1973) —
 # not a crates.io/registry dependency — which cargo-dist does not model, so
 # the fallback named in the issue is what's implemented here. Since #1973,
 # cargo fetches quadraui straight from GitHub at the rev pinned in
-# `tui/Cargo.toml`; there is no sibling checkout to reproduce in CI and
+# `Cargo.toml`; there is no sibling checkout to reproduce in CI and
 # nothing here to keep in sync with that pin — it's read from the one place,
 # the manifest, same as every other dependency.
 #
@@ -182,7 +178,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # #1973: no sibling quadraui checkout to reproduce here any more —
-      # tui/Cargo.toml's `git`/`rev` dependency makes `cargo build` fetch
+      # Cargo.toml's `git`/`rev` dependency makes `cargo build` fetch
       # quadraui straight from GitHub at the pinned rev, same as any other
       # dependency. The release build is reproducible from the tag alone
       # because the manifest checked out at that tag carries the pin.
@@ -190,7 +186,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: tui
+          workspaces: .
           key: release-${{ matrix.target_name }}
 
       - name: Resolve release version
@@ -233,19 +229,18 @@ jobs:
           # nested `name = { version = "...", ... }` dependency specifiers
           # elsewhere in the manifest (those never start a line with
           # "version").
-          sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"$version\"/" tui/Cargo.toml
-          rm tui/Cargo.toml.bak
-          grep '^version' tui/Cargo.toml
+          sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"$version\"/" Cargo.toml
+          rm Cargo.toml.bak
+          grep '^version' Cargo.toml
 
       - name: Build coord-tui (release)
-        working-directory: tui
         run: cargo build --release --bin coord-tui
 
       - name: Verify --version reports the tag version
         shell: bash
         run: |
           version="${{ steps.version.outputs.version }}"
-          out="$(./tui/target/release/coord-tui${{ matrix.bin_ext }} --version)"
+          out="$(./target/release/coord-tui${{ matrix.bin_ext }} --version)"
           echo "coord-tui --version -> $out"
           case "$out" in
             *"$version"*) ;;
@@ -259,7 +254,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "tui/target/release/coord-tui${{ matrix.bin_ext }}" "dist/coord-tui-${{ matrix.target_name }}${{ matrix.bin_ext }}"
+          cp "target/release/coord-tui${{ matrix.bin_ext }}" "dist/coord-tui-${{ matrix.target_name }}${{ matrix.bin_ext }}"
 
       # The asset filename is load-bearing: `coord tui update`
       # (coord/tui_release.py's `asset_filename`) resolves this exact name

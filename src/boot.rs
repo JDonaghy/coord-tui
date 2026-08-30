@@ -168,10 +168,55 @@ mod tests {
         assert!(version_string().starts_with("coord-tui "));
     }
 
+    /// Restores a set of env vars to their pre-test state on drop (even if
+    /// the test panics partway through an assertion), so
+    /// `harden_subprocess_env_sets_all_three_vars` doesn't leak
+    /// `GIT_TERMINAL_PROMPT`/`GIT_SSH_COMMAND`/`SSH_ASKPASS` into the rest of
+    /// the test binary's process — `cargo test` runs tests as threads within
+    /// one process by default, so an unrestored `set_var` here would be
+    /// visible to every other test that runs afterwards.
+    struct EnvVarGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVarGuard {
+        fn capture(names: &[&'static str]) -> Self {
+            Self {
+                saved: names
+                    .iter()
+                    .map(|&name| (name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                // SAFETY: same single-threaded-w.r.t.-this-var-access
+                // reasoning as `harden_subprocess_env` — this guard only
+                // ever touches vars it captured itself, immediately before
+                // this restore, from the test thread that set them.
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn harden_subprocess_env_sets_all_three_vars() {
         // Acceptance criterion: assert the three vars via a unit test on
         // `harden_subprocess_env` rather than by launching a process.
+        //
+        // These three vars are process-global state, so capture and restore
+        // them via `EnvVarGuard` — see its doc comment — instead of leaving
+        // them set for the remainder of the test binary's run.
+        let _guard = EnvVarGuard::capture(&["GIT_TERMINAL_PROMPT", "GIT_SSH_COMMAND", "SSH_ASKPASS"]);
+
         harden_subprocess_env();
         assert_eq!(std::env::var("GIT_TERMINAL_PROMPT").as_deref(), Ok("0"));
         assert_eq!(

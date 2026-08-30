@@ -56610,6 +56610,77 @@ Milestone tracking issue.
         driver
     }
 
+    /// `screen` with the status bar's live refresh clock (`↻ Ns`) collapsed
+    /// to a fixed `↻ Ns`, so two whole-screen snapshots stay comparable
+    /// byte for byte.
+    ///
+    /// #1996, again. `status_bar()` renders the counter as
+    /// `format!(" ↻ {}s ", self.refreshed_at.elapsed().as_secs())` — a wall
+    /// clock — so *every* whole-screen snapshot carries a reading that is
+    /// only stable for as long as the test takes. Two frames that are
+    /// identical in every cell the test is actually about still differ by
+    /// that one character once a wall-second ticks between them, which is
+    /// how `ctrl_w_x_collapses_the_split_back_to_the_pre_split_screen` went
+    /// red on a loaded machine (`↻ 0s` in the pre-split snapshot, `↻ 1s`
+    /// after the split-and-collapse round trip).
+    ///
+    /// `reports_table_region` above dodges the same clock by cropping the
+    /// status bar out of the comparison entirely. The `Ctrl-W` tests can't
+    /// take that escape: the status bar is where the focused-pane indicator
+    /// lives (§4), and "collapsing restores the pre-split screen" is a
+    /// claim about that row too. So normalise the digits and keep every
+    /// other cell — status bar included — exact.
+    ///
+    /// Only the last row is rewritten, because that is where the status bar
+    /// paints; `↻` is also the sidebar's retry icon (`sidebar.rs`) and must
+    /// be left alone up there.
+    fn without_refresh_clock(screen: &str) -> String {
+        let mut rows: Vec<String> = screen.lines().map(str::to_string).collect();
+        let Some(status) = rows.last_mut() else {
+            return screen.to_string();
+        };
+
+        let cells: Vec<char> = status.chars().collect();
+        let width = cells.len();
+        let mut out = String::with_capacity(status.len());
+        let mut i = 0;
+        while i < cells.len() {
+            // The painted segment is `↻ <digits>s`.
+            let digits = if cells[i] == '↻' && cells.get(i + 1) == Some(&' ') {
+                let start = i + 2;
+                let end = start
+                    + cells[start..]
+                        .iter()
+                        .take_while(|c| c.is_ascii_digit())
+                        .count();
+                (end > start && cells.get(end) == Some(&'s')).then_some(end)
+            } else {
+                None
+            };
+            match digits {
+                Some(end) => {
+                    out.push_str("↻ N");
+                    i = end;
+                }
+                None => {
+                    out.push(cells[i]);
+                    i += 1;
+                }
+            }
+        }
+        // `↻ 10s` is one column wider than `↻ 9s`, so collapsing the digit
+        // run shortens the row by however many digits it ate and shifts
+        // everything after it back into alignment. The grid is fixed-width,
+        // so restoring the row's own width re-lines the two snapshots up
+        // cell for cell even across a 9→10 rollover.
+        while out.chars().count() < width {
+            out.push(' ');
+        }
+        *status = out;
+
+        rows.join("\n")
+    }
+
     /// §9 — `Ctrl-W v` divides the panel into two panes side by side, and
     /// (the §4/§9 `Ctrl-W`-prefix collision) does **not** also eat a tab.
     #[test]
@@ -56726,8 +56797,8 @@ Milestone tracking issue.
         driver.render();
 
         assert_eq!(
-            driver.screen(),
-            before,
+            without_refresh_clock(&driver.screen()),
+            without_refresh_clock(&before),
             "#2288 §9: collapsing the split restores the unsplit rendering \
              byte for byte"
         );
@@ -56746,10 +56817,71 @@ Milestone tracking issue.
         driver.render();
 
         assert_eq!(
-            driver.screen(),
-            before,
+            without_refresh_clock(&driver.screen()),
+            without_refresh_clock(&before),
             "#2288 §9: a scope always has ≥1 pane, so `Ctrl-W x` on the last \
              one is inert — including the tab it must not close"
+        );
+    }
+
+    /// The flake the two `Ctrl-W x` snapshot tests above kept hitting, made
+    /// deterministic: hold the app perfectly still across a wall-second and
+    /// the raw screens still differ, because the status bar's `↻ Ns` clock
+    /// ticked underneath them. `without_refresh_clock` must absorb exactly
+    /// that and nothing else.
+    #[test]
+    fn the_status_bar_refresh_clock_alone_changes_an_otherwise_still_screen() {
+        use std::time::Duration;
+
+        let mut driver = doc_tabs_driver(&[101, 102], 120, 40);
+        let before = driver.screen();
+
+        // No key, no click, no data — the only thing that moves is the wall
+        // clock. `floor(x + 1.1) > floor(x)` for every x, so the counter is
+        // guaranteed to have ticked by at least one second: no flake in the
+        // anti-flake test.
+        std::thread::sleep(Duration::from_millis(1_100));
+        driver.render();
+        let after = driver.screen();
+
+        assert_ne!(
+            after, before,
+            "precondition: a wall-second ticked, so the RAW snapshots must \
+             differ — that difference is the flake being fixed:\n{after}"
+        );
+        assert_eq!(
+            without_refresh_clock(&after),
+            without_refresh_clock(&before),
+            "#1996: the refresh clock is the ONLY cell that moved, so \
+             normalising it must make two untouched frames compare equal"
+        );
+    }
+
+    /// The clock is not just a digit substitution: `↻ 10s` is one column
+    /// wider than `↻ 9s` and shoves the rest of the status bar sideways, so
+    /// the normaliser has to re-pad the row or a rollover reintroduces the
+    /// very mismatch it exists to remove.
+    #[test]
+    fn without_refresh_clock_realigns_a_widening_counter() {
+        let row = |clock: &str| format!("{:<40}", format!(" coord-tui  Board {clock}  q "));
+        let nine = row("↻ 9s");
+        let ten = row("↻ 10s");
+
+        assert_ne!(nine, ten, "sanity: the raw rows differ");
+        assert_eq!(
+            without_refresh_clock(&nine),
+            without_refresh_clock(&ten),
+            "a 9→10 rollover must normalise away, trailing padding included"
+        );
+        assert_eq!(
+            without_refresh_clock(&nine).chars().count(),
+            nine.chars().count(),
+            "the grid is fixed-width: normalising must not resize the row"
+        );
+        assert!(
+            without_refresh_clock(&nine).contains(" coord-tui  Board ↻ Ns  q "),
+            "every cell except the counter's digits survives verbatim:\n{}",
+            without_refresh_clock(&nine)
         );
     }
 

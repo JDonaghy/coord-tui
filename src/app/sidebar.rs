@@ -137,22 +137,25 @@ impl CoordApp {
     /// Hit-test a left-click against the sidebar action bar at the top
     /// of `sidebar_b`.  Returns `(shrunken_sidebar_b, consumed)` — same
     /// shape as `hit_test_panel_toolbar`.
+    ///
+    /// `backend` is the *live* backend, taken read-only: the layout comes
+    /// from [`Backend::sidebar_panel_layout`], the paint-free twin of the
+    /// `draw_sidebar_panel` the render path calls on the same rect and the
+    /// same `SidebarPanel` (#6).  It must not be re-derived here — a
+    /// hand-rolled measurer is TUI cells, and GTK paints Pango pixels.
     pub(crate) fn hit_test_sidebar_action_bar(
         &mut self,
         pos: Point,
         sidebar_b: Rect,
         lh: f32,
+        backend: &dyn Backend,
     ) -> (Rect, bool) {
         // #272: layout/hit-test goes through the SidebarPanel primitive
         // so click and paint can't drift apart.  `Content { .. }`
         // means the click landed below the toolbar slot (tree
         // territory) and the caller should forward to the tree.
         let panel = self.build_sidebar_action_panel(lh);
-        let layout = panel.layout(
-            sidebar_b,
-            quadraui::SidebarPanelMeasure::new(lh, 8.0),
-            toolbar_tui_measure,
-        );
+        let layout = backend.sidebar_panel_layout(sidebar_b, &panel);
         let content_rect = layout.content_bounds;
         match layout.hit_test(pos.x, pos.y) {
             SidebarPanelHit::ToolbarButton(id) => {
@@ -186,6 +189,15 @@ impl CoordApp {
     /// consistency across the activity bar / sidebar / main panel
     /// chrome.  Safe to grow now that the quadraui rasteriser paints
     /// multi-row toolbars.
+    ///
+    /// #6: stays a hardcoded multiple of `lh` deliberately — the backend
+    /// seam has no height to prefer over it.  `SidebarPanel.toolbar_height`
+    /// is an *input* to `Backend::{draw,}sidebar_panel_layout`, and the
+    /// `toolbar_bounds` those hand back is just this value clamped to the
+    /// panel.  Both backends express it in their own native unit because
+    /// `lh` is `Backend::line_height()` (1.0 cell TUI, N px GTK), so the
+    /// slot already scales correctly per backend; only the *widths* inside
+    /// it needed the backend's own measurer.
     pub(crate) fn toolbar_height(&self, lh: f32) -> f32 {
         lh * 2.0
     }
@@ -368,7 +380,21 @@ impl CoordApp {
     /// the click to the panel body.  `shrunken_main_b` is `main_b` with
     /// the toolbar row carved off the top, ready for downstream tab-bar
     /// hit-tests (whose math expects `pos.y - main_b.y < tab_h`).
-    pub(crate) fn hit_test_panel_toolbar(&mut self, pos: Point, main_b: Rect, lh: f32) -> (Rect, bool) {
+    ///
+    /// `backend` is the *live* backend, taken read-only, for the same
+    /// reason as [`Self::hit_test_sidebar_action_bar`] (#6): button widths
+    /// are measured in the backend's own native unit — ratatui cells under
+    /// TUI, Pango-measured pixels under GTK — so the only correct source
+    /// for them is [`Backend::sidebar_panel_layout`], the paint-free twin
+    /// of the `draw_sidebar_panel` `render.rs` calls on the same
+    /// `main_content_bounds` with the same `SidebarPanel`.
+    pub(crate) fn hit_test_panel_toolbar(
+        &mut self,
+        pos: Point,
+        main_b: Rect,
+        lh: f32,
+        backend: &dyn Backend,
+    ) -> (Rect, bool) {
         let Some(toolbar) = self.panel_toolbar() else {
             return (main_b, false);
         };
@@ -379,11 +405,7 @@ impl CoordApp {
             toolbar: Some(toolbar),
             toolbar_height: Some(self.toolbar_height(lh)),
         };
-        let layout = panel.layout(
-            main_b,
-            quadraui::SidebarPanelMeasure::new(lh, 8.0),
-            toolbar_tui_measure,
-        );
+        let layout = backend.sidebar_panel_layout(main_b, &panel);
         let content_rect = layout.content_bounds;
         match layout.hit_test(pos.x, pos.y) {
             SidebarPanelHit::ToolbarButton(id) => {
@@ -589,36 +611,13 @@ impl CoordApp {
     }
 }
 
-/// Cell-width measure used to lay out a [`Toolbar`] for hit-testing.
-///
-/// Mirrors `quadraui::tui::toolbar::tui_item_width` exactly — that
-/// helper is `pub(crate)` so we can't import it.  Keep in sync with
-/// upstream when the rasteriser's framing changes (currently
-/// `"[ icon? label (hint)? ]"` for actions, 2 cells for separators,
-/// raw char width for labels).
-pub(crate) fn toolbar_tui_measure(btn: &ToolbarButton) -> ToolbarItemMeasure {
-    let w = match btn {
-        ToolbarButton::Action {
-            label,
-            icon,
-            key_hint,
-            ..
-        } => {
-            let icon_w = icon.as_ref().map(|s| s.chars().count() + 1).unwrap_or(0);
-            // " (xxx)" — 3 cells of decoration ("()" + leading space)
-            // plus the hint's own char width.
-            let hint_w = key_hint
-                .as_ref()
-                .map(|s| s.chars().count() + 3)
-                .unwrap_or(0);
-            // "[ " + content + " ]"
-            (4 + icon_w + label.chars().count() + hint_w) as f32
-        }
-        ToolbarButton::Separator => 2.0,
-        ToolbarButton::Label { text, .. } => text.chars().count() as f32,
-    };
-    ToolbarItemMeasure::new(w)
-}
+// #6: a local cell-width toolbar measurer lived here — a hand-copy of
+// quadraui's `pub(crate) tui::toolbar::tui_item_width`, used unconditionally
+// by every toolbar hit-test.  Under GTK it measured Pango-painted buttons in
+// ratatui cells, so clicks landed on the wrong button or on nothing at all.
+// Deleted: hit-tests now go through `Backend::sidebar_panel_layout`, the
+// backend's own paint-free measurer.  Do not reintroduce a local one — see
+// quadraui's `docs/CONSUMER_PATTERNS.md` and quadraui#478.
 
 /// Helper that builds one `ToolbarButton::Action` for the panel toolbar.
 /// Action id is always `toolbar:<verb>` — disabled buttons keep the id

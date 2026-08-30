@@ -72,7 +72,12 @@ use quadraui::{
     // the TUI backend's own wrapper never exposes (it hardcodes
     // `scroll_arrow_width: 0.0`).
     SegmentMeasure, TabMeasure,
-    ToolbarButton, ToolbarHoverTracker, ToolbarItemMeasure, TreeRow, UiEvent, WidgetId,
+    // #6: `ToolbarItemMeasure` dropped from this list along with
+    // `sidebar.rs`'s hand-rolled cell-width toolbar measurer — toolbar
+    // widths now come from `Backend::sidebar_panel_layout`.  (`dialogs.rs`
+    // still names the type once, fully qualified, for `Dialog::layout`'s
+    // unused measurer slot.)
+    ToolbarButton, ToolbarHoverTracker, TreeRow, UiEvent, WidgetId,
     BadgeStatus, BoardCard, BoardColumn, BoardHit, BoardLayout, BoardModel, CardBadge, MoveDir,
     // #1094: Audit panel row list — first `DataTable` use in coord-tui.
     Column, ColumnAlign, ColumnWidth, DataRow, DataTable, DataTableHit, DataTableLayout,

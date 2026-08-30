@@ -132,7 +132,6 @@ pub(crate) fn fmt_merge_block_reason(reason: Option<&str>) -> Option<String> {
     Some(format!("{} [{}]", trunc(reason, 80), affordance))
 }
 
-/// Truncate `s` to at most `max_chars` Unicode scalar values.
 /// Capitalize the first ASCII character of `s` (no-op when `s` is empty
 /// or starts with a non-ASCII character).
 pub(crate) fn capitalize(s: &str) -> String {
@@ -367,4 +366,26 @@ pub(crate) fn trunc(s: &str, max_cols: usize) -> &str {
         used += w;
     }
     s
+}
+
+/// Wrap `s` in `"  (…)"`-style parens for a merge-queue row label,
+/// truncating to `max_cols` display columns with a trailing "…" when it
+/// doesn't fit. Built on [`trunc`], so this is char/display-width safe.
+///
+/// #11: the two merge-queue label call sites (`merge_queue_entry_label`'s
+/// gate/conflict reason and `render_merge_plan_panel`'s BLOCKED-entry
+/// reason) used to slice with a literal byte index (`&s[..57]`, `&s[..47]`)
+/// directly into arbitrary git/gh error text. That panics whenever a
+/// multi-byte character (smart quotes, non-ASCII filenames, box-drawing —
+/// exactly the class already documented at `first_meaningful_stderr_line`'s
+/// #1381-1385 history) lands on the cut boundary. Centralizing the pattern
+/// here means the fix (and its regression test) lives in one place instead
+/// of being duplicated — and re-copied incorrectly — at every call site.
+pub(crate) fn fmt_truncated_paren(s: &str, max_cols: usize) -> String {
+    let cut = trunc(s, max_cols);
+    if cut.len() < s.len() {
+        format!("  ({}…)", cut)
+    } else {
+        format!("  ({})", s)
+    }
 }

@@ -328,22 +328,19 @@ impl CoordApp {
         true
     }
 
-    /// Keep the selected Sessions-tree row inside the visible window —
-    /// mirrors `fix_terminal_tree_scroll`. Must be called after every
-    /// click/j/k navigation.
+    /// Keep the selected Sessions-tree row inside the visible window. Must be
+    /// called after every click/j/k navigation.
+    ///
+    /// #12/A3: the clamp is `tree_nav::scroll_to_visible` (quadraui's
+    /// `TreeController::scroll_to_visible`) — this no longer "mirrors"
+    /// `fix_terminal_tree_scroll`, it shares with it. Only the
+    /// `TreePath` → flat-row-index resolution is Sessions-specific.
     pub(crate) fn fix_sessions_tree_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
         let (_, index) = self.sessions_tree_rows();
         let Some(sel) = self.sessions_tree_selected_flat_index(&index) else {
             return;
         };
-        if sel < self.sessions_tree_scroll {
-            self.sessions_tree_scroll = sel;
-        } else if sel >= self.sessions_tree_scroll + visible {
-            self.sessions_tree_scroll = sel + 1 - visible;
-        }
+        crate::app::tree_nav::scroll_to_visible(&mut self.sessions_tree_scroll, sel, visible);
     }
 
     // ── #1033: Sessions-panel actions (attach / kill / stop) ────────────────

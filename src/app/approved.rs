@@ -362,16 +362,10 @@ impl CoordApp {
     /// `visible` is the number of *submission* rows the panel can paint —
     /// pass `content_visible_rows(main_bounds, lh)`, whose one-row title
     /// deduction matches the pinned header row this panel reserves.
+    /// #12/A3: the clamp arithmetic is `tree_nav::scroll_to_visible` now.
     pub(crate) fn fix_approved_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
         let sel = self.approved_selected_idx();
-        if sel < self.approved_scroll {
-            self.approved_scroll = sel;
-        } else if sel >= self.approved_scroll + visible {
-            self.approved_scroll = sel + 1 - visible;
-        }
+        crate::app::tree_nav::scroll_to_visible(&mut self.approved_scroll, sel, visible);
     }
 
     /// Build the main-panel row list (contract §3c) — one row per

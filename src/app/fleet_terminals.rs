@@ -262,22 +262,20 @@ impl CoordApp {
         true
     }
 
-    /// Keep the selected Terminal-tree row inside the visible window —
-    /// mirrors `fix_machine_scroll`. Must be called after every
-    /// click/j/k navigation.
+    /// Keep the selected Terminal-tree row inside the visible window. Must be
+    /// called after every click/j/k navigation.
+    ///
+    /// #12/A3: this used to be a character-for-character copy of quadraui's
+    /// `TreeController::scroll_to_visible`; the clamp now goes through
+    /// `tree_nav::scroll_to_visible`, which delegates to that very method.
+    /// What stays here is the Terminal-specific part — resolving the selected
+    /// `TreePath` to a flat row index.
     pub(crate) fn fix_terminal_tree_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
         let (_, index) = self.terminal_tree_rows();
         let Some(sel) = self.terminal_tree_selected_flat_index(&index) else {
             return;
         };
-        if sel < self.terminal_tree_scroll {
-            self.terminal_tree_scroll = sel;
-        } else if sel >= self.terminal_tree_scroll + visible {
-            self.terminal_tree_scroll = sel + 1 - visible;
-        }
+        crate::app::tree_nav::scroll_to_visible(&mut self.terminal_tree_scroll, sel, visible);
     }
 
     // ── #954: create a new terminal on a chosen fleet machine ────────────

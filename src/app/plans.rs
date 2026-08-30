@@ -1094,15 +1094,10 @@ impl CoordApp {
     /// scroll` (`mod.rs`). Must be called after every keyboard nav that
     /// moves `plans_detail_sel` (`j`/`k`/`Down`/`Up` in events.rs, while
     /// `plans_detail_open`).
+    /// #12/A3: the clamp arithmetic is `tree_nav::scroll_to_visible` now.
     pub(crate) fn fix_plans_detail_scroll(&mut self, visible: usize) {
-        if visible == 0 {
-            return;
-        }
-        if self.plans_detail_sel < self.plans_detail_scroll {
-            self.plans_detail_scroll = self.plans_detail_sel;
-        } else if self.plans_detail_sel >= self.plans_detail_scroll + visible {
-            self.plans_detail_scroll = self.plans_detail_sel + 1 - visible;
-        }
+        let sel = self.plans_detail_sel;
+        crate::app::tree_nav::scroll_to_visible(&mut self.plans_detail_scroll, sel, visible);
     }
 
     /// Render the #1122 in-app plan detail pane (contract §3) — the FULL

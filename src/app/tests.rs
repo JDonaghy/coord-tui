@@ -44253,6 +44253,76 @@ Milestone tracking issue.
         );
     }
 
+    /// #12 (seam-audit finding A3): TuiDriver black-box over the Terminal
+    /// sidebar's click routing, which now resolves pixel → row through the
+    /// shared `tree_nav::row_at_y` instead of one of the three private copies
+    /// of that arithmetic.
+    ///
+    /// Clicking a machine row toggles its collapse, so the round trip is
+    /// screen-observable end to end (real `event → handle → render`): the
+    /// nested terminal names disappear and come back. The middle assertion is
+    /// the off-by-one guard — clicking the row *below* the machine must land
+    /// on the terminal row (selection only, no collapse), not back on the
+    /// machine.
+    #[test]
+    fn terminal_tree_sidebar_click_routes_to_the_row_under_the_cursor() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_test_app(BoardData {
+            machines: vec![mk_machine("precision", "precision.tail", true, &[])],
+            ..BoardData::default()
+        });
+        app.fleet_terminals = vec![FleetTerminal {
+            name: "scratch".to_string(),
+            machine: "precision".to_string(),
+            attached: false,
+            pending: false,
+            pending_sweep_count: 0,
+        }];
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        click_activity_icon(&mut driver, ">");
+
+        let (mx, my) = driver.find("precision").unwrap_or_else(|| {
+            panic!(
+                "machine row 'precision' must be findable:\n{}",
+                driver.screen()
+            )
+        });
+        assert!(
+            driver.screen_contains("scratch"),
+            "terminal 'scratch' should start nested and visible:\n{}",
+            driver.screen(),
+        );
+
+        // Click the terminal row directly under the machine row. It resolves
+        // to a *terminal*, not the machine, so nothing collapses.
+        driver.click(mx, my + 1.0);
+        assert!(
+            driver.screen_contains("scratch"),
+            "clicking the child row must not collapse its machine — an \
+             off-by-one in the pixel→row math would land on 'precision' and \
+             hide it:\n{}",
+            driver.screen(),
+        );
+
+        // Click the machine row itself: collapses, hiding the child.
+        driver.click(mx, my);
+        assert!(
+            !driver.screen_contains("scratch"),
+            "clicking the machine row must collapse it and hide 'scratch':\n{}",
+            driver.screen(),
+        );
+
+        // And back again.
+        driver.click(mx, my);
+        assert!(
+            driver.screen_contains("scratch"),
+            "clicking the machine row again must re-expand it:\n{}",
+            driver.screen(),
+        );
+    }
+
     // ── #1032: Sessions-view left-pane machine → repo → session tree ────────
 
     /// TuiDriver black-box: seed live sessions across 2 machines and 2

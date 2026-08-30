@@ -1498,7 +1498,11 @@ impl CoordApp {
             return;
         };
         let lh = backend.line_height();
-        let stack = build_context_menu_stack(state, lh, viewport);
+        // #24: the popup's width comes out of `compute_menu_width` in
+        // character columns, so it needs the backend's column width to become
+        // a real width — see `build_context_menu_stack`.
+        let char_w = backend.char_width();
+        let stack = build_context_menu_stack(state, lh, char_w, viewport);
         let mut cache: Vec<(ContextMenu, ContextMenuLayout)> = Vec::with_capacity(stack.len());
         for (menu, layout) in &stack {
             backend.draw_context_menu(menu, layout);
@@ -8241,42 +8245,18 @@ pub(crate) fn smoke_test_source_id<'a>(
     smoke.id.as_str()
 }
 
-/// #269: Hit-test a click against a TUI tab bar's labels.  Walks the
-/// labels left-to-right, accumulating character widths to derive each
-/// tab's `start_x..end_x` boundary.  Returns the (absolute) tab index
-/// under the cursor or `None` if the click landed past the last tab.
-///
-/// `scroll_offset` (#605) is the index of the first *visible* tab: the
-/// painter skips that many tabs and renders the rest from the left edge
-/// (the TUI rasteriser disables scroll arrows, so there is no left-arrow
-/// shift). The walk therefore starts accumulating at `origin_x` from tab
-/// `scroll_offset`, and the returned index is absolute so it still maps
-/// to the right tab. Pass `0` when the bar isn't scrolled.
-///
-/// Why not `Backend::tab_bar_layout`: that's the rasteriser's authoritative
-/// hit-region map but requires a `&mut Backend` we don't want to plumb
-/// through every test.  In the TUI rasteriser, labels are rendered 1:1
-/// in character cells, so summing label char counts gives the exact
-/// same boundaries the painter used.  GTK rendering uses pixel widths
-/// and would need the layout call — track in a follow-up if that
-/// backend ever has a regression here.
-pub(crate) fn hit_tab_index_from_labels(
-    labels: &[&str],
-    origin_x: f32,
-    click_x: f32,
-    scroll_offset: usize,
-) -> Option<usize> {
-    let mut cursor = origin_x;
-    for (i, label) in labels.iter().enumerate().skip(scroll_offset) {
-        let width = label.chars().count() as f32;
-        let end = cursor + width;
-        if click_x >= cursor && click_x < end {
-            return Some(i);
-        }
-        cursor = end;
-    }
-    None
-}
+// #269's `hit_tab_index_from_labels` lived here until #24 and is gone.
+//
+// It walked a tab bar's labels left-to-right summing `chars().count()` to
+// derive each tab's `start_x..end_x`, which its own doc comment already
+// flagged as TUI-only ("GTK rendering uses pixel widths and would need the
+// layout call — track in a follow-up if that backend ever has a regression
+// here"). #24's GTK parity walk was that regression: the whole
+// `Board / Issue / Board Chat / Terminal` sub-tab bar collapsed into the
+// first ~28 px of itself and every click on it missed. Both call sites now
+// go through `events.rs::resolve_tab_bar_click`, which asks
+// `Backend::tab_bar_layout` — the paint-free twin of the `draw_tab_bar` the
+// renderer calls — for slots in whichever unit that backend paints in.
 
 /// #2863: build the single-line shell command that launches the ATTENDED
 /// (`--interactive`, #2750) intake session for `submission_id`.
@@ -8455,16 +8435,28 @@ pub(crate) fn compute_menu_width(items: &[ContextMenuItem]) -> f32 {
 /// context menu and all currently-open submenus.  Index 0 = root; index 1 = first
 /// open submenu, etc.  Drives both rendering (one `draw_context_menu` call per
 /// level) and hit-testing (walk deepest-first).
+///
+/// `char_w` is [`Backend::char_width`] — the width of one character column in
+/// whatever unit this backend lays out in. [`compute_menu_width`] answers in
+/// **columns** (it counts label characters), and `ContextMenu::layout` wants
+/// the popup's width in the backend's own unit, so the two only line up after
+/// this multiply. #24: before it, GTK got the column count handed straight to
+/// it as a *pixel* width and every right-click menu opened as a 20–60 px
+/// sliver with its labels clipped away — the same characters-vs-pixels
+/// confusion `events.rs::resolve_tab_bar_click` fixes for tab bars. `char_w`
+/// is `1.0` on the TUI backend, where a column *is* the unit, so this is
+/// exactly the old arithmetic there.
 pub(crate) fn build_context_menu_stack(
     state: &ContextMenuState,
     lh: f32,
+    char_w: f32,
     viewport: Rect,
 ) -> Vec<(ContextMenu, ContextMenuLayout)> {
     let mut stack: Vec<(ContextMenu, ContextMenuLayout)> = Vec::new();
 
     // ── Root level ────────────────────────────────────────────────────────
     let root_menu = build_quadraui_context_menu(state);
-    let root_width = compute_menu_width(&state.items);
+    let root_width = compute_menu_width(&state.items) * char_w;
     let root_layout = root_menu.layout(
         state.anchor.x,
         state.anchor.y,
@@ -8506,7 +8498,7 @@ pub(crate) fn build_context_menu_stack(
             .map(|v| v.bounds.y)
             .unwrap_or(parent_bounds.y);
 
-        let sub_width = compute_menu_width(&sub_coord_items);
+        let sub_width = compute_menu_width(&sub_coord_items) * char_w;
         let preferred_x = parent_bounds.x + parent_bounds.width + 1.0;
         let flipped_x = parent_bounds.x - sub_width - 1.0;
         let anchor_x = if preferred_x + sub_width <= viewport.x + viewport.width {

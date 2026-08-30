@@ -5798,60 +5798,147 @@
         assert!(!changed);
     }
 
-    // ── #269: tab-click hit-test from labels ────────────────────────────
+    // ── #269 / #24: tab-click hit-test through the backend's layout ─────
+    //
+    // #269's `hit_tab_index_from_labels` (a `chars().count()` walk from the
+    // bar's left edge) is gone; these are its cases re-pointed at the
+    // replacement, `events.rs::resolve_tab_bar_click`, which asks the
+    // backend for the slots it actually painted. Driven against a real
+    // `TuiBackend` — the same one the neighbouring `mouse_main_click` tests
+    // use — because the whole point of the change is that the answer comes
+    // from a backend rather than from an assumption about one.
+    //
+    // Cross-backend proof that GTK resolves these too lives in
+    // `app::cross_backend` (a shared body run against both drivers); a unit
+    // test here can only reach the TUI half.
 
-    #[test]
-    fn hit_tab_index_from_labels_resolves_first_tab() {
-        let labels = [" Board ", " Issue "];
-        // Click at x=3 falls inside " Board " (chars 0-6).
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 3.0, 0), Some(0));
+    /// A minimal sub-tab-style `TabBar` (no close glyphs, no right
+    /// segments) over `labels`, with `active` marked active.
+    fn tab_bar_from_labels(labels: &[&str], active: usize, scroll_offset: usize) -> TabBar {
+        TabBar {
+            id: WidgetId::new("test-tabs"),
+            tabs: labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| TabItem {
+                    label: (*l).to_string(),
+                    is_active: i == active,
+                    is_dirty: false,
+                    is_preview: false,
+                    is_closable: false,
+                })
+                .collect(),
+            right_segments: vec![],
+            active_accent: None,
+            scroll_offset,
+            show_tab_close: false,
+            compact: true,
+        }
+    }
+
+    /// `resolve_tab_bar_click`'s answer as a bare tab index, for the cases
+    /// below that only care which tab was hit.
+    fn hit_tab(labels: &[&str], bar_rect: Rect, click_x: f32, scroll_offset: usize) -> Option<usize> {
+        let bar = tab_bar_from_labels(labels, 0, scroll_offset);
+        let backend = quadraui::tui::TuiBackend::new();
+        resolve_tab_bar_click(&bar, bar_rect, click_x, &backend).map(tab_click_index)
     }
 
     #[test]
-    fn hit_tab_index_from_labels_resolves_second_tab() {
+    fn resolve_tab_bar_click_resolves_first_tab() {
         let labels = [" Board ", " Issue "];
-        // " Board " is 7 chars wide, " Issue " covers x=7..14.
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 10.0, 0), Some(1));
+        // Click at x=3 falls inside " Board " (cells 0-6).
+        assert_eq!(hit_tab(&labels, Rect::new(0.0, 0.0, 40.0, 1.0), 3.0, 0), Some(0));
     }
 
     #[test]
-    fn hit_tab_index_from_labels_resolves_third_tab_with_origin_offset() {
-        // Origin shifted to x=50 (sidebar panel offset).  Labels still
-        // sum left-to-right from the origin.
+    fn resolve_tab_bar_click_resolves_second_tab() {
+        let labels = [" Board ", " Issue "];
+        // " Board " is 7 cells wide, " Issue " covers x=7..14.
+        assert_eq!(hit_tab(&labels, Rect::new(0.0, 0.0, 40.0, 1.0), 10.0, 0), Some(1));
+    }
+
+    #[test]
+    fn resolve_tab_bar_click_resolves_third_tab_with_origin_offset() {
+        // Bar painted at x=50 (sidebar panel offset). Slots are measured
+        // from the bar's own left edge and the origin added back, so the
+        // answer must not shift.
         let labels = [" Pipeline ", " Issue ", " Stages "];
-        // " Pipeline " is 10 chars → " Issue " starts at 60.
-        // " Issue " is 7 chars → " Stages " starts at 67.
+        // " Pipeline " is 10 cells → " Issue " starts at 60.
+        // " Issue " is 7 cells → " Stages " starts at 67.
         // Click at x=70 should land in " Stages ".
-        assert_eq!(hit_tab_index_from_labels(&labels, 50.0, 70.0, 0), Some(2));
+        assert_eq!(hit_tab(&labels, Rect::new(50.0, 0.0, 40.0, 1.0), 70.0, 0), Some(2));
     }
 
     #[test]
-    fn hit_tab_index_from_labels_returns_none_past_last_tab() {
+    fn resolve_tab_bar_click_returns_none_past_last_tab() {
         let labels = [" Board ", " Issue "];
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 100.0, 0), None);
+        assert_eq!(hit_tab(&labels, Rect::new(0.0, 0.0, 40.0, 1.0), 100.0, 0), None);
     }
 
     #[test]
-    fn hit_tab_index_from_labels_robust_to_label_growth() {
+    fn resolve_tab_bar_click_robust_to_label_growth() {
         // If a tab label gains a badge (e.g. " Stages (3) "), the new
         // width is honoured automatically — no hard-coded constant
         // breaks here.
         let labels = [" Pipeline ", " Issue ", " Stages (3) "];
         // " Pipeline " (10) + " Issue " (7) = 17 → " Stages (3) " starts at 17.
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 20.0, 0), Some(2));
+        assert_eq!(hit_tab(&labels, Rect::new(0.0, 0.0, 40.0, 1.0), 20.0, 0), Some(2));
     }
 
     #[test]
-    fn hit_tab_index_from_labels_honors_scroll_offset() {
-        // #605: when the bar is scrolled so the first two tabs are off-screen,
-        // the visible tabs render from the origin starting at index 2. A click
-        // at the left edge resolves to the absolute index 2, not 0.
+    fn resolve_tab_bar_click_honors_scroll_offset() {
+        // #605: when the bar is too narrow for every tab and is scrolled so
+        // the first two are off-screen, the visible tabs render from the
+        // bar's left edge starting at index 2. A click there resolves to the
+        // absolute index 2, not 0.
         let labels = [" Pipeline ", " Issue ", " Stages ", " Log "];
-        // scroll_offset=2 → " Stages " painted at x=0..8, " Log " at 8..13.
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 3.0, 2), Some(2));
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 9.0, 2), Some(3));
-        // The scrolled-away tabs are unreachable by click.
-        assert_eq!(hit_tab_index_from_labels(&labels, 0.0, 3.0, 2), Some(2));
+        // 10+7+8+5 = 30 cells of tabs in a 15-cell bar → the layout honours
+        // the caller's offset (scroll arrows are disabled in both backends),
+        // painting " Stages " at 0..8 and " Log " at 8..13.
+        let bar_rect = Rect::new(0.0, 0.0, 15.0, 1.0);
+        assert_eq!(hit_tab(&labels, bar_rect, 3.0, 2), Some(2));
+        assert_eq!(hit_tab(&labels, bar_rect, 9.0, 2), Some(3));
+        // The scrolled-away tabs are unreachable by click — they are not
+        // painted, so there is nothing under the cursor to resolve to.
+        assert_eq!(hit_tab(&labels, bar_rect, 3.0, 0), Some(0));
+    }
+
+    #[test]
+    fn resolve_tab_bar_click_splits_close_glyph_from_body() {
+        // The doc-tab strip bakes its close `×` into the label text (see
+        // `doc_tab_label`), so the within-tab split is still resolved from
+        // the label — but now from the click's *proportional* position in
+        // the slot the backend reported, not from raw x arithmetic.
+        let label = "#101 Fix… × ";
+        let close_col = label.chars().count() - 2; // the `×`
+        let bar = TabBar {
+            id: WidgetId::new("test-doc-tabs"),
+            tabs: vec![TabItem {
+                label: label.to_string(),
+                is_active: true,
+                is_dirty: false,
+                is_preview: false,
+                is_closable: true,
+            }],
+            right_segments: vec![],
+            active_accent: None,
+            scroll_offset: 0,
+            show_tab_close: false,
+            compact: true,
+        };
+        let backend = quadraui::tui::TuiBackend::new();
+        let bar_rect = Rect::new(20.0, 0.0, 40.0, 1.0);
+        assert_eq!(
+            resolve_tab_bar_click(&bar, bar_rect, 20.0 + close_col as f32 + 0.5, &backend),
+            Some(TabClickKind::Close(0)),
+            "a click on the baked `×` closes",
+        );
+        assert_eq!(
+            resolve_tab_bar_click(&bar, bar_rect, 20.0 + 2.5, &backend),
+            Some(TabClickKind::Body(0)),
+            "a click on the label body activates",
+        );
     }
 
     #[test]
@@ -19684,6 +19771,45 @@
             Some("chat-about-issue"),
         );
         assert!(state.items.iter().any(|it| it.label.contains("#42")));
+    }
+
+    /// #24: the popup is sized in the **backend's** unit, not in columns.
+    ///
+    /// `compute_menu_width` counts label characters, so its answer is a
+    /// column count; `ContextMenu::layout` wants a width in whatever unit the
+    /// backend lays out in. Before #24 the column count went straight through,
+    /// which is right for TUI (a column *is* the unit) and turned every GTK
+    /// right-click menu into a 20–60 **pixel** sliver — the popup ended up
+    /// narrower than the labels it painted, so a click on a label landed
+    /// outside the menu's own hit region and dismissed it instead of running
+    /// it.
+    ///
+    /// Asserted as a ratio rather than an absolute so it pins the *unit*
+    /// conversion and stays true if the padding in `compute_menu_width` ever
+    /// changes. The `char_w = 1.0` call is exactly the TUI backend's own
+    /// `Backend::char_width`, so the first half also pins "TUI is unchanged".
+    #[test]
+    fn context_menu_popup_width_scales_with_the_backends_char_width() {
+        let mut app = make_app_default();
+        app.open_context_menu(
+            Point::new(0.0, 0.0),
+            board_target(Some(42), BoardRowLifecycle::InFlight),
+        );
+        let state = app.pending_context_menu.as_ref().expect("state set");
+        let viewport = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+
+        let cells = build_context_menu_stack(state, 1.0, 1.0, viewport);
+        let pixels = build_context_menu_stack(state, 16.0, 8.0, viewport);
+
+        let cell_w = cells[0].1.bounds.width;
+        let px_w = pixels[0].1.bounds.width;
+        assert!(cell_w > 0.0, "the TUI-unit popup has a width at all");
+        assert_eq!(
+            px_w, cell_w * 8.0,
+            "a backend whose column is 8 units wide must get a popup 8× as \
+             wide as the one whose column is 1 unit wide — got {px_w} vs \
+             {cell_w}"
+        );
     }
 
     #[test]

@@ -9943,3 +9943,11 @@ pub mod fixtures;
 
 #[cfg(test)]
 mod tests;
+
+// #8: cross-backend core smoke set — a handful of test bodies written once
+// against `quadraui::testing::ConformanceDriver` and instantiated for both
+// the TUI and (under `--features gtk`) the GTK backend, so a GTK paint/route
+// regression fails `cargo test` instead of waiting for a human to open the
+// window.
+#[cfg(test)]
+mod cross_backend;

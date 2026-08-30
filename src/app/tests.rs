@@ -33366,6 +33366,57 @@
         );
     }
 
+    /// #17 (sibling of quadraui#429): on a "down-drop" terminal that never
+    /// delivers `MouseDown` — only `MouseUp` — clicking outside an open
+    /// prompt dialog must still dismiss it. Before the fix, outside-click
+    /// dismiss (`handle_dialog_click`, `src/app/dialogs.rs`) only ran from
+    /// the `UiEvent::MouseDown` arm in `src/app/events.rs`, so a lone
+    /// `MouseUp` — the click's only event on such a terminal — was a no-op
+    /// and the dialog stayed stuck open with no mouse path to clear it.
+    ///
+    /// Uses the "Force Merge" confirm dialog (`pending_force_merge`, set
+    /// directly the same way `tuidriver_live_session_blocks_auto_review_
+    /// dialog` above pre-seeds `pending_auto_review` — `dismiss_prompt_
+    /// dialog` clears it unconditionally, unlike the merge-all-ready
+    /// dialog used elsewhere in this file, which has its own pre-existing
+    /// dismiss gap tracked separately and would make a poor fixture here).
+    /// Dispatches a bare `MouseUp` with NO preceding `MouseDown` (simulating
+    /// the drop) at a screen corner clearly outside the centered dialog,
+    /// and asserts the dialog's title vanishes from the rendered screen.
+    #[test]
+    fn tuidriver_mouseup_outside_dialog_dismisses_without_mousedown() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_app_default();
+        app.pending_force_merge = Some("api".to_string());
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        let screen_open = driver.screen();
+        assert!(
+            screen_open.contains("Force Merge"),
+            "#17: dialog must be open before the outside MouseUp; screen =\n{}",
+            screen_open
+        );
+
+        // A centered dialog leaves the top-left corner well outside its
+        // bounds. Dispatch ONLY a `MouseUp` there — no `MouseDown` at all —
+        // to reproduce a down-drop terminal's click.
+        driver.dispatch(UiEvent::MouseUp {
+            widget: None,
+            button: MouseButton::Left,
+            position: Point::new(0.0, 0.0),
+        });
+
+        let screen_after = driver.screen();
+        assert!(
+            !screen_after.contains("Force Merge"),
+            "#17: a MouseUp outside the dialog (no MouseDown) must dismiss it \
+             on a down-drop terminal; screen =\n{}",
+            screen_after
+        );
+    }
+
     /// #780: TuiDriver test — pressing `m` in the MergeQueue panel on a READY
     /// entry dispatches "Merge only this" (`coord merge --only <aid>`) and
     /// shows a confirming toast on screen.
@@ -36507,6 +36558,67 @@
             "#741: right-click on a Board row must open the context menu with \
              'Chat about issue':\n{}",
             screen
+        );
+    }
+
+    /// #17 (sibling of quadraui#429): on a "down-drop" terminal that never
+    /// delivers `MouseDown` — only `MouseUp` — clicking outside an open
+    /// context menu must still dismiss it. Before the fix, the outside-click
+    /// dismiss (`handle_context_menu_click`, `src/app/dialogs.rs`) only ran
+    /// from the `UiEvent::MouseDown` arm in `src/app/events.rs`, so a lone
+    /// `MouseUp` — the click's only event on such a terminal — was a no-op
+    /// and the menu stayed stuck open with no mouse path to clear it.
+    ///
+    /// Opens the menu via the same right-click chain as
+    /// `tuidriver_right_click_opens_board_context_menu` above, then
+    /// dispatches a bare `MouseUp` with NO preceding `MouseDown` at the
+    /// screen's opposite corner (clear of the popup, which opens near the
+    /// right-clicked row), and asserts the menu's contents vanish.
+    #[test]
+    fn tuidriver_mouseup_outside_context_menu_dismisses_without_mousedown() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let assignments = vec![make_assignment_typed("running", 42, "repo-a", Some("work"))];
+        let app = make_app_with_assignments(assignments);
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+
+        let (x, y) = driver.find("#42").or_else(|| driver.find("Issue 42")).unwrap_or_else(|| {
+            panic!(
+                "#17: could not find board row '#42' / 'Issue 42' on initial render:\n{}",
+                driver.screen()
+            )
+        });
+
+        driver.dispatch(UiEvent::MouseDown {
+            widget: None,
+            button: MouseButton::Right,
+            position: Point::new(x, y),
+            modifiers: Modifiers::default(),
+        });
+        assert!(
+            driver.screen_contains("Chat about issue"),
+            "#17: right-click must open the context menu before the dismiss \
+             is exercised:\n{}",
+            driver.screen()
+        );
+
+        // The menu pops up anchored at (x, y) and extends down/right from
+        // there; the screen's top-left corner is clear of it. Dispatch
+        // ONLY a `MouseUp` there — no `MouseDown` at all — to reproduce a
+        // down-drop terminal's click.
+        driver.dispatch(UiEvent::MouseUp {
+            widget: None,
+            button: MouseButton::Left,
+            position: Point::new(0.0, 0.0),
+        });
+
+        let screen_after = driver.screen();
+        assert!(
+            !screen_after.contains("Chat about issue"),
+            "#17: a MouseUp outside the context menu (no MouseDown) must \
+             dismiss it on a down-drop terminal; screen =\n{}",
+            screen_after
         );
     }
 

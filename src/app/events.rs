@@ -5731,6 +5731,29 @@ impl CoordApp {
             UiEvent::MouseUp { button, position, .. } => {
                 let pos = *position;
                 let btn = *button;
+                // #17 (sibling of quadraui#429, fixed there by
+                // `MenuSystem::handle()` in ebb4ab7): the dialog/context-menu
+                // outside-click-dismiss and item-activation hit-tests below
+                // only ever ran from the `MouseDown` arm above. On a
+                // "down-drop" terminal that swallows MouseDown and delivers
+                // only MouseUp, a click on — or outside — an open dialog or
+                // context menu was never handled at all: the overlay could
+                // be neither activated nor dismissed by mouse. Mirror the
+                // quadraui fix by re-running the same highest-z-order
+                // hit-tests here. On a terminal that delivers both events
+                // normally, MouseDown already consumed and cleared the
+                // dialog/menu by the time this arm runs, so
+                // `handle_dialog_click`/`handle_context_menu_click` see
+                // nothing open, return `None`, and fall through — no double
+                // dispatch.
+                if btn == MouseButton::Left {
+                    if let Some(handled) = self.handle_dialog_click(pos, backend) {
+                        return handled;
+                    }
+                    if let Some(handled) = self.handle_context_menu_click(pos, backend) {
+                        return handled;
+                    }
+                }
                 // #1094: release an in-progress Audit column-resize drag
                 // (started by a `MouseDown` on a `DataTableHit::
                 // HeaderDivider`) before any other `MouseUp` handling —

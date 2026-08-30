@@ -5,6 +5,7 @@
 //! (TUI) and `src/bin/gtk.rs` (GTK) wire it to the appropriate shell runner.
 
 mod app;
+pub mod boot;
 mod commands;
 pub mod settings;
 pub use app::CoordApp;

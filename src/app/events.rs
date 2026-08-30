@@ -876,8 +876,7 @@ impl CoordApp {
         }
 
         // ── #541: global issue fuzzy-finder — Ctrl+P toggle ────────────────
-        // Open / close the Telescope-style overlay with Ctrl+P from any view,
-        // unless:
+        // Open / close the finder with Ctrl+P from any view, unless:
         //   (a) a PTY is capturing all keystrokes, or
         //   (b) any other modal dialog is currently holding focus.
         // The existing codebase invariant is "one modal owns ALL input while
@@ -899,7 +898,7 @@ impl CoordApp {
                 && !self.any_blocking_modal_active()
             {
                 if self.issue_finder.is_none() {
-                    self.issue_finder = Some(IssueFinder::default());
+                    self.open_issue_finder();
                 } else {
                     self.issue_finder = None;
                 }
@@ -907,53 +906,45 @@ impl CoordApp {
             }
         }
 
-        // ── #541: issue finder owns ALL input while open ─────────────────────
-        // Esc=close, Enter=jump, j/k/↑/↓=navigate, Backspace=delete,
-        // printable chars=type.  Every other key is swallowed so board/pipeline
-        // shortcuts can't fire while the overlay is up.
-        if self.issue_finder.is_some() {
-            if let UiEvent::KeyPressed { key, modifiers, .. } = &event {
-                match key {
-                    Key::Named(NamedKey::Escape) => {
-                        self.issue_finder = None;
+        // ── #16: issue finder owns ALL input while open ─────────────────────
+        // Rebuilt on quadraui's `Palette` primitive (via
+        // `DualModePaletteController`, the same wrapper `command_palette`
+        // and `doc_tab_picker` below already drive) — replaces the former
+        // hand-rolled key-by-key dispatch (Esc/Enter/j/k/Backspace/chars)
+        // this used to duplicate. Mirrors `doc_tab_picker`'s exact
+        // "take, dispatch, put back unless it closed" shape: every event
+        // (not just keys the palette recognises) is swallowed while this is
+        // `Some`, so clicks on the panel underneath can't leak through.
+        if let Some(mut picker) = self.issue_finder.take() {
+            if let UiEvent::KeyPressed { .. } = &event {
+                let main = union_rects(ctx.sidebar_bounds(), ctx.main_bounds());
+                let lh = backend.line_height();
+                let popup = Self::issue_finder_popup_rect(main);
+                let visible_rows = if lh > 0.0 {
+                    ((popup.height / lh) as usize).saturating_sub(PALETTE_CHROME_ROWS)
+                } else {
+                    10
+                };
+                match picker.handle(&event, visible_rows) {
+                    DualModePaletteEvent::Cancelled => {}
+                    DualModePaletteEvent::ItemConfirmed { idx } => {
+                        let query = picker.query().to_string();
+                        self.confirm_issue_finder(idx, &query);
                     }
-                    Key::Named(NamedKey::Enter) => {
-                        self.confirm_issue_finder();
+                    DualModePaletteEvent::QueryChanged { value } => {
+                        let items = self.issue_finder_items(&value);
+                        picker.set_items(items);
+                        self.issue_finder = Some(picker);
                     }
-                    Key::Named(NamedKey::Down) | Key::Char('j')
-                        if !modifiers.ctrl && !modifiers.alt =>
-                    {
-                        let count = {
-                            let q = self
-                                .issue_finder
-                                .as_ref()
-                                .map(|f| f.query.clone())
-                                .unwrap_or_default();
-                            self.finder_matches(&q).len()
-                        };
-                        if let Some(f) = &mut self.issue_finder {
-                            f.move_down(count);
-                        }
+                    DualModePaletteEvent::TextConfirmed { .. }
+                    | DualModePaletteEvent::ModeToggled { .. }
+                    | DualModePaletteEvent::Consumed
+                    | DualModePaletteEvent::Ignored => {
+                        self.issue_finder = Some(picker);
                     }
-                    Key::Named(NamedKey::Up) | Key::Char('k')
-                        if !modifiers.ctrl && !modifiers.alt =>
-                    {
-                        if let Some(f) = &mut self.issue_finder {
-                            f.move_up();
-                        }
-                    }
-                    Key::Named(NamedKey::Backspace) => {
-                        if let Some(f) = &mut self.issue_finder {
-                            f.backspace();
-                        }
-                    }
-                    Key::Char(ch) if !modifiers.ctrl && !modifiers.alt => {
-                        if let Some(f) = &mut self.issue_finder {
-                            f.insert_char(*ch);
-                        }
-                    }
-                    _ => {}
                 }
+            } else {
+                self.issue_finder = Some(picker);
             }
             return Reaction::Redraw;
         }

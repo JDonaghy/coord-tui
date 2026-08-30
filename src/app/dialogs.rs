@@ -5969,24 +5969,28 @@ impl CoordApp {
     /// tool, not a work-queue filter).  Matches are scored by
     /// [`quadraui::text_util::fuzzy_score`] against the combined string
     /// `"#N title"` so typing a bare number or a word fragment from the
-    /// title both work naturally.
+    /// title both work naturally. The per-match `Vec<usize>` is
+    /// `fuzzy_score`'s own matched byte-offset list, carried through
+    /// unchanged for [`Self::issue_finder_items`] to hand to
+    /// `PaletteItem::match_positions` — one scoring pass produces both the
+    /// sort order and the highlight, so they can't disagree.
     ///
     /// Returns at most 50 results (enough to cover any reasonable viewport
     /// without unbounded allocation on large backlogs).
-    pub(crate) fn finder_matches(&self, query: &str) -> Vec<(String, u64, String)> {
+    pub(crate) fn finder_matches(&self, query: &str) -> Vec<(String, u64, String, Vec<usize>)> {
         const MAX_RESULTS: usize = 50;
         // #5: quadraui's fuzzy_score is case-sensitive by design; lowercase
         // both sides (its documented convention) for the case-insensitive
         // matching this finder has always offered.
         let query_lower = query.to_lowercase();
-        let mut scored: Vec<(i32, String, u64, String)> = self
+        let mut scored: Vec<(i32, String, u64, String, Vec<usize>)> = self
             .data
             .open_issues
             .iter()
             .filter_map(|oi| {
                 let haystack = format!("#{} {}", oi.number, oi.title).to_lowercase();
-                let (score, _) = fuzzy_score(&haystack, &query_lower)?;
-                Some((score, oi.repo_name.clone(), oi.number, oi.title.clone()))
+                let (score, positions) = fuzzy_score(&haystack, &query_lower)?;
+                Some((score, oi.repo_name.clone(), oi.number, oi.title.clone(), positions))
             })
             .collect();
         // Higher score first; tie-break by repo then number for stable ordering.
@@ -5998,11 +6002,68 @@ impl CoordApp {
         scored
             .into_iter()
             .take(MAX_RESULTS)
-            .map(|(_, repo, num, title)| (repo, num, title))
+            .map(|(_, repo, num, title, positions)| (repo, num, title, positions))
             .collect()
     }
 
+    /// Build `PaletteItem`s for the Ctrl+P finder's `Palette` popup (#16).
+    ///
+    /// Item text is exactly the `"#<number> <title>"` haystack
+    /// [`Self::finder_matches`] scores against (ASCII-lowercased for the
+    /// scoring pass, which is byte-length preserving — the same reasoning
+    /// the deleted `styled_match_spans` used to document), so the byte
+    /// offsets in `positions` line up with this rendered text unchanged —
+    /// no remap needed before they land in `PaletteItem::match_positions`,
+    /// which the backend highlights with `Theme::match_fg` natively. The
+    /// repo name goes in `detail`, which the `Palette` primitive renders
+    /// right-aligned and dimmed — no more hand-tracked column widths.
+    pub(crate) fn issue_finder_items(&self, query: &str) -> Vec<quadraui::PaletteItem> {
+        self.finder_matches(query)
+            .into_iter()
+            .map(|(repo, number, title, positions)| quadraui::PaletteItem {
+                text: StyledText::plain(format!("#{number} {title}")),
+                detail: Some(StyledText::plain(repo)),
+                icon: None,
+                match_positions: positions,
+                depth: 0,
+                expandable: false,
+                expanded: false,
+            })
+            .collect()
+    }
+
+    /// Popup geometry for the Ctrl+P issue finder — same centered-inset
+    /// formula as `doc_tab_picker_popup_rect` (`mod.rs`) / `plans.rs`'s
+    /// `help_overlay_rect`; reimplemented rather than shared for the same
+    /// reason those two are (see `doc_tab_picker_popup_rect`'s doc
+    /// comment) — this picker isn't Plans- or doc-tab-scoped.
+    pub(crate) fn issue_finder_popup_rect(main: Rect) -> Rect {
+        let w = (main.width - 4.0).max(20.0).min(main.width);
+        let h = (main.height - 2.0).max(10.0).min(main.height);
+        let x = main.x + (main.width - w) * 0.5;
+        let y = main.y + (main.height - h) * 0.5;
+        Rect::new(x, y, w, h)
+    }
+
+    /// Open the Ctrl+P issue finder (contract: toggled by `events.rs`'s
+    /// Ctrl+P handler). Unlike `open_doc_tab_picker`, there is no "nothing
+    /// to search" no-op — an empty `data.open_issues` still opens a usable
+    /// (if momentarily empty) finder, since issues can arrive asynchronously
+    /// after open.
+    pub(crate) fn open_issue_finder(&mut self) {
+        let items = self.issue_finder_items("");
+        self.issue_finder = Some(
+            DualModePaletteController::new("Find issue", None, items).with_id("issue-finder"),
+        );
+    }
+
     /// Called when the user presses Enter in the issue finder.
+    ///
+    /// `idx` is the confirmed item's index into `finder_matches(query)`;
+    /// `query` is the finder's query text at confirm time — both already
+    /// extracted by the caller in `events.rs` before it takes
+    /// `self.issue_finder` out of `self` (mirrors
+    /// `confirm_doc_tab_picker`'s signature/calling convention).
     ///
     /// Navigates to the selected issue:
     /// * If the issue appears in `pipeline_issues` (i.e. it carries a tracked
@@ -6010,19 +6071,14 @@ impl CoordApp {
     /// * Otherwise switch to the Board view and call the existing
     ///   `select_issue()` helper.
     ///
-    /// Clears `issue_finder` in all cases.
-    pub(crate) fn confirm_issue_finder(&mut self) {
-        let query = match &self.issue_finder {
-            Some(f) => f.query.clone(),
-            None => return,
-        };
-        let sel = self.issue_finder.as_ref().map(|f| f.selected_idx).unwrap_or(0);
-        let matches = self.finder_matches(&query);
-        let Some((repo, number, _title)) = matches.into_iter().nth(sel) else {
-            self.issue_finder = None;
+    /// A stale/out-of-range `idx` (nothing else can move the query while the
+    /// finder owns all input, so this should never actually happen) is a
+    /// silent no-op.
+    pub(crate) fn confirm_issue_finder(&mut self, idx: usize, query: &str) {
+        let matches = self.finder_matches(query);
+        let Some((repo, number, _title, _positions)) = matches.into_iter().nth(idx) else {
             return;
         };
-        self.issue_finder = None;
 
         // Navigate to Pipeline if the issue appears there (tracked label).
         // Match by coord_repo (local name) since `finder_matches` uses oi.repo_name.
@@ -6153,197 +6209,25 @@ impl CoordApp {
         }
     }
 
-    /// Render the Telescope-style issue finder overlay.
+    /// Render the Ctrl+P global issue fuzzy-finder as a quadraui `Palette`
+    /// popup (#16) — a no-op when closed.
     ///
-    /// Draws a centered box (~70 % wide, ~60 % tall) over `viewport` that shows:
-    /// * A search input line at the top (the typed query with a blinking cursor).
-    /// * Up to 15 scrolled result rows, the highlighted one inverted.
-    /// * A footer with the match count and key hints.
+    /// Replaces the ~430 LOC hand-rolled `ListView` box this used to paint
+    /// by hand: a bordered outer box, a block-cursor query line, a
+    /// hand-tracked scroll window, and a copy-pasted `match_fg` colour
+    /// literal (`Color::rgb(255, 200, 80)`) that had silently drifted from
+    /// `quadraui::theme::Theme::match_fg` into a second, unlinked source of
+    /// truth. `DualModePaletteController` (already driving `command_palette`
+    /// and `doc_tab_picker`) owns all of that now — cursor, scroll,
+    /// selection highlight, and, via `PaletteItem::match_positions`
+    /// (populated in `issue_finder_items`), the per-character fuzzy-match
+    /// highlight the backend paints from the theme constant directly.
     pub(crate) fn render_issue_finder(&self, backend: &mut dyn Backend, viewport: Rect) {
         let Some(finder) = &self.issue_finder else {
             return;
         };
-        let lh = backend.line_height();
-
-        // ── Size + position ──────────────────────────────────────────────────
-        let box_w = (viewport.width * 0.72).clamp(40.0 * lh, 90.0 * lh);
-        let box_h = (viewport.height * 0.65).clamp(10.0 * lh, 32.0 * lh);
-        let box_x = viewport.x + (viewport.width - box_w) * 0.5;
-        let box_y = viewport.y + (viewport.height - box_h) * 0.3;
-        let finder_rect = Rect::new(box_x, box_y, box_w, box_h);
-
-        // Outer bordered box (background + border).
-        backend.draw_list(
-            finder_rect,
-            &ListView {
-                id: WidgetId::new("issue-finder-bg"),
-                title: None,
-                items: Vec::new(),
-                selected_idx: 0,
-                scroll_offset: 0,
-                has_focus: true,
-                bordered: true,
-                h_scroll: 0,
-                max_content_width: None,
-                show_v_scrollbar: false,
-            },
-        );
-
-        let inner = shrink_rect(finder_rect, lh * 0.5);
-
-        // ── Build items ──────────────────────────────────────────────────────
-        let matches = self.finder_matches(&finder.query);
-        let match_count = matches.len();
-
-        // Header: query input line.
-        // Show a block-cursor glyph (▌) at the byte offset stored in
-        // `finder.cursor`.  The cursor is always on a valid UTF-8 char boundary
-        // so the byte-slices are safe.
-        let cursor_display = {
-            let before = &finder.query[..finder.cursor.min(finder.query.len())];
-            let after = &finder.query[finder.cursor.min(finder.query.len())..];
-            format!("  ▶  {}▌{}", before, after)
-        };
-        let mut items: Vec<ListItem> = Vec::new();
-        items.push(ListItem {
-            text: StyledText {
-                spans: vec![StyledSpan::with_fg(cursor_display, Color::rgb(120, 220, 120))],
-            },
-            icon: None,
-            detail: None,
-            decoration: Decoration::Normal,
-        });
-
-        // Separator — width tracks the rendered box so it fills the column
-        // on both narrow and wide terminals.
-        let sep_chars = (box_w / lh) as usize;
-        items.push(ListItem {
-            text: StyledText {
-                spans: vec![StyledSpan::with_fg(
-                    "─".repeat(sep_chars),
-                    Color::rgb(70, 70, 90),
-                )],
-            },
-            icon: None,
-            detail: None,
-            decoration: Decoration::Normal,
-        });
-
-        // ── Result rows ──────────────────────────────────────────────────────
-        // Visible window: keep selected_idx in view.
-        let visible_rows: usize = ((box_h / lh) as usize).saturating_sub(4).max(1);
-        let scroll_offset = if finder.selected_idx >= visible_rows {
-            finder.selected_idx + 1 - visible_rows
-        } else {
-            0
-        };
-
-        let visible_matches: Vec<_> = matches
-            .iter()
-            .enumerate()
-            .skip(scroll_offset)
-            .take(visible_rows)
-            .collect();
-
-        // Per-character match highlight colour (matches theme.rs `match_fg`).
-        let match_fg_color = Color::rgb(255, 200, 80);
-        if visible_matches.is_empty() {
-            items.push(ListItem {
-                text: StyledText {
-                    spans: vec![StyledSpan::with_fg(
-                        if finder.query.is_empty() {
-                            "  (type to search across all issues)".to_string()
-                        } else {
-                            "  No matching issues".to_string()
-                        },
-                        Color::rgb(100, 100, 120),
-                    )],
-                },
-                icon: None,
-                detail: None,
-                decoration: Decoration::Normal,
-            });
-        } else {
-            for (abs_idx, (repo, number, title)) in &visible_matches {
-                let is_selected = *abs_idx == finder.selected_idx;
-                let prefix = if is_selected { "▶ " } else { "  " };
-                let repo_short = trunc(repo, 18);
-                let title_short = trunc(title, 45);
-                let normal_fg = if is_selected {
-                    Color::rgb(230, 240, 255)
-                } else {
-                    Color::rgb(200, 200, 210)
-                };
-                // Build the row as multiple spans: a fixed prefix (arrow,
-                // number, repo) followed by per-character highlighted title.
-                // The prefix columns are not in the search haystack (repo)
-                // or use a fixed format (#number); only the title carries
-                // enough free text for per-char highlights to be useful.
-                // `Decoration::Header` is used for the selected row because
-                // quadraui's Decoration enum has no `Selected` variant; the
-                // Header variant applies the closest available background.
-                let prefix_text =
-                    format!("{}#{:<5}  {:18}  ", prefix, number, repo_short);
-                let mut spans = vec![StyledSpan::with_fg(prefix_text, normal_fg)];
-                spans.extend(styled_match_spans(
-                    &finder.query,
-                    title_short,
-                    normal_fg,
-                    match_fg_color,
-                ));
-                items.push(ListItem {
-                    text: StyledText { spans },
-                    icon: None,
-                    detail: None,
-                    decoration: if is_selected {
-                        Decoration::Header
-                    } else {
-                        Decoration::Normal
-                    },
-                });
-            }
-        }
-
-        // Footer separator (same dynamic width as the header separator).
-        items.push(ListItem {
-            text: StyledText {
-                spans: vec![StyledSpan::with_fg(
-                    "─".repeat(sep_chars),
-                    Color::rgb(70, 70, 90),
-                )],
-            },
-            icon: None,
-            detail: None,
-            decoration: Decoration::Normal,
-        });
-        let hint = format!(
-            "  {} matches  ·  j/k ↑↓ navigate  ·  Enter jump  ·  Esc close",
-            match_count
-        );
-        items.push(ListItem {
-            text: StyledText {
-                spans: vec![StyledSpan::with_fg(hint, Color::rgb(100, 100, 120))],
-            },
-            icon: None,
-            detail: None,
-            decoration: Decoration::Normal,
-        });
-
-        backend.draw_list(
-            inner,
-            &ListView {
-                id: WidgetId::new("issue-finder"),
-                title: None,
-                items,
-                selected_idx: 0,
-                scroll_offset: 0,
-                has_focus: true,
-                bordered: false,
-                h_scroll: 0,
-                max_content_width: None,
-                show_v_scrollbar: false,
-            },
-        );
+        let popup = Self::issue_finder_popup_rect(viewport);
+        finder.render(popup, backend);
     }
 
     // ── Live-session display helpers ────────────────────────────────────────

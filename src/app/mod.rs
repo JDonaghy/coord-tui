@@ -1204,10 +1204,11 @@ pub(crate) fn format_age(ts: Option<f64>, now: f64) -> String {
 
 /// #541: Build styled spans for `text` with per-character fuzzy-match highlights.
 ///
-/// Characters at positions returned by `fuzzy_score(query, text)` are coloured
-/// with `match_fg`; all other characters use `normal_fg`.  Returns a single
-/// span in `normal_fg` when the query is empty, the text is empty, or no
-/// subsequence match exists (fall-back: caller already filtered to matches).
+/// Characters at positions returned by `quadraui::text_util::fuzzy_score`
+/// (called case-insensitively, see below) are coloured with `match_fg`; all
+/// other characters use `normal_fg`.  Returns a single span in `normal_fg`
+/// when the query is empty, the text is empty, or no subsequence match
+/// exists (fall-back: caller already filtered to matches).
 fn styled_match_spans(
     query: &str,
     text: &str,
@@ -1217,7 +1218,16 @@ fn styled_match_spans(
     if query.is_empty() || text.is_empty() {
         return vec![StyledSpan::with_fg(text, normal_fg)];
     }
-    let Some((_score, positions)) = fuzzy_score(query, text) else {
+    // #5: quadraui::text_util::fuzzy_score is case-sensitive by design;
+    // lowercase both sides (its documented convention) to keep this finder's
+    // prior case-insensitive behaviour. `positions` are then byte offsets
+    // into the *lowercased* haystack — ASCII lowercasing is byte-length
+    // preserving, so they line up with `text`'s own byte offsets below for
+    // every haystack this finder sees (issue titles, repo names).
+    let text_lower = text.to_lowercase();
+    let query_lower = query.to_lowercase();
+    let Some((_score, positions)) = quadraui::text_util::fuzzy_score(&text_lower, &query_lower)
+    else {
         // No match in this sub-string (possible when query matched across
         // the number+title boundary but not in title alone).  Fall back to
         // uniform colouring.
@@ -1226,12 +1236,12 @@ fn styled_match_spans(
     if positions.is_empty() {
         return vec![StyledSpan::with_fg(text, normal_fg)];
     }
-    // Build a set of matched char positions for O(1) lookup.
+    // Build a set of matched byte positions for O(1) lookup.
     let pos_set: std::collections::HashSet<usize> = positions.into_iter().collect();
     let mut spans: Vec<StyledSpan> = Vec::new();
     let mut current = String::new();
     let mut current_is_match = false;
-    for (i, c) in text.chars().enumerate() {
+    for (i, c) in text.char_indices() {
         let is_match = pos_set.contains(&i);
         if is_match != current_is_match && !current.is_empty() {
             spans.push(StyledSpan::with_fg(

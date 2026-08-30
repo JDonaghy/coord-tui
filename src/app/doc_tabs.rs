@@ -47,11 +47,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use quadraui::primitives::split_tree::SplitDirection;
+use quadraui::text_util::{display_width, fuzzy_score};
 use quadraui::{PaletteItem, SplitTree, StyledSpan, StyledText};
 use serde::{Deserialize, Serialize};
 
 use crate::app::drive_queue::repo_alias;
-use crate::app::format::{fuzzy_score, trunc};
+use crate::app::format::trunc;
 use crate::app::types::{BoardData, BoardDetailTab, PipelineDetailTab};
 
 /// Which panel's document set a tab belongs to.
@@ -142,7 +143,7 @@ const TAB_CLOSE_CHAR: char = '×';
 /// the 20-column budget, so a 26-column label becomes 19 columns of text plus
 /// the marker, not 20 plus a 21st column.
 pub(crate) fn truncate_with_ellipsis(s: &str, max_cols: usize) -> String {
-    if s.chars().count() <= max_cols {
+    if display_width(s) <= max_cols {
         return s.to_string();
     }
     if max_cols == 0 {
@@ -1690,11 +1691,15 @@ pub(crate) fn filter_doc_tab_picker_rows(
     if query.is_empty() {
         return rows;
     }
-    let mut scored: Vec<(u32, DocTabPickerRow)> = rows
+    // #5: quadraui::text_util::fuzzy_score is case-sensitive by design
+    // (callers that want case-insensitive matching lowercase both sides
+    // first, per its doc comment) — lowercase here to keep this picker's
+    // prior case-insensitive behaviour.
+    let mut scored: Vec<(i32, DocTabPickerRow)> = rows
         .into_iter()
         .filter_map(|row| {
-            let haystack = format!("#{} {}", row.number, row.title);
-            let (score, _) = fuzzy_score(query, &haystack)?;
+            let haystack = format!("#{} {}", row.number, row.title).to_lowercase();
+            let (score, _) = fuzzy_score(&haystack, &query.to_lowercase())?;
             Some((score, row))
         })
         .collect();
@@ -2224,6 +2229,21 @@ mod tests {
     #[test]
     fn truncate_with_ellipsis_zero_budget_is_empty() {
         assert_eq!(truncate_with_ellipsis("#101 Fix", 0), "");
+    }
+
+    /// #5: `truncate_with_ellipsis` measures in *display columns*
+    /// (`quadraui::text_util::display_width`), not `.chars().count()`. A
+    /// sidebar action label carrying a wide glyph like `🎭`
+    /// (dispatch-gate-a-mock, sidebar.rs:657 — same family as the `🔍`
+    /// audit-outcomes icon) is one `char` but two terminal columns; the old
+    /// char-count implementation would have measured `"🎭 abcdef"` as 8
+    /// "chars" and returned `"🎭 abc…"` — 6 chars but 7 display columns,
+    /// one over the budget. The fix keeps the whole render within budget.
+    #[test]
+    fn truncate_with_ellipsis_respects_wide_glyph_display_width() {
+        let out = truncate_with_ellipsis("🎭 abcdef", 6);
+        assert_eq!(out, "🎭 ab…");
+        assert_eq!(display_width(&out), 6);
     }
 
     /// Exact strings lifted from the ms-65 §2 mocks.

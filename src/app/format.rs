@@ -1,6 +1,11 @@
 //! Pure formatting helpers extracted from `app/mod.rs` (#743).
 //!
-//! No I/O, no quadraui types, no app state — pure text/number transformations.
+//! No I/O, no app state — pure text/number transformations. `trunc` builds on
+//! `quadraui::text_util::char_cell_width` (#5) for correct terminal-column
+//! measurement rather than reimplementing width tables; `fuzzy_score` and
+//! `word_wrap` used to live here too but were deleted in favour of
+//! `quadraui::text_util::{fuzzy_score, word_wrap}` directly at call sites
+//! (#5) — see that module for the current implementations.
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Whole days, in seconds — the unit [`format_unix_time`] rolls up to once a
@@ -337,102 +342,29 @@ pub(crate) fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn trunc(s: &str, max_chars: usize) -> &str {
-    match s.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => &s[..byte_idx],
-        None => s,
-    }
-}
-
-/// #541: Fuzzy subsequence match scorer used by the global issue finder.
+/// Truncate `s` to at most `max_cols` *terminal display columns* (not
+/// `char`s — a wide glyph like `🔍`/`🎭` (sidebar action icons, sidebar.rs
+/// action-icon table) occupies two columns, so measuring with
+/// `.chars().count()` under-counts it by half and mis-truncates by a
+/// column; see #5).
 ///
-/// Returns `None` when not every character of `query` appears in `haystack`
-/// in order (case-insensitive).  Returns `Some((score, positions))` otherwise,
-/// where `positions` is the list of matched character indices in `haystack`
-/// (char indices, not byte offsets), each matched character contributes +1 to
-/// score, and each *consecutive* match pair earns an additional +2 bonus so
-/// tighter matches rank higher.  An empty query always matches with score 0
-/// and an empty positions list.
-pub(crate) fn fuzzy_score(query: &str, haystack: &str) -> Option<(u32, Vec<usize>)> {
-    if query.is_empty() {
-        return Some((0, Vec::new()));
+/// Built on [`quadraui::text_util::char_cell_width`] rather than
+/// reimplementing Unicode width tables. Always cuts on a `char` boundary and
+/// never splits a double-width glyph's two columns — if the next character
+/// would overflow the budget it is dropped whole, even if one column of
+/// budget remains. Mirrors `quadraui::tui::text::truncate_to_width`'s
+/// algorithm exactly, but reimplemented here on the always-available
+/// `text_util` primitive since `quadraui::tui` is gated behind the crate's
+/// own `tui` feature (off for a `--no-default-features --features gtk`
+/// build) and this helper is called from feature-independent app logic.
+pub(crate) fn trunc(s: &str, max_cols: usize) -> &str {
+    let mut used = 0usize;
+    for (idx, c) in s.char_indices() {
+        let w = quadraui::text_util::char_cell_width(c) as usize;
+        if used + w > max_cols {
+            return &s[..idx];
+        }
+        used += w;
     }
-    let q: Vec<char> = query.to_lowercase().chars().collect();
-    let h: Vec<char> = haystack.to_lowercase().chars().collect();
-    let mut qi = 0usize;
-    let mut score: u32 = 0;
-    let mut prev_matched = false;
-    let mut positions: Vec<usize> = Vec::new();
-    for (hi, hc) in h.iter().enumerate() {
-        if qi < q.len() && *hc == q[qi] {
-            qi += 1;
-            score += 1;
-            if prev_matched {
-                score += 2; // consecutive-run bonus
-            }
-            prev_matched = true;
-            positions.push(hi);
-        } else {
-            prev_matched = false;
-        }
-    }
-    if qi == q.len() { Some((score, positions)) } else { None }
-}
-
-/// Word-wrap `text` to `width` character columns, respecting existing `\n`
-/// line breaks.  Empty lines are preserved.  If `width == 0` or a line is
-/// already within budget, it is emitted as-is.  Very long single "words"
-/// (e.g. long URLs) are hard-broken at the column limit.
-pub(crate) fn word_wrap(text: &str, width: usize) -> Vec<String> {
-    let mut result = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            result.push(String::new());
-            continue;
-        }
-        if width == 0 || line.chars().count() <= width {
-            result.push(line.to_string());
-            continue;
-        }
-        // Word-wrap this line.
-        let mut current = String::new();
-        for word in line.split(' ') {
-            if word.is_empty() {
-                // Preserve a single space gap when we still have room.
-                if !current.is_empty() && current.chars().count() < width {
-                    current.push(' ');
-                }
-                continue;
-            }
-            let word_len = word.chars().count();
-            if current.is_empty() {
-                if word_len > width {
-                    // Hard-break a very long word at the column limit.
-                    let mut rest = word;
-                    while rest.chars().count() > width {
-                        let cut = rest
-                            .char_indices()
-                            .nth(width)
-                            .map(|(i, _)| i)
-                            .unwrap_or(rest.len());
-                        result.push(rest[..cut].to_string());
-                        rest = &rest[cut..];
-                    }
-                    current = rest.to_string();
-                } else {
-                    current.push_str(word);
-                }
-            } else if current.chars().count() + 1 + word_len <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                result.push(current);
-                current = word.to_string();
-            }
-        }
-        if !current.is_empty() {
-            result.push(current);
-        }
-    }
-    result
+    s
 }

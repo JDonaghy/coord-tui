@@ -10,6 +10,9 @@ use super::*;
 // builder (`approved.rs`) and by the dispatch-failure modal below, which
 // points the operator at it as the local-only alternative.
 use super::approved::APPROVED_ATTENDED_INTAKE_ITEM;
+// #5: fuzzy_score/word_wrap moved out of `format.rs` in favour of
+// quadraui's own implementations — see format.rs's module doc comment.
+use quadraui::text_util::{fuzzy_score, word_wrap};
 
 // ─── Right-click context menu (#259) ─────────────────────────────────────────
 
@@ -5902,21 +5905,26 @@ impl CoordApp {
     ///
     /// Searches all `data.open_issues` (both `open` and `closed` state — the
     /// backlog contains historical issues too, and the finder is a navigation
-    /// tool, not a work-queue filter).  Matches are scored by [`fuzzy_score`]
-    /// against the combined string `"#N title"` so typing a bare number or a
-    /// word fragment from the title both work naturally.
+    /// tool, not a work-queue filter).  Matches are scored by
+    /// [`quadraui::text_util::fuzzy_score`] against the combined string
+    /// `"#N title"` so typing a bare number or a word fragment from the
+    /// title both work naturally.
     ///
     /// Returns at most 50 results (enough to cover any reasonable viewport
     /// without unbounded allocation on large backlogs).
     pub(crate) fn finder_matches(&self, query: &str) -> Vec<(String, u64, String)> {
         const MAX_RESULTS: usize = 50;
-        let mut scored: Vec<(u32, String, u64, String)> = self
+        // #5: quadraui's fuzzy_score is case-sensitive by design; lowercase
+        // both sides (its documented convention) for the case-insensitive
+        // matching this finder has always offered.
+        let query_lower = query.to_lowercase();
+        let mut scored: Vec<(i32, String, u64, String)> = self
             .data
             .open_issues
             .iter()
             .filter_map(|oi| {
-                let haystack = format!("#{} {}", oi.number, oi.title);
-                let (score, _) = fuzzy_score(query, &haystack)?;
+                let haystack = format!("#{} {}", oi.number, oi.title).to_lowercase();
+                let (score, _) = fuzzy_score(&haystack, &query_lower)?;
                 Some((score, oi.repo_name.clone(), oi.number, oi.title.clone()))
             })
             .collect();

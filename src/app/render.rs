@@ -6,6 +6,9 @@
 //! explicit imports because their dependency surface is small and stable.
 #[allow(unused_imports)]
 use super::*;
+// #5: word_wrap moved out of `format.rs` in favour of quadraui's own
+// implementation — see format.rs's module doc comment.
+use quadraui::text_util::word_wrap;
 
 // ─── ShellApp implementation ──────────────────────────────────────────────────
 
@@ -1308,9 +1311,16 @@ pub(crate) fn parse_json_events_readable(
             let mut items = Vec::new();
             let header = format!("  Turn {}{}", n, elapsed_str);
             items.push(activity_item(&header, Color::rgb(80, 80, 100)));
-            for wrapped_line in word_wrap(text_nl.trim_end(), prose_wrap) {
-                let display = format!("{}{}", indent, wrapped_line);
-                items.push(activity_item(&display, Color::rgb(200, 210, 230)));
+            // #5: quadraui::text_util::word_wrap wraps a single logical line
+            // (no embedded `\n`) — `text_nl` deliberately preserves paragraph
+            // breaks (see `extract_text_block_keep_newlines`'s doc comment),
+            // so split on them first and wrap each line, same convention
+            // quadraui's own `compose::chat_controller` uses.
+            for src_line in text_nl.trim_end().split('\n') {
+                for wrapped_line in word_wrap(src_line, prose_wrap) {
+                    let display = format!("{}{}", indent, wrapped_line);
+                    items.push(activity_item(&display, Color::rgb(200, 210, 230)));
+                }
             }
             // Mixed-content turn: also emit one arrow line per tool call in
             // the same turn (e.g. "I'll read that file" + Read in one turn).

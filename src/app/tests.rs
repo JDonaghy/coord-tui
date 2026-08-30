@@ -479,12 +479,32 @@
     #[test]
     fn trunc_multibyte_no_panic() {
         // "🎉" is 4 UTF-8 bytes.  The old `&s[..3]` would have panicked by
-        // splitting the emoji in the middle.  The new char-index implementation
-        // must return the correct 3-character prefix cleanly.
+        // splitting the emoji in the middle.  The char-index-safe
+        // implementation must not panic slicing this string.
         let s = "🎉 hello";
-        // chars: ['🎉', ' ', 'h', 'e', 'l', 'l', 'o']
-        // first 3 chars → "🎉 h"
-        assert_eq!(trunc(s, 3), "🎉 h");
+        // #5: `trunc`'s budget is *display columns*, not chars — 🎉 is one
+        // char but two terminal columns (quadraui::text_util::char_cell_width).
+        // chars: ['🎉'(2 cols), ' '(1), 'h'(1), 'e', 'l', 'l', 'o']
+        // budget 3 fits 🎉 (2) + ' ' (1) = 3 cols exactly; 'h' would need a
+        // 4th column, so it's dropped. Before #5 (`.chars().count()`-based)
+        // this returned "🎉 h" — 3 *chars* but 4 display columns, one over
+        // budget; that was the bug #5 fixes.
+        assert_eq!(trunc(s, 3), "🎉 ");
+        assert_eq!(quadraui::text_util::display_width(trunc(s, 3)), 3);
+    }
+
+    #[test]
+    fn trunc_wide_glyph_respects_display_width_not_char_count() {
+        // "🔍" is the sidebar's audit-outcomes action icon (sidebar.rs:657) —
+        // one `char`, two terminal columns. A budget-3 truncation must leave
+        // room for only one more column after the glyph, not two: the old
+        // `.chars().count()`-based `trunc` would have returned "🔍 a" (3
+        // chars, but 4 display columns — one over budget and exactly the
+        // glyph-overlap bug #5 exists to fix).
+        let s = "🔍 ab";
+        let out = trunc(s, 3);
+        assert_eq!(out, "🔍 ");
+        assert_eq!(quadraui::text_util::display_width(out), 3);
     }
 
     #[test]
@@ -24528,42 +24548,43 @@
     /// Cross-type mismatch: old_type="refinement" but new assignment is
     /// "test-chat" → must NOT rebind (different chat sessions on the same
     /// issue should not cross-contaminate each other).
-    // ── word_wrap (#385) ──────────────────────────────────────────────────────
+    // ── word_wrap (#385, moved onto quadraui::text_util::word_wrap by #5) ─────
+    //
+    // #5: `word_wrap` moved from a local `format.rs` clone (which handled `\n`
+    // itself) to `quadraui::text_util::word_wrap`, which wraps a *single*
+    // logical line and documents that multi-line callers must split on `\n`
+    // first. That leaves two different empty-input contracts: the old local
+    // fn returned `vec![]` for `""` (via `"".lines()`, zero iterations);
+    // quadraui's returns `vec![String::new()]` (one empty row) — see its
+    // doc comment. `word_wrap_empty_string_returns_one_empty_row` below
+    // pins the new contract. The former `word_wrap_preserves_newlines` /
+    // `_preserves_empty_lines` tests exercised the `\n`-splitting behaviour
+    // that now lives at the render.rs call site instead (`\n`.split then
+    // wrap-per-line) — see
+    // `readable_assistant_multiline_text_preserves_paragraph_break` below.
 
     #[test]
-    fn word_wrap_empty_string_returns_empty() {
-        assert!(word_wrap("", 80).is_empty());
+    fn quadraui_word_wrap_empty_string_returns_one_empty_row() {
+        assert_eq!(quadraui::text_util::word_wrap("", 80), vec![String::new()]);
     }
 
     #[test]
-    fn word_wrap_short_line_unchanged() {
-        let r = word_wrap("hello world", 80);
+    fn quadraui_word_wrap_short_line_unchanged() {
+        let r = quadraui::text_util::word_wrap("hello world", 80);
         assert_eq!(r, vec!["hello world"]);
     }
 
     #[test]
-    fn word_wrap_respects_width() {
+    fn quadraui_word_wrap_respects_width() {
         // "foo bar baz" at width 7: "foo bar" + "baz"
-        let r = word_wrap("foo bar baz", 7);
+        let r = quadraui::text_util::word_wrap("foo bar baz", 7);
         assert_eq!(r, vec!["foo bar", "baz"]);
     }
 
     #[test]
-    fn word_wrap_preserves_newlines() {
-        let r = word_wrap("line one\nline two", 80);
-        assert_eq!(r, vec!["line one", "line two"]);
-    }
-
-    #[test]
-    fn word_wrap_preserves_empty_lines() {
-        let r = word_wrap("a\n\nb", 80);
-        assert_eq!(r, vec!["a", "", "b"]);
-    }
-
-    #[test]
-    fn word_wrap_zero_width_no_wrapping() {
+    fn quadraui_word_wrap_zero_width_no_wrapping() {
         let long = "x ".repeat(100);
-        let r = word_wrap(long.trim(), 0);
+        let r = quadraui::text_util::word_wrap(long.trim(), 0);
         assert_eq!(r.len(), 1, "width=0 should disable wrapping");
     }
 
@@ -24607,6 +24628,39 @@
                 "prose line exceeds wrap_width: {text:?}"
             );
         }
+    }
+
+    /// #5: `parse_json_events_readable`'s prose-wrap call site
+    /// (render.rs) splits `text_nl` on `\n` before handing each line to
+    /// `quadraui::text_util::word_wrap`, since that function (unlike the
+    /// local `format::word_wrap` it replaced) wraps a single logical line
+    /// only and does not itself understand `\n`. A two-paragraph message
+    /// must still render as two separate wrapped blocks, not one line with
+    /// a literal embedded `\n` glued into a "word".
+    #[test]
+    fn readable_assistant_multiline_text_preserves_paragraph_break() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first paragraph\n\nsecond paragraph"}]}}"#;
+        let mut turn = 0;
+        let items = parse_json_events_readable(line, &mut turn, None, 80);
+        let texts: Vec<String> = items
+            .iter()
+            .map(|i| i.text.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+        // Header + "first paragraph" + a blank separator row + "second paragraph".
+        assert!(
+            texts.iter().any(|t| t.trim() == "first paragraph"),
+            "got: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.trim() == "second paragraph"),
+            "got: {texts:?}"
+        );
+        // No row should contain a literal `\n` — that would mean the two
+        // paragraphs got glued into one "word" instead of split first.
+        assert!(
+            texts.iter().all(|t| !t.contains('\n')),
+            "a row still carries a literal newline: {texts:?}"
+        );
     }
 
     #[test]
@@ -30377,30 +30431,69 @@
     }
 
     // ── #541: issue fuzzy finder ──────────────────────────────────────────────
+    //
+    // #5: `fuzzy_score` moved from a local `format.rs` clone
+    // (`fuzzy_score(query, haystack) -> Option<(u32, Vec<usize>)>`, always
+    // case-insensitive, `positions` as *char* indices) to
+    // `quadraui::text_util::fuzzy_score(haystack, query) ->
+    // Option<(i32, Vec<usize>)>` — argument order and score type both
+    // flipped, `positions` are now *byte* offsets, and matching is
+    // case-sensitive by design (its doc comment: callers that want
+    // case-insensitive matching lowercase both sides first). The three call
+    // sites (`finder_matches`, `filter_doc_tab_picker_rows`,
+    // `styled_match_spans`) all lowercase both sides to keep the finder's
+    // prior case-insensitive behaviour — see `finder_matches_returns_correct_issues`
+    // below for that composed, case-insensitive behaviour end to end.
 
     #[test]
-    fn fuzzy_score_empty_query_always_matches() {
-        assert_eq!(fuzzy_score("", "anything"), Some((0, Vec::new())));
-        assert_eq!(fuzzy_score("", ""), Some((0, Vec::new())));
+    fn quadraui_fuzzy_score_empty_query_always_matches() {
+        assert_eq!(
+            quadraui::text_util::fuzzy_score("anything", ""),
+            Some((0, Vec::new()))
+        );
+        assert_eq!(quadraui::text_util::fuzzy_score("", ""), Some((0, Vec::new())));
     }
 
     #[test]
-    fn fuzzy_score_subsequence_match() {
-        // "fc" matches "FuzzyComplex" in order (case-insensitive)
-        assert!(fuzzy_score("fc", "FuzzyComplex").is_some());
-        // "cf" does NOT match in that order
-        assert!(fuzzy_score("cf", "FuzzyComplex").is_none());
+    fn quadraui_fuzzy_score_subsequence_match() {
+        // "fc" matches "fuzzycomplex" in order.
+        assert!(quadraui::text_util::fuzzy_score("fuzzycomplex", "fc").is_some());
+        // "cf" does NOT match in that order.
+        assert!(quadraui::text_util::fuzzy_score("fuzzycomplex", "cf").is_none());
         // Consecutive characters score higher than non-consecutive.
-        let consec = fuzzy_score("ab", "ab").unwrap().0;
-        let non_consec = fuzzy_score("ab", "axb").unwrap().0;
+        let consec = quadraui::text_util::fuzzy_score("ab", "ab").unwrap().0;
+        let non_consec = quadraui::text_util::fuzzy_score("axb", "ab").unwrap().0;
         assert!(consec > non_consec, "consecutive run should score higher");
-        // Matched positions are returned.
-        let (_, positions) = fuzzy_score("fc", "FuzzyComplex").unwrap();
+        // Matched positions are returned (byte offsets into haystack).
+        let (_, positions) = quadraui::text_util::fuzzy_score("fuzzycomplex", "fc").unwrap();
         assert!(!positions.is_empty(), "positions must be non-empty for a match");
         // Empty query always matches with no positions.
-        let (score, positions) = fuzzy_score("", "anything").unwrap();
+        let (score, positions) = quadraui::text_util::fuzzy_score("anything", "").unwrap();
         assert_eq!(score, 0);
         assert!(positions.is_empty());
+    }
+
+    /// #5: `styled_match_spans` now lowercases both sides before calling
+    /// `quadraui::text_util::fuzzy_score` (case-insensitive, matching the
+    /// finder's prior behaviour) and switched from `text.chars().enumerate()`
+    /// (char indices) to `text.char_indices()` (byte offsets) to match the
+    /// byte-offset `positions` quadraui's `fuzzy_score` now returns. Confirm
+    /// a lower-case query still highlights the matched characters of a
+    /// title-cased string, split into exactly the matched/unmatched spans.
+    #[test]
+    fn styled_match_spans_highlights_case_insensitive_match() {
+        let normal_fg = Color::rgb(200, 200, 210);
+        let match_fg = Color::rgb(255, 200, 80);
+        let spans = styled_match_spans("fix", "Fix login", normal_fg, match_fg);
+        // "Fix" (case-insensitively) is a contiguous prefix match, so the
+        // first span should be the matched "Fix" in match_fg, followed by
+        // the unmatched " login" in normal_fg.
+        let rebuilt: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(rebuilt, "Fix login", "spans must reconstruct the original text");
+        assert_eq!(spans[0].text, "Fix");
+        assert_eq!(spans[0].fg, Some(match_fg));
+        assert_eq!(spans[1].text, " login");
+        assert_eq!(spans[1].fg, Some(normal_fg));
     }
 
     #[test]
@@ -30442,6 +30535,35 @@
 
         let all = app.finder_matches("");
         assert_eq!(all.len(), 2, "empty query matches all issues");
+    }
+
+    /// #5: `finder_matches` lowercases both sides before calling
+    /// `quadraui::text_util::fuzzy_score` (case-sensitive by design) so
+    /// typing a lower-case query still finds a title-cased issue title —
+    /// the finder's behaviour before and after the #5 migration.
+    #[test]
+    fn finder_matches_is_case_insensitive() {
+        let mut app = make_app_default();
+        app.data.open_issues = vec![OpenIssue {
+            repo_name: "repo-a".to_string(),
+            number: 7,
+            title: "Fix Login Race".to_string(),
+            body: String::new(),
+            labels: Vec::new(),
+            state: "open".to_string(),
+            milestone_number: None,
+            milestone_title: None,
+            body_truncated: false,
+            body_len: None,
+            synced_at: None,
+        }];
+        let matches = app.finder_matches("login");
+        assert_eq!(
+            matches.len(),
+            1,
+            "lower-case query should match title-cased title"
+        );
+        assert_eq!(matches[0].1, 7);
     }
 
     #[test]

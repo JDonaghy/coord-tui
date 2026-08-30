@@ -120,6 +120,20 @@ pub(crate) const SCROLL_RIGHT_MARKER: char = '›';
 /// its own code point to be unambiguous. §9 pins this one.
 pub(crate) const PANE_DIVIDER_CHAR: char = '║';
 
+/// #3: quadraui's `tui` backend feature is optional (see `Cargo.toml`'s `tui`
+/// feature) so `quadraui::tui::TAB_CLOSE_CHAR` isn't reachable in a
+/// GTK-only build. The glyph itself carries no TUI-specific behavior — it's
+/// just the close-glyph app-level tab labels embed regardless of backend
+/// (see [`doc_tab_label`]) — so mirror its value here rather than pull the
+/// whole `quadraui::tui` module back in. This duplication is a stopgap:
+/// properly unbaking `doc_tab_label`'s tab-strip rendering needs a
+/// backend-neutral home for the constant in quadraui first (out of scope
+/// for #3).
+#[cfg(feature = "tui")]
+const TAB_CLOSE_CHAR: char = quadraui::tui::TAB_CLOSE_CHAR;
+#[cfg(not(feature = "tui"))]
+const TAB_CLOSE_CHAR: char = '×';
+
 /// Truncate `s` to at most `max_cols` display columns, appending `…` (which
 /// occupies the last column) when anything was dropped.
 ///
@@ -1529,7 +1543,7 @@ pub(crate) fn doc_tab_label(
     }
     inner.push_str(&base);
     inner.push(' ');
-    inner.push(quadraui::tui::TAB_CLOSE_CHAR);
+    inner.push(TAB_CLOSE_CHAR);
     if is_active {
         format!("[{inner}] ")
     } else {
@@ -1555,7 +1569,7 @@ pub(crate) fn doc_tab_close_col(label: &str) -> Option<usize> {
     label
         .chars()
         .rev()
-        .position(|c| c == quadraui::tui::TAB_CLOSE_CHAR)
+        .position(|c| c == TAB_CLOSE_CHAR)
         .map(|from_end| total - 1 - from_end)
 }
 
@@ -2025,7 +2039,7 @@ mod tests {
         let col = doc_tab_close_col(&label).expect("label carries a close glyph");
         let title_x = label
             .chars()
-            .position(|c| c == quadraui::tui::TAB_CLOSE_CHAR)
+            .position(|c| c == TAB_CLOSE_CHAR)
             .unwrap();
         assert!(
             col > title_x,
@@ -2033,10 +2047,7 @@ mod tests {
         );
         // And it is genuinely the appended glyph: only the separator space
         // (and, on an active tab, `]`) may follow it.
-        assert_eq!(
-            label.chars().nth(col),
-            Some(quadraui::tui::TAB_CLOSE_CHAR)
-        );
+        assert_eq!(label.chars().nth(col), Some(TAB_CLOSE_CHAR));
         assert_eq!(label.chars().skip(col + 1).collect::<String>(), " ");
     }
 
@@ -2278,7 +2289,7 @@ mod tests {
             for preview in [false, true] {
                 let label = doc_tab_label("r", 1, "t", false, preview, active, DOC_TAB_LABEL_COLS);
                 assert_eq!(
-                    label.matches(quadraui::tui::TAB_CLOSE_CHAR).count(),
+                    label.matches(TAB_CLOSE_CHAR).count(),
                     1,
                     "one close glyph per tab (active={active}, preview={preview})"
                 );

@@ -36329,6 +36329,74 @@
         );
     }
 
+    /// #15 drift guard: the per-card badge row must actually reach the
+    /// screen, painted from `quadraui::CardBadge` values.
+    ///
+    /// The Board primitive was genericized upstream in quadraui#476 and
+    /// coord-tui migrated onto the new types in #1864: the fixed `Stage`
+    /// enum and `(Stage, BadgeStatus)` tuples became host-supplied
+    /// [`quadraui::CardBadge`] `{ label, status }`, and
+    /// `BadgeStatus::RequestChanges` became the generic `Warning`.
+    ///
+    /// #15's whole complaint was that this coupling is invisible to the
+    /// compiler in the drift direction that matters: `kanban_stage_badges`
+    /// is exercised only by unit tests that call it directly, so if a
+    /// refactor stopped attaching `badges` to `BoardCard` — or remapped
+    /// `Warning` back onto something quadraui no longer paints — all six of
+    /// those unit tests plus every existing Kanban TuiDriver test would
+    /// still pass while the badge row silently vanished from the board.
+    /// This test closes that hole by asserting on rendered cells.
+    ///
+    /// The expected glyphs are quadraui's own documented badge alphabet
+    /// (`tui/board.rs`): `✓` Passed, `●` Running, `↩` Warning, `✗` Blocked,
+    /// `·` Pending — each immediately followed by the host-supplied label
+    /// (`W`/`R`/`M`), with badges separated by a single space.
+    #[test]
+    fn tuidriver_kanban_card_badge_row_renders_status_glyphs() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        // Issue 99: a running work assignment, no review verdict, not merged
+        // → Work=Running (●W), Review=Pending (·R), Merge=Pending (·M).
+        let mut running = make_assignment_typed("running", 99, "test-repo", Some("work"));
+        running.review_verdict = None;
+
+        // Issue 98: a finished review assignment carrying the coord-native
+        // "request-changes" verdict → Review=Warning, which quadraui paints
+        // as `↩`. This is the exact arm quadraui#476 renamed.
+        let mut changes_requested =
+            make_assignment_typed("done", 98, "test-repo", Some("review"));
+        changes_requested.review_verdict = Some("request-changes".to_string());
+
+        let app = make_app_with_assignments(vec![running, changes_requested]);
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 160, 40);
+        click_activity_icon(&mut driver, "▦"); // switch to Kanban
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains("#99") && screen.contains("#98"),
+            "both issues must render as Kanban cards:\n{screen}"
+        );
+
+        // The running issue's work badge: `●` (Running) + host label "W".
+        assert!(
+            screen.contains("●W"),
+            "a running issue's work badge must paint as '●W' — the badge row \
+             is not reaching the screen from BoardCard.badges:\n{screen}"
+        );
+        // Pending stages paint dim `·` + their host label.
+        assert!(
+            screen.contains("·R") || screen.contains("·M"),
+            "pending stage badges must paint as '·R'/'·M':\n{screen}"
+        );
+        // The renamed Warning arm: `request-changes` → BadgeStatus::Warning → `↩`.
+        assert!(
+            screen.contains("↩R"),
+            "a 'request-changes' verdict must paint its review badge as '↩R' \
+             (quadraui#476 renamed RequestChanges -> Warning):\n{screen}"
+        );
+    }
+
     /// #741 core smoke: clicking the Board icon (B) from Merge Queue must
     /// return to the Board view. Guards the activity-bar panel routing
     /// against regressions that would break per-view switching. §3 (#782):

@@ -2142,6 +2142,31 @@ impl CoordApp {
     /// quadraui-painted affordance in the TUI backend. A no-op (beyond
     /// resolving `scroll_offset`, itself inert at `width <= 0.0`) when `bar`
     /// has no tabs.
+    ///
+    /// # Known GTK gap (#24, not fixed here)
+    ///
+    /// `width` is the strip rect's width **in the backend's own unit**, but
+    /// the measurer below is in characters. That is exact for TUI (a cell is
+    /// a character) and meaningless for GTK, where `width` is a pixel count:
+    /// a 418 px strip is read as 418 columns, so the layout concludes that
+    /// every tab fits, leaves `scroll_offset` at 0, and bakes no marker —
+    /// while GTK's own Pango-measured `draw_tab_bar` clips the tabs that
+    /// really do overflow. Observed on #24's parity walk: with two documents
+    /// open at 140×40, the GTK strip painted tab 0 and silently dropped tab
+    /// 1, *which was the active document*, with no `›` to hint at it. The
+    /// click path is unaffected — `events.rs::resolve_tab_bar_click` reads
+    /// the backend's own slots, and a clipped tab reports no slot, so it is
+    /// simply not clickable rather than mis-clickable.
+    ///
+    /// Not fixed in #24 because doing it properly needs the labels measured
+    /// in the backend's unit here, and the only handle quadraui exposes
+    /// (`Backend::tab_bar_layout`'s `correct_scroll_offset`) resolves the
+    /// offset with **no scroll-arrow reservation**, unlike the
+    /// `scroll_arrow_width: 1.0` this call relies on to keep the baked
+    /// marker from crowding its own tab out. Adopting it would therefore
+    /// move the TUI's offsets too, which is a change that wants its own
+    /// issue and its own regression budget rather than a rider on a
+    /// hit-test fix.
     fn bake_doc_tab_overflow_markers(bar: &mut TabBar, width: f32) {
         if bar.tabs.is_empty() || width <= 0.0 {
             return;

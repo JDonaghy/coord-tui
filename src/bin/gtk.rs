@@ -5,7 +5,12 @@
 //!
 //! The app-id defaults to `"org.quadraui.app"` (the runner's built-in
 //! default) until quadraui #234 lands and adds a builder API for
-//! custom app-ids and window titles.
+//! custom app-ids and window titles. Re-checked against the pinned rev
+//! during #24's GTK parity walk and still true: `gtk::run::run` hardcodes
+//! `.application_id("org.quadraui.app")` and `.title("quadraui app")`, and
+//! `gtk::shell_runner::run_with_shell` takes only `(app, ShellConfig)` —
+//! there is no seam here to pass a name through, so this is upstream's to
+//! fix, not something to work around by reaching past `run_with_shell`.
 //!
 //! Runs the same boot policy as `src/main.rs` (`--version` handling,
 //! subprocess hardening, the panic log) via `coord_tui::boot` — see that

@@ -3172,6 +3172,16 @@ pub struct CoordApp {
     /// shell) or Shift is held (force-override). Cleared on the matching
     /// mouse-release. `pty_pressed_buttons` is NOT set for these drags.
     terminal_host_sel_dragging: bool,
+    /// #17: `true` from the moment a `UiEvent::MouseDown { button: Left, .. }`
+    /// is delivered until the matching `MouseUp` consumes it. On a normal
+    /// terminal this is always `true` by the time `MouseUp` arrives, so the
+    /// `MouseUp` arm's dialog/context-menu outside-click-dismiss fallback
+    /// (added for down-drop terminals, quadraui#429/ebb4ab7) skips entirely —
+    /// re-running it unconditionally would re-hit whatever new dialog/menu
+    /// state `MouseDown` just produced (see #17 review). Only when this is
+    /// still `false` at `MouseUp` — meaning the terminal dropped the
+    /// `MouseDown` — does the fallback run.
+    left_mouse_down_seen: bool,
     /// #790: `true` while the terminal pane is in keyboard-toggled "copy
     /// mode" (F9).  Shift+drag is intercepted by an outer tmux before
     /// coord-tui ever sees it, so a mouse modifier can't reliably trigger a
@@ -4131,6 +4141,9 @@ impl CoordApp {
             pty_pressed_buttons: 0,
             // #464: host-side terminal selection drag state.
             terminal_host_sel_dragging: false,
+            // #17: down-drop-terminal detection for the dialog/context-menu
+            // MouseUp fallback.
+            left_mouse_down_seen: false,
             // #790: F9 keyboard-toggled terminal copy mode.
             terminal_copy_mode: false,
             // #207: machine metrics sparklines.

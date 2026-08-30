@@ -36622,6 +36622,191 @@
         );
     }
 
+    /// #17 review fix: a *normal* click — `MouseDown` then `MouseUp` at the
+    /// same coordinates, exactly what a terminal that delivers both events
+    /// sends — on a context-menu item that opens a brand-new dialog must
+    /// leave that dialog open, not have the trailing `MouseUp` immediately
+    /// close it again.
+    ///
+    /// Before this fix, the `MouseUp` arm unconditionally re-ran
+    /// `handle_dialog_click`/`handle_context_menu_click` (the same
+    /// highest-z-order hit-tests `MouseDown` uses) to cover down-drop
+    /// terminals. `MouseDown` on "Set quiet hours…" dispatches
+    /// `set-quiet-hours`, which arms `pending_quiet_hours` and opens the
+    /// screen-centered "Set quiet hours: …" dialog (`src/app/dialogs.rs`)
+    /// and redraws — so by the time the SAME click's `MouseUp` arrives,
+    /// `dialog_layout` holds the new dialog, the click position (the
+    /// machine row, essentially never under the centered dialog) hit-tests
+    /// as `DialogHit::Outside`, and `dismiss_prompt_dialog()` (which DOES
+    /// clear `pending_quiet_hours`, unlike some other prompt-style dialogs)
+    /// closes the dialog that had just opened, before the operator can type
+    /// a window.
+    ///
+    /// Opens the menu the same way as
+    /// `tuidriver_right_click_machine_row_offers_set_quiet_hours`, then
+    /// drives a full `MouseDown` + `MouseUp` click cycle on "Set quiet
+    /// hours…" and asserts the resulting dialog is still showing.
+    ///
+    /// The item's click **row** is `right_click_y + item_index` (item_index
+    /// `1` here — "Pause routing" is item 0, see the sibling test's
+    /// comment), NOT the visually-rendered row `find("Set quiet hours…")`
+    /// would give: this popup's `ContextMenuLayout` anchors its item
+    /// hit-test rects directly at the click position with no row reserved
+    /// for the border, while `draw_context_menu` visually paints the
+    /// border on its own row above the first item — a pre-existing,
+    /// orthogonal paint-vs-hit-test off-by-one this repo already works
+    /// around by preferring keyboard nav for item activation (see that
+    /// same sibling test's comment). Column still comes from `find` — only
+    /// the row is affected.
+    #[test]
+    fn tuidriver_full_click_on_quiet_hours_item_leaves_dialog_open() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = CoordApp {
+            data: BoardData {
+                machines: vec![quiet_hours_machine("dellserver")],
+                ..BoardData::default()
+            },
+            active_view: SidebarView::Machines,
+            ..make_test_app(BoardData::default())
+        };
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+
+        let (x, y) = driver.find("● dellserver").unwrap_or_else(|| {
+            panic!(
+                "#17: could not find machine row 'dellserver':\n{}",
+                driver.screen()
+            )
+        });
+        driver.dispatch(UiEvent::MouseDown {
+            widget: None,
+            button: MouseButton::Right,
+            position: Point::new(x, y),
+            modifiers: Modifiers::default(),
+        });
+        assert!(
+            driver.screen_contains("Set quiet hours…"),
+            "#17: right-click on the machine row must open the row menu \
+             before the full-click regression is exercised:\n{}",
+            driver.screen()
+        );
+
+        // Column from `find` on the item's own label; row is the
+        // right-click's own `y` plus the item's index (1) — see the doc
+        // comment above for why.
+        let (qx, _) = driver.find("Set quiet hours…").unwrap_or_else(|| {
+            panic!(
+                "#17: could not find 'Set quiet hours…' in the open menu:\n{}",
+                driver.screen()
+            )
+        });
+        let click_y = y + 1.0;
+
+        // A full click cycle — MouseDown then MouseUp at the SAME
+        // coordinates, exactly what a normal terminal delivers for one
+        // physical click.
+        driver.dispatch(UiEvent::MouseDown {
+            widget: None,
+            button: MouseButton::Left,
+            position: Point::new(qx, click_y),
+            modifiers: Modifiers::default(),
+        });
+        driver.dispatch(UiEvent::MouseUp {
+            widget: None,
+            button: MouseButton::Left,
+            position: Point::new(qx, click_y),
+        });
+
+        let screen_after = driver.screen();
+        assert!(
+            screen_after.contains("Set quiet hours: dellserver"),
+            "#17: a full click on 'Set quiet hours…' must leave the \
+             resulting dialog open — the trailing MouseUp of the SAME click \
+             must not re-dismiss it; screen =\n{}",
+            screen_after
+        );
+    }
+
+    /// #17 review fix: a full click — `MouseDown` then `MouseUp` — on the
+    /// #722 live-session-blocking dialog's "Dismiss" button must fire its
+    /// action exactly once, not twice.
+    ///
+    /// `fire_dialog_button`'s "close" branch (`src/app/dialogs.rs`)
+    /// deliberately leaves `pending_auto_review` set (the offer must
+    /// survive to re-fire once the session closes) and only clears the
+    /// *cached* `dialog_layout`, which gets recomputed at the same on-screen
+    /// position on the next render. Before this fix, the trailing `MouseUp`
+    /// of the same click re-hit that recomputed layout at the identical
+    /// button coordinates and fired the button a second time, pushing the
+    /// "Reattach first" toast twice for one physical click.
+    ///
+    /// Reuses the `tuidriver_live_session_blocks_auto_review_dialog` fixture
+    /// (a live tmux session blocking `pending_auto_review`), then drives a
+    /// full click on "Dismiss" and asserts the dialog survives (the #722
+    /// guard) and the toast appears exactly once.
+    #[test]
+    fn tuidriver_full_click_on_blocking_dialog_close_fires_once() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let running_work = make_assignment_typed("running", 10, "repo-a", Some("work"));
+        let running_aid = running_work.id.clone();
+        let mut app = make_app_with_assignments(vec![running_work]);
+        app.live_tmux_sessions.push(make_live_tmux_session(&running_aid, 10, "repo-a"));
+        app.pending_auto_review = Some(mk_pending_auto_review("repo-a", 10));
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        assert!(
+            driver.screen_contains("Reattach to live session"),
+            "#17: the live-session-blocking dialog must be showing before \
+             the full-click regression is exercised:\n{}",
+            driver.screen()
+        );
+
+        // The dialog's fixed width clips the button label ("Esc  Dismiss")
+        // to "Esc  Dismi" on screen — search for the un-clipped prefix.
+        let (x, y) = driver.find("Dismi").unwrap_or_else(|| {
+            panic!(
+                "#17: could not find the blocking dialog's 'Dismiss' button:\n{}",
+                driver.screen()
+            )
+        });
+        // -1 row: `Dialog`'s painted button row sits one row below its own
+        // cached hit-test rect in this harness (the same pre-existing
+        // paint-vs-layout offset `tuidriver_full_click_on_quiet_hours_item_
+        // leaves_dialog_open`'s doc comment covers for context menus) — the
+        // rect a raw click must land in is one row above the rendered
+        // label text.
+        let click_y = y - 1.0;
+
+        driver.dispatch(UiEvent::MouseDown {
+            widget: None,
+            button: MouseButton::Left,
+            position: Point::new(x, click_y),
+            modifiers: Modifiers::default(),
+        });
+        driver.dispatch(UiEvent::MouseUp {
+            widget: None,
+            button: MouseButton::Left,
+            position: Point::new(x, click_y),
+        });
+
+        let screen_after = driver.screen();
+        assert!(
+            screen_after.contains("Reattach to live session"),
+            "#17/#722: the blocking dialog must survive its own 'Dismiss' \
+             click (the offer re-fires once the live session closes); \
+             screen =\n{}",
+            screen_after
+        );
+        let toast_count = screen_after.matches("Reattach first").count();
+        assert_eq!(
+            toast_count, 1,
+            "#17: 'Dismiss' must fire exactly once per physical click — \
+             found {toast_count} 'Reattach first' toasts; screen =\n{}",
+            screen_after
+        );
+    }
+
     /// #1374: "Copy issue #N" must actually write the number to the
     /// clipboard, not just toast an apology that it isn't wired up yet.
     /// Opens the menu via the same right-click chain as

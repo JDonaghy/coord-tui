@@ -3987,6 +3987,87 @@
         );
     }
 
+    /// #5 regression: `wrap_dialog_body` (the helper `render_prompt_dialog`
+    /// uses to wrap dialog paragraphs to the dialog's inner width) must
+    /// split each paragraph on embedded `\n`/`\n\n` before handing it to
+    /// `quadraui::text_util::word_wrap`, which only wraps a single logical
+    /// line with no embedded `\n` (per its own doc comment). Several shipped
+    /// dialogs (Gate A / decompose-chat dispatch-failure, PTY-panic,
+    /// diagnose-fix-stage) build their body text with literal `\n`/`\n\n`
+    /// paragraph breaks.
+    ///
+    /// This is the short-body case: the combined string is short enough
+    /// that `word_wrap` short-circuits and returns it *unchanged* — before
+    /// the fix, that meant a single rendered row carrying raw `\n\n` bytes
+    /// instead of three rows (paragraph, blank separator, paragraph).
+    #[test]
+    fn wrap_dialog_body_splits_embedded_paragraph_breaks_into_separate_rows() {
+        let body = vec![StyledText::plain("first paragraph\n\nsecond paragraph")];
+        let wrapped = wrap_dialog_body(&body, 40);
+        let rows: Vec<String> = wrapped
+            .iter()
+            .flat_map(|t| t.spans.iter())
+            .map(|s| s.text.clone())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "first paragraph".to_string(),
+                "".to_string(),
+                "second paragraph".to_string(),
+            ],
+            "embedded \\n\\n must become a blank separator row, not a raw \
+             control character baked into one row",
+        );
+        assert!(
+            rows.iter().all(|r| !r.contains('\n')),
+            "no wrapped row may retain a raw '\\n' byte, got: {rows:?}",
+        );
+    }
+
+    /// #5 regression, black-box: the real Gate A dispatch-failure modal
+    /// (`self.gate_a_error_dialog`) builds its body as
+    /// `"...could not start:\n\n{reason}\n\nNothing was claimed..."` — long
+    /// enough that `word_wrap` actually wraps, which (pre-fix) hits the
+    /// *other* failure mode: `word_wrap` only splits on `' '`, so
+    /// `"start:\n\nacceptance"` (no space around the embedded `\n\n`)
+    /// becomes one "word" that never turns into a row break, gluing the
+    /// reason onto the opening line instead of its own paragraph. Assert
+    /// through the real render path that the three paragraphs land on
+    /// increasing screen rows.
+    #[test]
+    fn gate_a_error_dialog_renders_paragraphs_on_separate_rows() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_app_default();
+        app.gate_a_error_dialog = Some("acceptance driver missing".to_string());
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        let (_, start_y) = driver
+            .find("could not start")
+            .expect("opening paragraph must render");
+        let (_, reason_y) = driver
+            .find("acceptance driver missing")
+            .expect("reason paragraph must render");
+        let (_, claimed_y) = driver
+            .find("Nothing was claimed")
+            .expect("closing paragraph must render");
+
+        assert!(
+            reason_y > start_y,
+            "the reason must render below the opening line, not glued onto it \
+             via an embedded raw '\\n' (start_y={start_y}, reason_y={reason_y}):\n{}",
+            driver.screen(),
+        );
+        assert!(
+            claimed_y > reason_y,
+            "the closing paragraph must render below the reason, not glued \
+             onto it via an embedded raw '\\n' (reason_y={reason_y}, \
+             claimed_y={claimed_y}):\n{}",
+            driver.screen(),
+        );
+    }
+
     // ── #1060: per-issue acceptance actions (JIT author + record) ─────────
 
     /// Row 0 (#42) is a member of milestone tracking-issue #751's work order

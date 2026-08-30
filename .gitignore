@@ -1,0 +1,16 @@
+# Cargo build output. Multi-GB, fully regenerable, and rewritten on every
+# build — never committed. (Nothing ignored this while the crate lived under
+# code-coordinator's tui/ either, which is why `coord status` reported every
+# fresh coord-tui checkout as dirty the moment it was registered, #2899/#2954.)
+target/
+
+# #1973 opt-in local co-development override: a copy of
+# cargo-config-local-quadraui.toml.example, pointing the quadraui dependency
+# at a local ~/src/quadraui checkout instead of the pinned git rev.
+#
+# It is machine-local BY DEFINITION — committing it repoints every clone's
+# quadraui dep at a path that exists on exactly one box. Both this repo's
+# CLAUDE.md and the example file itself already describe this path as
+# "git-ignored"; until this file existed it simply was not, because the
+# extraction (#2899) left the new repo with no .gitignore at all.
+.cargo/config.toml

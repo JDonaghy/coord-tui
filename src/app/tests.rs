@@ -511,6 +511,99 @@
         assert_eq!(quadraui::text_util::display_width(out), 3);
     }
 
+    // ── fmt_truncated_paren (#11) ─────────────────────────────────────────
+    //
+    // `merge_queue_entry_label`'s gate/conflict reason (pipeline.rs) and
+    // `render_merge_plan_panel`'s BLOCKED-entry reason (pipeline.rs) used to
+    // slice arbitrary git/gh error text with a literal byte index
+    // (`&s[..57]`, `&s[..47]`), which panics whenever a multi-byte character
+    // (smart quotes, non-ASCII filenames, box-drawing) lands on the cut
+    // boundary. Both sites now share `fmt_truncated_paren`, built on the
+    // char/display-width-safe `trunc`.
+
+    #[test]
+    fn fmt_truncated_paren_short_string_is_not_truncated() {
+        assert_eq!(fmt_truncated_paren("short reason", 57), "  (short reason)");
+    }
+
+    #[test]
+    fn fmt_truncated_paren_multibyte_straddling_57_boundary_does_not_panic() {
+        // A "smart quote" (’, 3 UTF-8 bytes) placed so a byte-indexed
+        // `&s[..57]` would split it mid-sequence and panic. The fixed
+        // helper must truncate cleanly instead.
+        let mut s = "a".repeat(56);
+        s.push('’'); // multi-byte char straddling the old byte-57 cut
+        s.push_str(" and more text after the boundary to force truncation");
+        let out = fmt_truncated_paren(&s, 57);
+        assert!(out.ends_with("…)"), "got: {out}");
+        assert!(out.starts_with("  ("), "got: {out}");
+    }
+
+    #[test]
+    fn fmt_truncated_paren_multibyte_straddling_47_boundary_does_not_panic() {
+        // Same class, at the `render_merge_plan_panel` reason site's 47-col
+        // budget.
+        let mut s = "b".repeat(46);
+        s.push('“'); // multi-byte char straddling the old byte-47 cut
+        s.push_str(" plus trailing text to push past the limit");
+        let out = fmt_truncated_paren(&s, 47);
+        assert!(out.ends_with("…)"), "got: {out}");
+        assert!(out.starts_with("  ("), "got: {out}");
+    }
+
+    #[test]
+    fn fmt_truncated_paren_never_splits_a_multibyte_char() {
+        // Every prefix of every multi-byte string handed to the truncated
+        // branch must still be valid UTF-8 — `Cow`/`String` construction
+        // inside `trunc`/`format!` would panic otherwise.
+        let s = "─".repeat(80); // box-drawing char, 3 bytes each
+        let out = fmt_truncated_paren(&s, 30);
+        assert!(out.ends_with("…)"), "got: {out}");
+    }
+
+    // ── first_meaningful_stderr_line (#11) ────────────────────────────────
+    //
+    // mod.rs's toast-truncation site — the most exposed of the three, since
+    // the input is uncontrolled subprocess stderr rather than an internal
+    // string.
+
+    #[test]
+    fn first_meaningful_stderr_line_short_line_is_returned_whole() {
+        assert_eq!(
+            first_meaningful_stderr_line("gh failed: not found"),
+            Some("gh failed: not found".to_string())
+        );
+    }
+
+    #[test]
+    fn first_meaningful_stderr_line_prefers_last_nonempty_line() {
+        let stderr = "Traceback (most recent call last):\n  File \"x.py\"\nRuntimeError: gh failed: boom\n";
+        assert_eq!(
+            first_meaningful_stderr_line(stderr),
+            Some("RuntimeError: gh failed: boom".to_string())
+        );
+    }
+
+    #[test]
+    fn first_meaningful_stderr_line_multibyte_straddling_200_byte_boundary_does_not_panic() {
+        // Byte 200 lands mid-UTF-8-sequence: 197 ASCII bytes, then a 3-byte
+        // box-drawing character (─) starting at byte 197 and ending at byte
+        // 200 — exactly the old `last[..200]` panic (#11).
+        let mut line = "x".repeat(197);
+        line.push('─');
+        line.push_str(" this text runs well past the 200-byte toast cap");
+        let stderr = format!("preamble\n{line}\n");
+        let out = first_meaningful_stderr_line(&stderr).expect("non-empty stderr");
+        assert!(out.ends_with('…'), "got: {out}");
+        assert!(out.starts_with("xxx"), "got: {out}");
+    }
+
+    #[test]
+    fn first_meaningful_stderr_line_empty_and_whitespace_only_stderr() {
+        assert_eq!(first_meaningful_stderr_line(""), None);
+        assert_eq!(first_meaningful_stderr_line("   \n\n  \t"), None);
+    }
+
     #[test]
     fn collapse_ws_flattens_newlines_and_runs() {
         assert_eq!(collapse_ws("a\n\nb   c\t d"), "a b c d");

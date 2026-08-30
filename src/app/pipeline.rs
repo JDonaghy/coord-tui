@@ -3640,15 +3640,9 @@ impl CoordApp {
             .merge_queue_entry_display_error(entry)
             .as_deref()
             .filter(|e| !e.is_empty())
-            .map(|e| {
-                // Truncate long error strings to keep the row terse.
-                let s = e.trim();
-                if s.len() > 60 {
-                    format!("  ({}…)", &s[..57])
-                } else {
-                    format!("  ({})", s)
-                }
-            })
+            // Char/display-width safe truncation (#11) — see
+            // `fmt_truncated_paren`'s doc comment (format.rs).
+            .map(|e| fmt_truncated_paren(e.trim(), 57))
             .unwrap_or_default();
         format!("[{}]{}{}{}", state, pr, title, reason)
     }
@@ -3988,14 +3982,9 @@ impl CoordApp {
                 entry.reason
                     .as_deref()
                     .filter(|r| !r.is_empty())
-                    .map(|r| {
-                        let s = r.trim();
-                        if s.len() > 50 {
-                            format!("  ({}…)", &s[..47])
-                        } else {
-                            format!("  ({})", s)
-                        }
-                    })
+                    // Char/display-width safe truncation (#11) — see
+                    // `fmt_truncated_paren`'s doc comment (format.rs).
+                    .map(|r| fmt_truncated_paren(r.trim(), 47))
                     .unwrap_or_default()
             } else {
                 String::new()

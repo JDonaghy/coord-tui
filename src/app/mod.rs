@@ -9906,10 +9906,15 @@ pub(crate) fn first_meaningful_stderr_line(stderr: &str) -> Option<String> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .last()?;
-    // Cap length for a toast.
+    // Cap length for a toast. Char/display-width safe (`format::trunc`) — a
+    // byte-indexed `last[..max]` panics whenever byte 200 of arbitrary
+    // subprocess stderr lands mid-UTF-8 sequence (#11); this input is
+    // uncontrolled process output, not an internal string, so it is the most
+    // exposed of the three sites this class was fixed at.
     let max = 200usize;
-    if last.len() > max {
-        let mut out = last[..max].to_string();
+    let cut = format::trunc(last, max);
+    if cut.len() < last.len() {
+        let mut out = cut.to_string();
         out.push('…');
         Some(out)
     } else {

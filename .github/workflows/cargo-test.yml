@@ -73,3 +73,36 @@ jobs:
           --for-path src/main.rs
           --config .github/coord-ci-acceptance.yml --path .
         continue-on-error: true
+
+  # #1: the default-feature job above builds/tests with `--no-default-features`-
+  # equivalent defaults, which do NOT include `gtk`. `[[bin]] coord-tui-gtk` is
+  # `required-features = ["gtk"]` (Cargo.toml), so cargo silently omits that
+  # binary — and everything it reaches — from a plain `cargo build`/`cargo
+  # test`. No error, no warning. This is the exact trap vimcode#645 hit
+  # (`--no-default-features` dropped `gui`, `[[bin]] vimcode` needed it, and
+  # the Test stage compiled zero GTK assertions with a vacuously green
+  # verdict).
+  #
+  # This job is deliberately separate from `cargo-test`, not a replacement:
+  # the default-feature job is the "still builds without GTK dev libs" proof,
+  # which a gtk-on lane cannot demonstrate once it installs libgtk-4-dev.
+  #
+  # No DISPLAY/xvfb needed: quadraui's GTK tests render into in-memory Cairo
+  # ImageSurfaces and never call gtk::init (established by vimcode#645).
+  cargo-test-gtk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install GTK4 dev libraries
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+
+      - name: cargo build --features gtk --bin coord-tui-gtk
+        run: cargo build --features gtk --bin coord-tui-gtk
+
+      - name: cargo test --features gtk
+        run: cargo test --features gtk

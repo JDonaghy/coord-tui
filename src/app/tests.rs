@@ -59114,3 +59114,162 @@ Milestone tracking issue.
              it replaces, nulls included"
         );
     }
+
+    // ── #13: modal key-intercept decomposition (`app/events_modals.rs`) ──────
+
+    /// #13 regression guard for the *order* of the modal key intercepts.
+    ///
+    /// The intercepts used to be ~1,000 inlined lines in `dispatch_handle`;
+    /// #13 hoisted them into `app/events_modals.rs`, and in doing so dropped two
+    /// unreachable duplicate blocks (a second `pty_panic_dialog` and a second
+    /// `gate_a_error_dialog` intercept that sat *after* the artifact-pull one).
+    /// Dropping them is only safe because the surviving copies run FIRST, so
+    /// this pins that: with both a PTY-panic dialog and an artifact-pull dialog
+    /// alive, Esc must dismiss the PTY-panic dialog (the one `build_prompt_dialog`
+    /// draws on top) and leave the artifact dialog for the next Esc — never the
+    /// other way round, and never both at once.
+    #[test]
+    fn pty_panic_dialog_claims_keys_before_artifact_pull_dialog() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_app_default();
+        app.pty_panic_dialog = Some("vt100 parser panic".to_string());
+        app.artifact_pull_dialog = Some(ArtifactPullDialog {
+            path: Some("/tmp/artifact.zip".to_string()),
+            body: "Pulled artifact to /tmp/artifact.zip".to_string(),
+        });
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        // The PTY-panic dialog is the one drawn on top.
+        assert!(
+            driver.screen_contains("Renderer fault"),
+            "PTY-panic dialog must render on top of the artifact dialog:\n{}",
+            driver.screen(),
+        );
+
+        // First Esc: routed to the PTY-panic intercept, not the artifact one.
+        driver.press_named(quadraui::NamedKey::Escape);
+        assert!(
+            !driver.screen_contains("Renderer fault"),
+            "first Esc must dismiss the PTY-panic dialog:\n{}",
+            driver.screen(),
+        );
+        assert!(
+            driver.screen_contains("Artifacts"),
+            "the artifact dialog must SURVIVE the Esc that dismissed the \
+             PTY-panic dialog — one key, one modal:\n{}",
+            driver.screen(),
+        );
+
+        // Second Esc: now the artifact intercept is the first live claimant.
+        driver.press_named(quadraui::NamedKey::Escape);
+        assert!(
+            !driver.screen_contains("Artifacts"),
+            "second Esc must dismiss the artifact dialog:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #13: the five post-stage offers each hand-repeated the same #722
+    /// "reattach first" guard, differing only in the noun in the toast body.
+    /// They now share `offer_pinned_by_live_session`. Black-box half: Esc on a
+    /// merge offer whose issue still has a live session must NOT drop the offer
+    /// — the blocking dialog stays up and a "Reattach first" toast appears.
+    #[test]
+    fn esc_on_live_session_pinned_merge_offer_keeps_the_offer() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut driver = driver_with_shell(
+            app_with_live_session_pinned_merge_offer(),
+            CoordApp::shell_config(),
+            160,
+            44,
+        );
+
+        // The offer is pinned by the live session, so the blocking dialog —
+        // not the plain "Start merge" offer — is what renders.
+        assert!(
+            driver.screen_contains("Live session still running"),
+            "blocking dialog must render for a live-session-pinned offer:\n{}",
+            driver.screen(),
+        );
+
+        driver.press_named(quadraui::NamedKey::Escape);
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains("Reattach first"),
+            "Esc must warn instead of silently dropping a live-session-pinned \
+             merge offer:\n{screen}",
+        );
+        assert!(
+            screen.contains("Live session still running"),
+            "the merge offer itself must survive the Esc:\n{screen}",
+        );
+    }
+
+    /// #13, model half: the folded guard must still name each offer correctly.
+    /// The noun was the ONLY thing that differed between the five call sites,
+    /// so it is the only thing the fold could plausibly have broken — and the
+    /// rendered toast body is clipped on screen, out of `screen_contains`
+    /// reach, which is why this one asserts on the toast stack instead.
+    #[test]
+    fn folded_reattach_guard_names_each_pinned_offer() {
+        fn esc(app: &mut CoordApp) -> Option<Reaction> {
+            app.handle_stage_offer_keys(&UiEvent::KeyPressed {
+                key: quadraui::Key::Named(quadraui::NamedKey::Escape),
+                modifiers: quadraui::Modifiers::default(),
+                repeat: false,
+            })
+        }
+        fn base() -> CoordApp {
+            let running_work = make_assignment_typed("running", 10, "repo-a", Some("work"));
+            let running_aid = running_work.id.clone();
+            let mut app = make_app_with_assignments(vec![running_work]);
+            app.live_tmux_sessions
+                .push(make_live_tmux_session(&running_aid, 10, "repo-a"));
+            app
+        }
+        fn assert_noun(app: &mut CoordApp, noun: &str) {
+            assert!(
+                esc(app).is_some(),
+                "the guard must claim Esc for the {noun} offer",
+            );
+            let want = format!("the {noun} offer will re-appear automatically.");
+            assert!(
+                app.toasts.iter().any(|t| t.0.body.contains(&want)),
+                "expected a toast naming the {noun} offer, got: {:?}",
+                app.toasts.iter().map(|t| &t.0.body).collect::<Vec<_>>(),
+            );
+        }
+
+        let mut app = base();
+        app.pending_auto_review = Some(mk_pending_auto_review("repo-a", 10));
+        assert_noun(&mut app, "review");
+        assert!(app.pending_auto_review.is_some(), "offer must be preserved");
+
+        let mut app = base();
+        app.pending_merge = Some(PendingMerge {
+            coord_repo: "repo-a".to_string(),
+            repo_slug: "repo-a".to_string(),
+            issue_num: 10,
+        });
+        assert_noun(&mut app, "merge");
+        assert!(app.pending_merge.is_some(), "offer must be preserved");
+    }
+
+    /// Shared fixture: a merge offer whose issue still has a live tmux session.
+    fn app_with_live_session_pinned_merge_offer() -> CoordApp {
+        let running_work = make_assignment_typed("running", 10, "repo-a", Some("work"));
+        let running_aid = running_work.id.clone();
+        let mut app = make_app_with_assignments(vec![running_work]);
+        app.live_tmux_sessions
+            .push(make_live_tmux_session(&running_aid, 10, "repo-a"));
+        app.pending_merge = Some(PendingMerge {
+            coord_repo: "repo-a".to_string(),
+            repo_slug: "repo-a".to_string(),
+            issue_num: 10,
+        });
+        app
+    }

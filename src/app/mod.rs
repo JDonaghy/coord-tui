@@ -147,6 +147,7 @@ pub(crate) mod chat;
 pub(crate) mod terminal;
 pub(crate) mod sessions;
 pub(crate) mod events;
+pub(crate) mod events_modals;
 pub(crate) mod pipeline;
 pub(crate) mod milestone_dag;
 pub(crate) mod plans;

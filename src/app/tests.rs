@@ -15866,6 +15866,39 @@
         );
     }
 
+    #[test]
+    fn build_pipeline_widget_shows_repeat_count_suffix_for_multi_leg_stage() {
+        // #36: coord-portal#164 ran five review legs on one branch over
+        // ~5.5h and the strip looked identical after leg 4 as after leg 1 —
+        // nothing on screen suggested looking closer. A stage that ran more
+        // than once must render its leg count.
+        let mut app = make_pipeline_app();
+        for i in 0..5 {
+            app.data.assignments.push(_stage_assignment(
+                &format!("r{i}"),
+                "review",
+                200.0 + i as f64,
+                "done",
+            ));
+        }
+        let view = app.build_pipeline_widget().unwrap();
+        // #1429: 3 stages (work+review+merge).
+        assert_eq!(view.stages.len(), 3);
+        assert_eq!(view.stages[1].label, "Review (5)");
+    }
+
+    #[test]
+    fn build_pipeline_widget_no_repeat_count_suffix_for_single_leg_stage() {
+        // #36: a stage that ran exactly once must show the bare label —
+        // no "(1)" suffix.
+        let mut app = make_pipeline_app();
+        app.data
+            .assignments
+            .push(_stage_assignment("w1", "work", 100.0, "done"));
+        let view = app.build_pipeline_widget().unwrap();
+        assert_eq!(view.stages[0].label, "Work");
+    }
+
     /// Failed stage without a coord_repo mapping must not show Retry —
     /// we'd have nothing to dispatch.
     #[test]

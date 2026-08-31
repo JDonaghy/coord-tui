@@ -7516,6 +7516,28 @@ impl CoordApp {
                         }
                     }
                 }
+                // #36: repeat-count suffix — a stage that ran once and one
+                // that ran four times (e.g. coord-portal#164: four
+                // test-author legs, five review legs over ~5.5h) rendered
+                // identically, so the clearest "this issue is in trouble"
+                // signal on the board was invisible. `assignments_for_stage`
+                // is the same DB-derived leg list `stage_status_for_local`
+                // already treats as authoritative for local-SQLite mode
+                // (#550) — reusing it here means the count works today with
+                // no new wire field. A `coord serve` daemon's `/board`
+                // retention sweep can in principle prune an issue's oldest
+                // *terminal* legs, but it always keeps every active row and
+                // the latest assignment of a still-open issue, so a
+                // currently-visible Pipeline card is not the shape it
+                // prunes — this never renders a count higher than the truth,
+                // only (rarely, for old closed issues) one that undercounts,
+                // and it never panics on absent data. A server-computed
+                // aggregate count (tracked by #36 as a follow-up once it
+                // lands upstream) would close that last gap.
+                let leg_count = self.assignments_for_stage(issue, name).len();
+                if leg_count > 1 {
+                    label = format!("{label} ({leg_count})");
+                }
                 // Show turn count + elapsed on Active stage box.
                 // Prefer live SSE turn count when watching, fall back to local log.
                 // Elapsed is computed from dispatched_at to now (wall-clock).

@@ -2762,6 +2762,123 @@ mod tests {
         );
     }
 
+    // ── chart grid/data occlusion ordering (#38, quadraui pin → 973956e4) ──
+
+    /// A `bar`-report result whose single series has one full-height bar
+    /// (100 against a 0..100 range) and one zero-height bar — a `show_grid:
+    /// true` chart with a non-empty `y_label`, exactly the shape
+    /// `reports_chart_plan` builds for every `bar` report (#38's issue body
+    /// points at the `merged`/`cost_per_issue` trend charts, but the defect
+    /// is generic to any gridded chart, and a single bar chart is the
+    /// smallest fixture that reproduces it).
+    fn chart_grid_catalogue_json() -> &'static str {
+        r#"{
+            "reports": [
+                {
+                    "id": "chartgrid",
+                    "title": "Chart Grid",
+                    "description": "one bar chart, two columns",
+                    "params": [],
+                    "row_identity": null
+                }
+            ]
+        }"#
+    }
+
+    /// `count: 100` against a `0..100` range norms to `1.0` — the bar fills
+    /// the *entire* plot height, so it is guaranteed to cross every interior
+    /// y-tick row regardless of exactly how tall the rendered chart ends up
+    /// (no need to hand-compute pixel/row geometry). `count: 0` norms to
+    /// `0.0`: `bar_column_spans_in` returns `top <= bottom` for it, so
+    /// `paint_bar` draws nothing in that column and whatever `paint_grid`
+    /// put there earlier — the tick dash — stays visible through it.
+    fn chart_grid_result_json() -> &'static str {
+        r#"{
+            "report_id": "chartgrid",
+            "generated_at": 1000.0,
+            "window": [0.0, 1000.0],
+            "columns": ["label", "count"],
+            "rows": [
+                {"label": "A", "count": 100},
+                {"label": "B", "count": 0}
+            ],
+            "notes": [],
+            "chart": {
+                "kind": "bar",
+                "series": [{"label": "Count", "column": "count"}],
+                "x": "label",
+                "stacked": false,
+                "title": "",
+                "y_label": "Count"
+            }
+        }"#
+    }
+
+    /// Black-box regression for quadraui#648 ("TUI chart grid lines paint
+    /// under data, not over it"), the fix the #38 pin bump exists to pick
+    /// up.
+    ///
+    /// Before #648, `paint_bar` never painted a grid at all — the grid rows
+    /// were drawn by `paint_axis_labels`, which ran *after* the bars and
+    /// stamped `┄` across the *entire* width of every tick row, unconditionally
+    /// overwriting any bar cell (`█`) sitting on that row. After #648,
+    /// `paint_grid` runs first and `paint_bar` paints on top of it, so a bar
+    /// cell on a tick row stays `█` while an untouched column on that same
+    /// row still shows the grid's `┄`.
+    ///
+    /// The fixture's full-height bar spans every row of the plot area, so
+    /// it crosses every interior tick line — under the pre-#648 ordering
+    /// *no* row could show both characters (every tick row was pure dash);
+    /// this test would find nothing and fail. That is what makes this a
+    /// real regression test rather than a check that the grid renders at
+    /// all.
+    #[test]
+    fn tuidriver_reports_bar_survives_grid_tick_rows() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_app_with_reports(
+            board_data(),
+            chart_grid_catalogue_json(),
+            Some(chart_grid_result_json()),
+        );
+        app.active_view = SidebarView::Reports;
+        app.rebuild_board_sidebar();
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 200, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        // Sanity: the chart actually rendered (grid dashes present, bar
+        // cells present, y_label painted) rather than degrading to the
+        // table — so the assertion below is testing occlusion order, not a
+        // panel that silently didn't draw a chart.
+        assert!(
+            screen.contains('┄'),
+            "no grid dash rendered at all — the panel likely degraded \
+             instead of drawing the chart:\n{screen}"
+        );
+        assert!(
+            screen.contains('█'),
+            "no bar cell rendered at all — the panel likely degraded \
+             instead of drawing the chart:\n{screen}"
+        );
+        assert!(
+            screen.contains("Count"),
+            "the chart's y_label must render:\n{screen}"
+        );
+
+        let tick_row_with_both_dash_and_bar =
+            screen.lines().find(|line| line.contains('┄') && line.contains('█'));
+        assert!(
+            tick_row_with_both_dash_and_bar.is_some(),
+            "#38 / quadraui#648: no rendered row carries both a grid dash \
+             '┄' and a bar cell '█'. The fixture's full-height bar crosses \
+             every interior y-tick row, so under the pre-fix pin (grid \
+             painted *after* bars, across the whole row) every tick row \
+             would be pure dash with the bar cells wiped out:\n{screen}"
+        );
+    }
+
     // ── the menu itself ──────────────────────────────────────────────────
 
     #[test]

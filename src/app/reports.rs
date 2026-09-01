@@ -2792,6 +2792,16 @@ mod tests {
     /// `0.0`: `bar_column_spans_in` returns `top <= bottom` for it, so
     /// `paint_bar` draws nothing in that column and whatever `paint_grid`
     /// put there earlier — the tick dash — stays visible through it.
+    ///
+    /// The tall bar is the **second** row (`"B"`), not the first: a
+    /// single-series bar's slot starts at `plot_x + slot_w * data_idx`, so
+    /// the first row's bar would start at column `plot_x` itself — the one
+    /// column [`paint_grid`]'s pre-#648 stand-in
+    /// (`paint_axis_labels`'s inline dash loop, which ran `(px+1)..(px+pw)`)
+    /// never touched anyway, fix or no fix. Putting the tall bar second
+    /// forces its columns into the range the old code *did* overwrite, so
+    /// the assertion below actually distinguishes the two orderings instead
+    /// of coincidentally holding either way.
     fn chart_grid_result_json() -> &'static str {
         r#"{
             "report_id": "chartgrid",
@@ -2799,8 +2809,8 @@ mod tests {
             "window": [0.0, 1000.0],
             "columns": ["label", "count"],
             "rows": [
-                {"label": "A", "count": 100},
-                {"label": "B", "count": 0}
+                {"label": "A", "count": 0},
+                {"label": "B", "count": 100}
             ],
             "notes": [],
             "chart": {

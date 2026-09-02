@@ -215,11 +215,14 @@ impl ShellApp for CoordApp {
                 self.render_pane.set(None);
             }
             SidebarView::Machines => {
-                // #207: Reserve two sparkline rows (CPU + mem) at the bottom
-                // of the main panel.  Each row is 2 × lh tall: one cell for
-                // the label line and one for the chart body.  When there are
-                // no metrics yet the area shows a subtle placeholder.
-                let chart_h = lh * 4.0; // 2 rows × 2 lh each
+                // #40: reserve room at the bottom of the panel for two real
+                // grid+axis charts (CPU + mem). quadraui's `Chart` carries
+                // its own label via `y_label` now, so there is exactly one
+                // split left to make here — detail list vs. chart strip —
+                // not the three levels of hand-rolled `Rect` math (this
+                // split, a CPU/mem half-split, and a label/body half-split
+                // inside each chart) #207 left behind.
+                let chart_h = (Self::MACHINE_CHART_ROWS * lh).min(m.height);
                 let detail_h = (m.height - chart_h).max(0.0);
                 let detail_rect = Rect::new(m.x, m.y, m.width, detail_h);
                 let chart_rect = Rect::new(m.x, m.y + detail_h, m.width, chart_h);

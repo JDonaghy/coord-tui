@@ -8987,11 +8987,19 @@ impl CoordApp {
         }
     }
 
-    // ── #207: Machine metrics sparklines ─────────────────────────────────
+    // ── #40 (was #207): Machine metrics charts ───────────────────────────
 
-    /// Render CPU and memory sparklines for the currently-selected machine
-    /// into `area`.  The area is split vertically: top half = CPU sparkline
-    /// with a label row, bottom half = memory sparkline with a label row.
+    /// Rows reserved for the CPU + mem chart strip: two grid+axis
+    /// [`ChartKind::Line`] charts, stacked, each getting half. A bare
+    /// [`ChartKind::Sparkline`] (#207's original shape) only ever needed a
+    /// single row per metric; a chart with a visible grid and y-axis scale
+    /// (#40) needs enough interior rows for the tick lines to actually read
+    /// as a grid, not a single dashed row.
+    const MACHINE_CHART_ROWS: f32 = 10.0;
+
+    /// Render CPU and memory charts for the currently-selected machine into
+    /// `area`.  The area is split vertically: top half = CPU chart, bottom
+    /// half = memory chart.
     ///
     /// When no samples have been collected yet (e.g. the machine is
     /// unreachable or the user just switched to the Machines panel), a
@@ -9060,7 +9068,7 @@ impl CoordApp {
             .filter_map(|s| s.cpu.map(|v| v as f64))
             .collect();
         self.render_metric_sparkline(
-            backend, cpu_area, lh,
+            backend, cpu_area,
             "CPU",
             latest.and_then(|s| s.cpu),
             latest.and_then(|s| s.reason.as_deref()),
@@ -9074,7 +9082,7 @@ impl CoordApp {
             .filter_map(|s| s.mem.map(|v| v as f64))
             .collect();
         self.render_metric_sparkline(
-            backend, mem_area, lh,
+            backend, mem_area,
             "Mem",
             latest.and_then(|s| s.mem),
             latest.and_then(|s| s.reason.as_deref()),
@@ -9120,29 +9128,37 @@ impl CoordApp {
         });
     }
 
-    /// Draw a single labelled sparkline row.
+    /// Draw a single metric as a real grid+axis chart.
     ///
-    /// Layout: one `lh`-tall label+value row on top, the rest of the
-    /// rect for the sparkline chart body.
+    /// #40: the old shape here was a hand-drawn one-item `ListView` title
+    /// row ("CPU  42%") stacked above a bare `ChartKind::Sparkline` with
+    /// `show_grid: false` and every axis field switched off — a workaround
+    /// for `Chart` having no title field (`reports.rs`'s trend captions are
+    /// the same workaround, done once already). `Chart` *does* have a real
+    /// affordance for a short axis-side label — `y_label` — so the
+    /// "CPU"/"Mem" + current-reading readout rides that now instead of a
+    /// third in-crate title workaround, and the chart itself carries a
+    /// visible grid and y-axis tick scale rather than the flat `0..100`
+    /// stand-in. One layout pass, no separate label rect.
     ///
     /// #39: `latest` is the newest sample's own value — `None` when that
     /// reading itself is absent (the daemon's `unknown`/timed-out state),
     /// which is NOT the same as `has_any_sample == false` (no history at
-    /// all yet). The three resulting label states are each rendered
-    /// distinctly so a timed-out reading can never be mistaken for a real
-    /// `0%`:
-    /// - no samples at all → subdued "—"
-    /// - newest sample present but its value absent → `latest_reason` (or
-    ///   "n/a"), in an attention colour, never a percentage
-    /// - newest sample has a real value → "NN%"
+    /// all yet). The three resulting label states fold into `y_label` so a
+    /// timed-out reading can never be mistaken for a real `0%`:
+    /// - no samples at all → "<label> —"
+    /// - newest sample present but its value absent → "<label> <reason>"
+    ///   (or "n/a"), never a percentage
+    /// - newest sample has a real value → "<label> NN%"
     ///
     /// `data` (already filtered to known-only values by the caller) drives
-    /// the chart body; empty `data` draws no chart.
+    /// the plotted series; empty `data` still draws the chart shell (grid,
+    /// axis, `y_label`) so the panel doesn't blank out while waiting for
+    /// the first sample.
     fn render_metric_sparkline(
         &self,
         backend: &mut dyn Backend,
         area: Rect,
-        lh: f32,
         label: &str,
         latest: Option<f32>,
         latest_reason: Option<&str>,
@@ -9150,58 +9166,22 @@ impl CoordApp {
         data: Vec<f64>,
         color: Color,
     ) {
-        if area.height < lh {
+        if area.height < 1.0 || area.width < 1.0 {
             return;
         }
-        let label_h = lh;
-        let chart_h = (area.height - label_h).max(0.0);
-        let label_rect = Rect::new(area.x, area.y, area.width, label_h);
-        let chart_rect = Rect::new(area.x, area.y + label_h, area.width, chart_h);
 
-        // Label row — "CPU  42%" (real reading), "CPU  timed out" (newest
-        // reading absent — #39: never rendered as "0%"), or "CPU  —" (no
-        // history at all yet).
-        let (val_str, val_color) = if !has_any_sample {
-            ("  —".to_string(), Color::rgb(120, 120, 140))
+        let y_label = if !has_any_sample {
+            format!("{label} —")
         } else if let Some(v) = latest {
-            (format!("  {:.0}%", v), color)
+            format!("{label} {:.0}%", v)
         } else {
             let reason: String = latest_reason.unwrap_or("n/a").chars().take(16).collect();
-            (format!("  {reason}"), Color::rgb(220, 160, 60))
+            format!("{label} {reason}")
         };
-        backend.draw_list(label_rect, &ListView {
-            id: WidgetId::new(format!("metric-label-{}", label.to_lowercase())),
-            title: None,
-            items: vec![ListItem {
-                text: StyledText {
-                    spans: vec![
-                        StyledSpan::with_fg(
-                            format!(" {} ", label),
-                            Color::rgb(120, 120, 140),
-                        ),
-                        StyledSpan::with_fg(val_str, val_color),
-                    ],
-                },
-                icon: None,
-                detail: None,
-                decoration: Decoration::Normal,
-            }],
-            selected_idx: 0,
-            scroll_offset: 0,
-            has_focus: false,
-            bordered: false,
-            h_scroll: 0,
-            max_content_width: None,
-            show_v_scrollbar: false,
-        });
 
-        // Sparkline body — only when we have data and enough vertical room.
-        if data.is_empty() || chart_h < 1.0 {
-            return;
-        }
         let chart = Chart {
             id: WidgetId::new(format!("metric-chart-{}", label.to_lowercase())),
-            kind: ChartKind::Sparkline,
+            kind: ChartKind::Line,
             series: vec![Series {
                 label: label.to_string(),
                 data,
@@ -9209,15 +9189,17 @@ impl CoordApp {
                 fill: false,
             }],
             x_label: None,
-            y_label: None,
+            y_label: Some(y_label),
+            // CPU/Mem is a real fixed 0..100 domain, not an artifact of the
+            // old stripped-sparkline workaround — kept explicit here too.
             y_range: Some((0.0, 100.0)),
             x_range: None,
             show_legend: false,
-            y_ticks: None,
+            y_ticks: Some(2),
             x_ticks: None,
-            show_grid: false,
+            show_grid: true,
         };
-        backend.draw_chart(chart_rect, &chart, None, None);
+        backend.draw_chart(area, &chart, None, None);
     }
 
 

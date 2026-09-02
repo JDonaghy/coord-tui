@@ -1016,6 +1016,118 @@
         );
     }
 
+    // ── #40: Machines panel charts carry a real grid + axis scale ─────────
+
+    /// A machine with a normal metrics history for a fixture shared by the
+    /// two `#40` tests below.
+    fn machine_chart_app_with_samples() -> CoordApp {
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_metrics_status = MachineMetricsStatus::Ok;
+        {
+            let buf = app
+                .machine_metrics
+                .entry("dellserver".to_string())
+                .or_default();
+            // A hard 0/100 zigzag, not a gentle trend: it's guaranteed to
+            // cross every interior y-tick row somewhere along its length
+            // regardless of the exact chart width, which is what the
+            // grid/data occlusion test below needs.
+            for i in 0..40u32 {
+                let v = if i % 2 == 0 { 0.0 } else { 100.0 };
+                buf.push_back(MetricSample::ok(v, v));
+            }
+        }
+        app
+    }
+
+    /// #40: the CPU/mem panels must render as real quadraui charts — a
+    /// visible grid and a y-axis tick scale — not the old bare
+    /// `ChartKind::Sparkline` with `show_grid: false`, `y_ticks: None` and
+    /// every axis field switched off (a fixed `0..100` range standing in
+    /// for a scale nobody could actually read).
+    #[test]
+    fn machine_charts_render_grid_and_axis_scale_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = machine_chart_app_with_samples();
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        assert!(
+            screen.contains('┄'),
+            "#40: no grid dash rendered — the CPU/Mem charts must set \
+             `show_grid: true`:\n{screen}"
+        );
+        assert!(
+            screen.contains('│') && screen.contains('└'),
+            "#40: no y/x axis frame rendered:\n{screen}"
+        );
+        // The interior tick between the 0..100 endpoints (`y_ticks: Some(2)`
+        // puts one at 50) is the scale itself — the old fixed-range chart
+        // had no ticks at all to find here.
+        assert!(
+            screen.contains("50"),
+            "#40: no interior y-axis tick label rendered — the chart has \
+             no readable scale:\n{screen}"
+        );
+
+        let (_, cpu_y) = driver
+            .find("CPU")
+            .expect("CPU chart label must still render");
+        let cpu_row: String = screen_row(&screen, cpu_y).into_iter().collect();
+        assert!(
+            cpu_row.contains("100%"),
+            "#40: the CPU readout must still ride the chart's own axis \
+             label (`y_label`), not a separate hand-drawn title row:\n\
+             {cpu_row}"
+        );
+    }
+
+    /// #40 / quadraui#648: regression coverage for the Machines panel's own
+    /// chart wiring, mirroring `reports.rs`'s
+    /// `tuidriver_reports_bar_survives_grid_tick_rows` for the Line-chart
+    /// shape this panel uses. Grid lines must paint *under* the data: a
+    /// data cell on a y-tick row still renders as plotted data, while an
+    /// empty column on that same row still shows the grid dash — proof of
+    /// paint ordering, not just that the grid exists at all.
+    #[test]
+    fn machine_chart_grid_lines_paint_under_data_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = machine_chart_app_with_samples();
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        // Braille dot patterns (U+2801..U+28FF) are how the TUI backend
+        // draws `ChartKind::Line` data; U+2800 (fully empty) is never
+        // actually painted (the rasteriser skips it), so any braille char
+        // found on screen is real plotted data, not background.
+        let is_braille_data = |c: char| ('\u{2801}'..='\u{28FF}').contains(&c);
+
+        let tick_row_with_both_dash_and_data = screen
+            .lines()
+            .find(|line| line.contains('┄') && line.chars().any(is_braille_data));
+        assert!(
+            tick_row_with_both_dash_and_data.is_some(),
+            "#40 / quadraui#648: no rendered row carries both a grid dash \
+             '┄' (an untouched column) and plotted braille data (a column \
+             the 0/100 zigzag crosses). The fixture's hard zigzag crosses \
+             every interior y-tick row, so under the pre-#648 ordering \
+             (grid painted after the data, across the whole row) every \
+             tick row would be pure dash with the data wiped out:\n{screen}"
+        );
+    }
+
     // ── SidebarView ───────────────────────────────────────────────────────────
 
     #[test]

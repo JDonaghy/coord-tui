@@ -280,6 +280,13 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
             .checked_sub(METRICS_CADENCE)
             .unwrap_or_else(Instant::now),
         machine_metrics_status: MachineMetricsStatus::Unknown,
+        // #44
+        machine_stats: std::collections::HashMap::new(),
+        pending_machine_stats: None,
+        machine_stats_last_polled: Instant::now()
+            .checked_sub(MACHINE_STATS_CADENCE)
+            .unwrap_or_else(Instant::now),
+        machine_stats_status: MachineStatsStatus::Unknown,
         // #487
         live_tmux_sessions: Vec::new(),
         pending_remote_sessions: None,

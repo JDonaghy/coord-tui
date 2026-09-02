@@ -1108,6 +1108,54 @@ impl CoordApp {
                 self.metrics_last_polled = Instant::now();
                 self.pending_machine_metrics = Some(spawn_machine_metrics_fetch());
             }
+
+            // #44: Machines panel stats — a single whole-fleet
+            // `GET /machines/stats` daemon fetch, gated the same way as the
+            // `/machines/metrics` fetch just above (only while the panel is
+            // visible). Replaces `machine_detail_list()`'s local
+            // `self.data.assignments` filtering for ACTIVE WORKERS/JOB
+            // HISTORY with the daemon's own capacity/completed/failed/
+            // job-history rules.
+            if let Some(rx) = &self.pending_machine_stats {
+                match rx.try_recv() {
+                    Ok(MachineStatsOutcome::Stats(stats)) => {
+                        self.machine_stats_status = MachineStatsStatus::Ok;
+                        self.machine_stats = stats;
+                        self.pending_machine_stats = None;
+                        needs_redraw = true;
+                    }
+                    Ok(MachineStatsOutcome::NoBoardService) => {
+                        self.machine_stats_status = MachineStatsStatus::Error(
+                            "no board service configured".to_string(),
+                        );
+                        self.pending_machine_stats = None;
+                        needs_redraw = true;
+                    }
+                    Ok(MachineStatsOutcome::NotSupported) => {
+                        self.machine_stats_status = MachineStatsStatus::NotSupported;
+                        self.pending_machine_stats = None;
+                        needs_redraw = true;
+                    }
+                    Ok(MachineStatsOutcome::Unreachable(msg)) => {
+                        self.machine_stats_status = MachineStatsStatus::Error(msg);
+                        self.pending_machine_stats = None;
+                        needs_redraw = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still in flight.
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.pending_machine_stats = None;
+                    }
+                }
+            }
+
+            if self.pending_machine_stats.is_none()
+                && self.machine_stats_last_polled.elapsed() >= MACHINE_STATS_CADENCE
+            {
+                self.machine_stats_last_polled = Instant::now();
+                self.pending_machine_stats = Some(spawn_machine_stats_fetch());
+            }
         }
 
         // #1039: Audit panel fetch — armed only while the panel is visible

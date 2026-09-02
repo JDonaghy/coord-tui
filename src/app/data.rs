@@ -492,6 +492,210 @@ fn parse_metric_sample(item: &serde_json::Value) -> MetricSample {
     }
 }
 
+/// How often to re-fetch `GET /machines/stats` from the daemon while the
+/// Machines panel is visible (#44). Mirrors [`METRICS_CADENCE`] — same
+/// panel, same "only while visible" gating, no reason for a different pace.
+pub(crate) const MACHINE_STATS_CADENCE: Duration = Duration::from_secs(10);
+
+/// One entry in a machine's `job_history` (#44), as served by the daemon's
+/// `GET /machines/stats`. Already sorted newest-first by the daemon
+/// (`finished_at`, `dispatched_at` fallback) and capped at 20 — the TUI must
+/// render this list in the order it arrives, never re-sort or re-derive it
+/// locally (that duplication, and the ordering bug it produced, is exactly
+/// what #44 removes).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MachineJobHistoryEntry {
+    pub(crate) assignment_id: String,
+    pub(crate) repo_name: String,
+    pub(crate) issue_number: u64,
+    #[allow(dead_code)] // not yet surfaced in the compact job-history row
+    pub(crate) issue_title: String,
+    pub(crate) assignment_type: Option<String>,
+    pub(crate) status: String,
+    pub(crate) dispatched_at: Option<f64>,
+    pub(crate) finished_at: Option<f64>,
+}
+
+/// One machine's row from `GET /machines/stats` (#44): the capacity ceiling
+/// and completed/failed counts the panel could not show before (they lived
+/// only in the daemon's `coord.machine_stats.build_machine_stats`, which
+/// owns `reconcile._running_by_machine`/`_machine_capacity` — the same
+/// rules `_reassign` gates dispatch on), plus the pre-sorted job history.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct MachineStats {
+    pub(crate) capacity_active: u64,
+    pub(crate) capacity_max: u64,
+    pub(crate) completed: u64,
+    pub(crate) failed: u64,
+    pub(crate) job_history: Vec<MachineJobHistoryEntry>,
+}
+
+/// Outcome of one `GET /machines/stats` fetch (#44), delivered via channel
+/// from [`spawn_machine_stats_fetch`]. Mirrors [`MachineMetricsOutcome`]
+/// exactly, including the explicit `NotSupported` (HTTP 404) arm: a daemon
+/// predating `v0.5.342` doesn't have this route, and that must degrade to an
+/// honest "unavailable" state rather than a silent local recomputation of
+/// the same rules this route exists to stop duplicating.
+pub(crate) enum MachineStatsOutcome {
+    /// HTTP 200 — parsed per-machine stats, keyed by machine name.
+    Stats(std::collections::HashMap<String, MachineStats>),
+    /// No board service is configured (`resolve_board_service` returned
+    /// `None`) — nothing to fetch from.
+    NoBoardService,
+    /// HTTP 404 — the daemon predates the #44 `/machines/stats` route.
+    NotSupported,
+    /// Network / parse error, or a non-2xx/non-404 status.
+    Unreachable(String),
+}
+
+/// #44: current reachability of the daemon's `GET /machines/stats` route,
+/// tracked in `CoordApp::machine_stats_status` so the Machines panel can
+/// render an explicit "unavailable" state — naming the daemon version that
+/// introduced the route — instead of silently falling back to the local
+/// `assignments`-derived counts this issue deletes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum MachineStatsStatus {
+    /// No fetch has completed yet this session.
+    #[default]
+    Unknown,
+    /// Most recent fetch succeeded (the returned map may still be empty).
+    Ok,
+    /// The daemon predates the #44 `/machines/stats` route (HTTP 404).
+    NotSupported,
+    /// No board service configured, or a network/parse error.
+    Error(String),
+}
+
+/// #44: spawn a background thread that fetches `GET /machines/stats` from
+/// the board daemon (port 7435, `board_service`, bearer token) for the whole
+/// fleet in one call. Mirrors [`spawn_machine_metrics_fetch`] exactly,
+/// including deliberately NOT routing through `coord web`'s
+/// `/api/machines/stats` proxy (port 7434) — the TUI has no other need for
+/// `coord web` to be running, and this route must not introduce one.
+pub(crate) fn spawn_machine_stats_fetch() -> std::sync::mpsc::Receiver<MachineStatsOutcome> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let Some((url, token)) = resolve_board_service() else {
+        let _ = tx.send(MachineStatsOutcome::NoBoardService);
+        return rx;
+    };
+    std::thread::spawn(move || {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+        let mut req = agent.get(&format!("{url}/machines/stats"));
+        if let Some(t) = &token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let outcome = match req.call() {
+            Err(ureq::Error::Status(404, _)) => MachineStatsOutcome::NotSupported,
+            Err(e) => MachineStatsOutcome::Unreachable(e.to_string()),
+            Ok(resp) => match resp.into_string() {
+                Err(e) => MachineStatsOutcome::Unreachable(e.to_string()),
+                Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+                    Err(e) => MachineStatsOutcome::Unreachable(format!("json: {e}")),
+                    Ok(v) => MachineStatsOutcome::Stats(parse_machine_stats(&v)),
+                },
+            },
+        };
+        let _ = tx.send(outcome);
+    });
+    rx
+}
+
+/// Parse the JSON body of `GET /machines/stats` into a per-machine stats
+/// map. Accepts either `{"machines": [{"name": ..., ...}, ...]}` (a list of
+/// per-machine rows, the shape the issue's example quotes) or
+/// `{"machines": {"<name>": {...}}}` / a flat `{"<name>": {...}}` (keyed by
+/// name, mirroring [`parse_machine_metrics_series`]'s wrapped/flat
+/// tolerance) — so a wire-shape variation doesn't need a coord-tui change to
+/// match. Unparseable rows are skipped rather than failing the whole
+/// response — one bad row must not blank the entire panel.
+///
+/// A free function (not inlined into the fetch closure) so it's reachable
+/// from `#[cfg(test)]` with a hand-built `serde_json::Value`, without a live
+/// HTTP fetch.
+pub(crate) fn parse_machine_stats(
+    v: &serde_json::Value,
+) -> std::collections::HashMap<String, MachineStats> {
+    let mut out = std::collections::HashMap::new();
+    let machines = v.get("machines").unwrap_or(v);
+
+    if let Some(arr) = machines.as_array() {
+        for row in arr {
+            let Some(name) = row.get("name").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            out.insert(name.to_string(), parse_machine_stats_row(row));
+        }
+        return out;
+    }
+
+    if let Some(obj) = machines.as_object() {
+        for (name, row) in obj {
+            out.insert(name.clone(), parse_machine_stats_row(row));
+        }
+    }
+    out
+}
+
+/// Parse one machine's row from `GET /machines/stats` — the `capacity`,
+/// `counts`, and `job_history` object described in issue #44.
+fn parse_machine_stats_row(row: &serde_json::Value) -> MachineStats {
+    let u64_field = |obj: &serde_json::Value, key: &str| -> u64 {
+        obj.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
+    };
+    let capacity = row.get("capacity");
+    let counts = row.get("counts");
+    let job_history = row
+        .get("job_history")
+        .and_then(|x| x.as_array())
+        .map(|arr| arr.iter().map(parse_machine_job_history_entry).collect())
+        .unwrap_or_default();
+    MachineStats {
+        capacity_active: capacity.map(|c| u64_field(c, "active")).unwrap_or(0),
+        capacity_max: capacity.map(|c| u64_field(c, "max")).unwrap_or(0),
+        completed: counts.map(|c| u64_field(c, "completed")).unwrap_or(0),
+        failed: counts.map(|c| u64_field(c, "failed")).unwrap_or(0),
+        job_history,
+    }
+}
+
+/// Parse one `job_history` entry. `issue_number` falls back to `0` and
+/// string fields to `""`/`"unknown"` when absent — a malformed single entry
+/// must not fail the whole row (see [`parse_machine_stats`]'s doc comment).
+fn parse_machine_job_history_entry(item: &serde_json::Value) -> MachineJobHistoryEntry {
+    MachineJobHistoryEntry {
+        assignment_id: item
+            .get("assignment_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        repo_name: item
+            .get("repo_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        issue_number: item.get("issue_number").and_then(|x| x.as_u64()).unwrap_or(0),
+        issue_title: item
+            .get("issue_title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        assignment_type: item
+            .get("type")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        status: item
+            .get("status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        dispatched_at: item.get("dispatched_at").and_then(|x| x.as_f64()),
+        finished_at: item.get("finished_at").and_then(|x| x.as_f64()),
+    }
+}
+
 /// One file entry from the agent's `/artifact/<repo>/<branch>` manifest.
 /// Fields are parsed from JSON for completeness; the current UI uses only
 /// the count and `ArtifactManifest::total_bytes` for the badge line.
@@ -3791,6 +3995,137 @@ mod tests {
             let series = parse_machine_metrics_series(&body);
             assert!(!series.contains_key("dellserver"));
             assert_eq!(series["elitebook"][0].cpu, Some(5.0));
+        }
+    }
+
+    // ── #44: GET /machines/stats parsing ──────────────────────────────────
+
+    mod machine_stats_parsing_tests {
+        use super::*;
+
+        /// The exact live shape from the issue: `{"machines": [{"name": ...,
+        /// "capacity": {...}, "counts": {...}, "job_history": [...]}]}`.
+        #[test]
+        fn parses_the_list_shape_from_the_issue() {
+            let body = serde_json::json!({
+                "machines": [
+                    {
+                        "name": "precision",
+                        "capacity": {"active": 1, "max": 8},
+                        "counts": {"completed": 1602, "failed": 61},
+                        "job_history": [
+                            {
+                                "assignment_id": "abc123",
+                                "repo_name": "coord-tui",
+                                "issue_number": 44,
+                                "issue_title": "Machines panel stats",
+                                "type": "work",
+                                "status": "merged",
+                                "dispatched_at": 1788301203.5,
+                                "finished_at": 1788304087.4
+                            }
+                        ]
+                    }
+                ]
+            });
+            let stats = parse_machine_stats(&body);
+            let precision = &stats["precision"];
+            assert_eq!(precision.capacity_active, 1);
+            assert_eq!(precision.capacity_max, 8);
+            assert_eq!(precision.completed, 1602);
+            assert_eq!(precision.failed, 61);
+            assert_eq!(precision.job_history.len(), 1);
+            let entry = &precision.job_history[0];
+            assert_eq!(entry.assignment_id, "abc123");
+            assert_eq!(entry.repo_name, "coord-tui");
+            assert_eq!(entry.issue_number, 44);
+            assert_eq!(entry.issue_title, "Machines panel stats");
+            assert_eq!(entry.assignment_type.as_deref(), Some("work"));
+            assert_eq!(entry.status, "merged");
+            assert_eq!(entry.dispatched_at, Some(1788301203.5));
+            assert_eq!(entry.finished_at, Some(1788304087.4));
+        }
+
+        /// Job history order comes straight off the wire, in wire order — no
+        /// local re-sort. This is the regression #44 exists to fix: the old
+        /// `machine_detail_list()` took the first 20 rows in board order
+        /// instead of newest-first by `finished_at`.
+        #[test]
+        fn job_history_order_is_preserved_verbatim_not_resorted() {
+            let body = serde_json::json!({
+                "machines": [{
+                    "name": "dellserver",
+                    "capacity": {"active": 0, "max": 8},
+                    "counts": {"completed": 2, "failed": 0},
+                    "job_history": [
+                        {"assignment_id": "newest", "repo_name": "r", "issue_number": 3,
+                         "issue_title": "t3", "type": "work", "status": "merged",
+                         "finished_at": 300.0},
+                        {"assignment_id": "oldest", "repo_name": "r", "issue_number": 1,
+                         "issue_title": "t1", "type": "work", "status": "merged",
+                         "finished_at": 100.0},
+                    ]
+                }]
+            });
+            let stats = parse_machine_stats(&body);
+            let ids: Vec<&str> = stats["dellserver"]
+                .job_history
+                .iter()
+                .map(|e| e.assignment_id.as_str())
+                .collect();
+            assert_eq!(ids, vec!["newest", "oldest"]);
+        }
+
+        /// A `{"machines": {"<name>": {...}}}` keyed-object shape (mirroring
+        /// `parse_machine_metrics_series`'s wrapped-shape tolerance) is also
+        /// accepted, using the map key as the machine name.
+        #[test]
+        fn parses_the_keyed_object_shape() {
+            let body = serde_json::json!({
+                "machines": {
+                    "elitebook": {
+                        "capacity": {"active": 0, "max": 8},
+                        "counts": {"completed": 715, "failed": 36},
+                        "job_history": []
+                    }
+                }
+            });
+            let stats = parse_machine_stats(&body);
+            assert_eq!(stats["elitebook"].capacity_max, 8);
+            assert_eq!(stats["elitebook"].completed, 715);
+            assert!(stats["elitebook"].job_history.is_empty());
+        }
+
+        /// A flat `{"<name>": {...}}` body (no `"machines"` wrapper at all)
+        /// is also accepted.
+        #[test]
+        fn parses_the_flat_shape() {
+            let body = serde_json::json!({
+                "dell64": {
+                    "capacity": {"active": 1, "max": 8},
+                    "counts": {"completed": 255, "failed": 3},
+                    "job_history": []
+                }
+            });
+            let stats = parse_machine_stats(&body);
+            assert_eq!(stats["dell64"].capacity_active, 1);
+            assert_eq!(stats["dell64"].failed, 3);
+        }
+
+        /// A row missing `"name"` in the list shape is skipped rather than
+        /// failing the whole response.
+        #[test]
+        fn a_list_row_missing_name_is_skipped_not_fatal() {
+            let body = serde_json::json!({
+                "machines": [
+                    {"capacity": {"active": 0, "max": 8}, "counts": {"completed": 0, "failed": 0}},
+                    {"name": "elitebook", "capacity": {"active": 0, "max": 8},
+                     "counts": {"completed": 5, "failed": 1}, "job_history": []},
+                ]
+            });
+            let stats = parse_machine_stats(&body);
+            assert_eq!(stats.len(), 1);
+            assert_eq!(stats["elitebook"].completed, 5);
         }
     }
 }

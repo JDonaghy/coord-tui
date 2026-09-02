@@ -3093,17 +3093,27 @@ pub struct CoordApp {
     /// changes out from under it.
     terminal_copy_mode: bool,
 
-    // ── #207: Machine metrics sparklines ─────────────────────────────────
-    /// Rolling ring-buffer of CPU + memory samples per machine, keyed by
-    /// machine name.  Capped at [`METRICS_HISTORY`] entries (60 × 5 s =
-    /// 5 minutes).  Populated by background `/metrics` polls.
+    // ── #207/#39: Machine metrics sparklines ─────────────────────────────
+    /// Rolling per-machine series, keyed by machine name, capped at
+    /// [`METRICS_HISTORY`] entries. #39: seeded wholesale from the daemon's
+    /// `GET /machines/metrics` ring buffer (so the panel has history from
+    /// before this TUI process started), not built up sample-by-sample from
+    /// a client-side poll any more.
     machine_metrics: std::collections::HashMap<String, std::collections::VecDeque<MetricSample>>,
-    /// In-flight `/metrics` fetches — one entry per machine per poll cycle.
-    /// Drained each tick; completed entries update `machine_metrics`.
-    pending_metrics: Vec<PendingMetrics>,
-    /// When the last `/metrics` poll round was kicked.  The next round fires
-    /// after [`METRICS_CADENCE`] has elapsed and the Machines panel is visible.
+    /// In-flight whole-fleet `GET /machines/metrics` fetch, if any. #39
+    /// replaced the old one-`PendingMetrics`-per-machine vec with a single
+    /// fetch since the daemon now answers for the whole fleet in one call.
+    pending_machine_metrics: Option<std::sync::mpsc::Receiver<MachineMetricsOutcome>>,
+    /// When the last `/machines/metrics` poll was kicked.  The next round
+    /// fires after [`METRICS_CADENCE`] has elapsed and the Machines panel is
+    /// visible.
     metrics_last_polled: Instant,
+    /// #39: last-known reachability of the daemon's `/machines/metrics`
+    /// route, so the panel can show an explicit "unavailable" state (an
+    /// older daemon 404s, or no board service is configured) rather than an
+    /// empty-but-normal chart that reads as "no activity". `Ok` means the
+    /// most recent fetch succeeded, even if the series it returned is empty.
+    machine_metrics_status: MachineMetricsStatus,
 
     // ── #487: live tmux session discovery ──────────────────────────────────
     /// Running `coord-*` tmux sessions discovered at startup via
@@ -4056,10 +4066,19 @@ impl CoordApp {
             left_mouse_down_seen: false,
             // #790: F9 keyboard-toggled terminal copy mode.
             terminal_copy_mode: false,
-            // #207: machine metrics sparklines.
+            // #207 / #39: machine metrics sparklines, sourced from the
+            // daemon's `GET /machines/metrics` ring buffer. Backdated by a
+            // full cadence so the very first tick the Machines panel is
+            // visible fires the fetch immediately rather than waiting out
+            // `METRICS_CADENCE` — the whole point of #39 is that there's
+            // history to show right away, so the first fetch shouldn't be
+            // delayed on top of that.
             machine_metrics: std::collections::HashMap::new(),
-            pending_metrics: Vec::new(),
-            metrics_last_polled: Instant::now(),
+            pending_machine_metrics: None,
+            metrics_last_polled: Instant::now()
+                .checked_sub(METRICS_CADENCE)
+                .unwrap_or_else(Instant::now),
+            machine_metrics_status: MachineMetricsStatus::Unknown,
             // #487: live tmux session discovery.
             live_tmux_sessions: fetch_live_tmux_sessions(),
             pending_remote_sessions: Some(spawn_remote_tmux_sessions_fetch(
@@ -8987,6 +9006,33 @@ impl CoordApp {
             None => return,
         };
 
+        // #39: an explicit "unavailable" state takes priority over the
+        // sparkline layout entirely. An empty-but-normal chart would read as
+        // "this machine has no activity" — a different, false claim from
+        // "the daemon can't answer this question at all" (an older daemon
+        // 404ing the route, or no board service configured).
+        match &self.machine_metrics_status {
+            MachineMetricsStatus::NotSupported => {
+                self.render_metrics_unavailable(
+                    backend,
+                    area,
+                    lh,
+                    "metrics unavailable — daemon predates /machines/metrics",
+                );
+                return;
+            }
+            MachineMetricsStatus::Error(msg) => {
+                self.render_metrics_unavailable(
+                    backend,
+                    area,
+                    lh,
+                    &format!("metrics unavailable — {msg}"),
+                );
+                return;
+            }
+            MachineMetricsStatus::Unknown | MachineMetricsStatus::Ok => {}
+        }
+
         // #2088: iterate the deque in logical order (`iter()`/`back()`)
         // rather than `as_slices().0`, which is only the whole buffer
         // before the ring has wrapped. Once `pop_front` has run once,
@@ -9003,41 +9049,104 @@ impl CoordApp {
         let cpu_area = Rect::new(area.x, area.y, area.width, half_h);
         let mem_area = Rect::new(area.x, area.y + half_h, area.width, half_h);
 
-        // Render CPU row.
-        let cpu_data: Vec<f64> = samples.iter().map(|s| s.cpu as f64).collect();
-        let last_cpu = samples.back().map(|s| s.cpu).unwrap_or(0.0);
+        let has_any_sample = !samples.is_empty();
+        let latest = samples.back();
+
+        // #39: a `None` field (the daemon's `unknown`/timed-out reading) is
+        // filtered out of the plotted series rather than zero-filled — it
+        // must never appear on screen as an indistinguishable 0.0 datapoint.
+        let cpu_data: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| s.cpu.map(|v| v as f64))
+            .collect();
         self.render_metric_sparkline(
             backend, cpu_area, lh,
             "CPU",
-            last_cpu,
+            latest.and_then(|s| s.cpu),
+            latest.and_then(|s| s.reason.as_deref()),
+            has_any_sample,
             cpu_data,
             Color::rgb(80, 160, 240),
         );
 
-        // Render memory row.
-        let mem_data: Vec<f64> = samples.iter().map(|s| s.mem as f64).collect();
-        let last_mem = samples.back().map(|s| s.mem).unwrap_or(0.0);
+        let mem_data: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| s.mem.map(|v| v as f64))
+            .collect();
         self.render_metric_sparkline(
             backend, mem_area, lh,
             "Mem",
-            last_mem,
+            latest.and_then(|s| s.mem),
+            latest.and_then(|s| s.reason.as_deref()),
+            has_any_sample,
             mem_data,
             Color::rgb(120, 200, 120),
         );
     }
 
+    /// #39: draw a one-line "metrics unavailable" banner in place of the
+    /// CPU/Mem sparklines, for a daemon that 404s `/machines/metrics` (too
+    /// old) or when no board service is configured/reachable at all. Kept
+    /// visually distinct from the "no samples yet" placeholder inside
+    /// `render_metric_sparkline` (a subdued "—") — that one means "the
+    /// daemon answered, this machine just has no history yet"; this one
+    /// means "the daemon could not answer the question".
+    fn render_metrics_unavailable(&self, backend: &mut dyn Backend, area: Rect, lh: f32, msg: &str) {
+        if area.height < lh {
+            return;
+        }
+        let row = Rect::new(area.x, area.y, area.width, lh);
+        backend.draw_list(row, &ListView {
+            id: WidgetId::new("metrics-unavailable"),
+            title: None,
+            items: vec![ListItem {
+                text: StyledText {
+                    spans: vec![StyledSpan::with_fg(
+                        format!(" {msg} "),
+                        Color::rgb(220, 160, 60),
+                    )],
+                },
+                icon: None,
+                detail: None,
+                decoration: Decoration::Normal,
+            }],
+            selected_idx: 0,
+            scroll_offset: 0,
+            has_focus: false,
+            bordered: false,
+            h_scroll: 0,
+            max_content_width: None,
+            show_v_scrollbar: false,
+        });
+    }
+
     /// Draw a single labelled sparkline row.
     ///
     /// Layout: one `lh`-tall label+value row on top, the rest of the
-    /// rect for the sparkline chart body.  When `data` is empty a
-    /// placeholder "—" value is shown and no chart is drawn.
+    /// rect for the sparkline chart body.
+    ///
+    /// #39: `latest` is the newest sample's own value — `None` when that
+    /// reading itself is absent (the daemon's `unknown`/timed-out state),
+    /// which is NOT the same as `has_any_sample == false` (no history at
+    /// all yet). The three resulting label states are each rendered
+    /// distinctly so a timed-out reading can never be mistaken for a real
+    /// `0%`:
+    /// - no samples at all → subdued "—"
+    /// - newest sample present but its value absent → `latest_reason` (or
+    ///   "n/a"), in an attention colour, never a percentage
+    /// - newest sample has a real value → "NN%"
+    ///
+    /// `data` (already filtered to known-only values by the caller) drives
+    /// the chart body; empty `data` draws no chart.
     fn render_metric_sparkline(
         &self,
         backend: &mut dyn Backend,
         area: Rect,
         lh: f32,
         label: &str,
-        last_val: f32,
+        latest: Option<f32>,
+        latest_reason: Option<&str>,
+        has_any_sample: bool,
         data: Vec<f64>,
         color: Color,
     ) {
@@ -9049,11 +9158,16 @@ impl CoordApp {
         let label_rect = Rect::new(area.x, area.y, area.width, label_h);
         let chart_rect = Rect::new(area.x, area.y + label_h, area.width, chart_h);
 
-        // Label row — "CPU  42%" or "Mem  67%" with subdued colouring.
-        let val_str = if data.is_empty() {
-            "  —".to_string()
+        // Label row — "CPU  42%" (real reading), "CPU  timed out" (newest
+        // reading absent — #39: never rendered as "0%"), or "CPU  —" (no
+        // history at all yet).
+        let (val_str, val_color) = if !has_any_sample {
+            ("  —".to_string(), Color::rgb(120, 120, 140))
+        } else if let Some(v) = latest {
+            (format!("  {:.0}%", v), color)
         } else {
-            format!("  {:.0}%", last_val)
+            let reason: String = latest_reason.unwrap_or("n/a").chars().take(16).collect();
+            (format!("  {reason}"), Color::rgb(220, 160, 60))
         };
         backend.draw_list(label_rect, &ListView {
             id: WidgetId::new(format!("metric-label-{}", label.to_lowercase())),
@@ -9065,7 +9179,7 @@ impl CoordApp {
                             format!(" {} ", label),
                             Color::rgb(120, 120, 140),
                         ),
-                        StyledSpan::with_fg(val_str, color),
+                        StyledSpan::with_fg(val_str, val_color),
                     ],
                 },
                 icon: None,

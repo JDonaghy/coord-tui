@@ -288,56 +288,208 @@ fn merge_live_agent_venv_health(
     existing
 }
 
-/// How many samples to keep per machine (5 min @ 5 s/sample).
-pub(crate) const METRICS_HISTORY: usize = 60;
-/// How often to poll each reachable machine's `/metrics` endpoint.
-pub(crate) const METRICS_CADENCE: Duration = Duration::from_secs(5);
+/// How many samples to keep per machine, mirroring the daemon's own ring
+/// buffer (#39: "the daemon owns a proper metrics ring buffer" — 1440
+/// samples ≈ 6.1h at the daemon's own cadence). Sized generously rather than
+/// pinned to the daemon's exact figure: it's a client-side cap on how much
+/// of the daemon's series we retain in memory, not a re-implementation of
+/// its retention policy.
+pub(crate) const METRICS_HISTORY: usize = 1440;
+/// How often to re-fetch `GET /machines/metrics` from the daemon while the
+/// Machines panel is visible. #39 replaced the old per-machine `:7433
+/// /metrics` poll (5 s cadence, N connections) with a single whole-fleet
+/// daemon call, so this can be a little more relaxed without losing
+/// responsiveness.
+pub(crate) const METRICS_CADENCE: Duration = Duration::from_secs(10);
 
-/// One `/metrics` snapshot from a remote agent.
-#[derive(Clone, Copy)]
+/// One point in a machine's metrics series, as served by the daemon's
+/// `GET /machines/metrics` (#39).
+///
+/// Every numeric field is `Option<f32>` — NOT the old bare `f32` — because
+/// the daemon's ring buffer carries genuine `unknown` readings (a machine
+/// that timed out reports `null` for both `cpu_percent` and `mem_percent`).
+/// Collapsing that to `0.0` (the pre-#39 behaviour) drew a timed-out machine
+/// as idle, the worst available failure mode for a health signal. Callers
+/// must treat `None` as "no reading", never as zero.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MetricSample {
-    pub(crate) cpu: f32,
-    pub(crate) mem: f32,
+    /// Unix epoch seconds, verbatim from the wire.
+    pub(crate) timestamp: f64,
+    /// `"ok"` | `"unknown"` | ... verbatim from the wire — never re-derived,
+    /// same posture as every other severity/status string this app renders
+    /// (see `fleet_health.rs`'s doc comment).
+    pub(crate) status: String,
+    pub(crate) cpu: Option<f32>,
+    pub(crate) mem: Option<f32>,
+    pub(crate) mem_used_mb: Option<f32>,
+    pub(crate) mem_total_mb: Option<f32>,
+    /// Populated by the daemon when `status != "ok"`, e.g. `"timed out"`.
+    pub(crate) reason: Option<String>,
 }
 
-/// In-flight metrics fetch for one machine.
-pub(crate) struct PendingMetrics {
-    pub(crate) machine: String,
-    pub(crate) rx: std::sync::mpsc::Receiver<Result<MetricSample, String>>,
+impl MetricSample {
+    /// Build a genuine (`status: "ok"`) reading. Test/fixture convenience —
+    /// the wire path always goes through [`parse_metric_sample`].
+    #[cfg(test)]
+    pub(crate) fn ok(cpu: f32, mem: f32) -> Self {
+        MetricSample {
+            timestamp: 0.0,
+            status: "ok".to_string(),
+            cpu: Some(cpu),
+            mem: Some(mem),
+            mem_used_mb: None,
+            mem_total_mb: None,
+            reason: None,
+        }
+    }
+
+    /// Build an absent/`unknown` reading (e.g. the machine timed out).
+    /// Test/fixture convenience.
+    #[cfg(test)]
+    pub(crate) fn unknown(reason: &str) -> Self {
+        MetricSample {
+            timestamp: 0.0,
+            status: "unknown".to_string(),
+            cpu: None,
+            mem: None,
+            mem_used_mb: None,
+            mem_total_mb: None,
+            reason: Some(reason.to_string()),
+        }
+    }
 }
 
-/// Spawn a background thread that fetches `/metrics` from a remote agent.
-pub(crate) fn spawn_machine_metrics(host: &str, port: u16, machine: String) -> PendingMetrics {
+/// Outcome of one `GET /machines/metrics` fetch (#39), delivered via channel
+/// from [`spawn_machine_metrics_fetch`]. Mirrors the shape of
+/// `AuditFetchOutcome`/`ArtifactFetchOutcome`: a 404 is called out
+/// separately from other failures so the caller can show an explicit
+/// "unavailable" state for a daemon that predates this route, rather than
+/// treating it like a transient network blip (or, worse, silently falling
+/// back to a flat zero line — exactly the #39 bug this whole route exists to
+/// fix).
+pub(crate) enum MachineMetricsOutcome {
+    /// HTTP 200 — parsed per-machine series, keyed by machine name.
+    Series(std::collections::HashMap<String, Vec<MetricSample>>),
+    /// No board service is configured (`resolve_board_service` returned
+    /// `None`) — nothing to fetch from.
+    NoBoardService,
+    /// HTTP 404 — the daemon predates the #39 `/machines/metrics` route.
+    NotSupported,
+    /// Network / parse error, or a non-2xx/non-404 status.
+    Unreachable(String),
+}
+
+/// #39: current reachability of the daemon's `GET /machines/metrics` route,
+/// tracked in `CoordApp::machine_metrics_status` so the Machines panel can
+/// render an explicit "unavailable" state instead of an empty-but-normal
+/// chart when an older daemon lacks the route (or no board service is
+/// configured at all) — see [`MachineMetricsOutcome`]'s doc comment for why
+/// that distinction matters.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum MachineMetricsStatus {
+    /// No fetch has completed yet this session.
+    #[default]
+    Unknown,
+    /// Most recent fetch succeeded (the returned series may still be empty).
+    Ok,
+    /// The daemon predates the #39 `/machines/metrics` route (HTTP 404).
+    NotSupported,
+    /// No board service configured, or a network/parse error.
+    Error(String),
+}
+
+/// #39: spawn a background thread that fetches `GET /machines/metrics` from
+/// the board daemon (port 7435, `board_service`, bearer token) for the
+/// *whole fleet* in one call — replacing the old per-machine `:7433/metrics`
+/// agent poll (`N` direct connections, no shared history, `unknown` lied to
+/// as `0.0`).
+///
+/// Deliberately does NOT go through `coord web`'s `/api/machines/metrics`
+/// proxy (port 7434): that surface exists only so a *browser* need not open
+/// a second port, and routing through it would make the TUI depend on
+/// `coord web` running, which it otherwise does not (see the issue's
+/// "Do not route through coord web" note).
+pub(crate) fn spawn_machine_metrics_fetch() -> std::sync::mpsc::Receiver<MachineMetricsOutcome> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let url = format!("http://{}:{}/metrics", host, port);
+    let Some((url, token)) = resolve_board_service() else {
+        let _ = tx.send(MachineMetricsOutcome::NoBoardService);
+        return rx;
+    };
     std::thread::spawn(move || {
         let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(2))
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout_connect(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(5))
             .build();
-        let result = match agent.get(&url).call() {
+        let mut req = agent.get(&format!("{url}/machines/metrics"));
+        if let Some(t) = &token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let outcome = match req.call() {
+            Err(ureq::Error::Status(404, _)) => MachineMetricsOutcome::NotSupported,
+            Err(e) => MachineMetricsOutcome::Unreachable(e.to_string()),
             Ok(resp) => match resp.into_string() {
+                Err(e) => MachineMetricsOutcome::Unreachable(e.to_string()),
                 Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(v) => {
-                        let cpu = v
-                            .get("cpu_percent")
-                            .and_then(|x| x.as_f64())
-                            .unwrap_or(0.0) as f32;
-                        let mem = v
-                            .get("mem_percent")
-                            .and_then(|x| x.as_f64())
-                            .unwrap_or(0.0) as f32;
-                        Ok(MetricSample { cpu, mem })
-                    }
-                    Err(e) => Err(format!("json: {}", e)),
+                    Err(e) => MachineMetricsOutcome::Unreachable(format!("json: {e}")),
+                    Ok(v) => MachineMetricsOutcome::Series(parse_machine_metrics_series(&v)),
                 },
-                Err(e) => Err(e.to_string()),
             },
-            Err(e) => Err(e.to_string()),
         };
-        let _ = tx.send(result);
+        let _ = tx.send(outcome);
     });
-    PendingMetrics { machine, rx }
+    rx
+}
+
+/// Parse the JSON body of `GET /machines/metrics` into a per-machine series
+/// map. Accepts either `{"machines": {"<name>": [samples...]}}` or a flat
+/// `{"<name>": [samples...]}` at the top level, so a wire-shape wrapper
+/// change doesn't need a coord-tui change to match. Unparseable machines or
+/// samples are skipped rather than failing the whole response — one bad row
+/// must not blank the entire panel.
+///
+/// A free function (not inlined into the fetch closure) so it's reachable
+/// from `#[cfg(test)]` with a hand-built `serde_json::Value`, without a live
+/// HTTP fetch.
+pub(crate) fn parse_machine_metrics_series(
+    v: &serde_json::Value,
+) -> std::collections::HashMap<String, Vec<MetricSample>> {
+    let mut out = std::collections::HashMap::new();
+    let obj = v
+        .get("machines")
+        .and_then(|m| m.as_object())
+        .or_else(|| v.as_object());
+    let Some(obj) = obj else { return out };
+    for (machine, series) in obj {
+        let Some(arr) = series.as_array() else { continue };
+        let samples: Vec<MetricSample> = arr.iter().map(parse_metric_sample).collect();
+        out.insert(machine.clone(), samples);
+    }
+    out
+}
+
+/// Parse a single sample object from `GET /machines/metrics`. Every numeric
+/// field falls back to `None` (never `0.0`) when absent or not a number —
+/// see [`MetricSample`]'s doc comment for why that distinction matters.
+fn parse_metric_sample(item: &serde_json::Value) -> MetricSample {
+    let f32_field = |key: &str| -> Option<f32> {
+        item.get(key).and_then(|x| x.as_f64()).map(|x| x as f32)
+    };
+    MetricSample {
+        timestamp: item.get("timestamp").and_then(|x| x.as_f64()).unwrap_or(0.0),
+        status: item
+            .get("status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        cpu: f32_field("cpu_percent"),
+        mem: f32_field("mem_percent"),
+        mem_used_mb: f32_field("mem_used_mb"),
+        mem_total_mb: f32_field("mem_total_mb"),
+        reason: item
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+    }
 }
 
 /// One file entry from the agent's `/artifact/<repo>/<branch>` manifest.
@@ -3538,6 +3690,107 @@ mod tests {
 
             assert_eq!(merged.fleet_checks.len(), 1);
             assert_eq!(merged.fleet_checks[0].check_id, "board_latency");
+        }
+    }
+
+    // ── #39: GET /machines/metrics parsing ────────────────────────────────
+
+    mod machine_metrics_parsing_tests {
+        use super::*;
+
+        /// The exact live sample quoted in issue #39: a timed-out machine's
+        /// `unknown` reading. Every numeric field must parse to `None`, not
+        /// `0.0` — the whole point of widening `MetricSample` in the first
+        /// place.
+        #[test]
+        fn null_fields_parse_to_none_not_zero() {
+            let sample = serde_json::json!({
+                "timestamp": 1788301203.5,
+                "status": "unknown",
+                "cpu_percent": null,
+                "mem_percent": null,
+                "mem_used_mb": null,
+                "mem_total_mb": null,
+                "reason": "timed out"
+            });
+            let parsed = parse_metric_sample(&sample);
+            assert_eq!(parsed.status, "unknown");
+            assert_eq!(parsed.cpu, None);
+            assert_eq!(parsed.mem, None);
+            assert_eq!(parsed.mem_used_mb, None);
+            assert_eq!(parsed.mem_total_mb, None);
+            assert_eq!(parsed.reason.as_deref(), Some("timed out"));
+            assert_eq!(parsed.timestamp, 1788301203.5);
+        }
+
+        #[test]
+        fn ok_fields_parse_to_some() {
+            let sample = serde_json::json!({
+                "timestamp": 100.0,
+                "status": "ok",
+                "cpu_percent": 42.5,
+                "mem_percent": 67.0,
+                "mem_used_mb": 4096.0,
+                "mem_total_mb": 8192.0,
+            });
+            let parsed = parse_metric_sample(&sample);
+            assert_eq!(parsed.status, "ok");
+            assert_eq!(parsed.cpu, Some(42.5));
+            assert_eq!(parsed.mem, Some(67.0));
+            assert_eq!(parsed.mem_used_mb, Some(4096.0));
+            assert_eq!(parsed.mem_total_mb, Some(8192.0));
+            assert_eq!(parsed.reason, None);
+        }
+
+        /// A daemon response wraps the per-machine map under a `"machines"`
+        /// key.
+        #[test]
+        fn series_parses_the_wrapped_shape() {
+            let body = serde_json::json!({
+                "machines": {
+                    "dellserver": [
+                        {"timestamp": 1.0, "status": "ok", "cpu_percent": 10.0, "mem_percent": 20.0},
+                    ],
+                    "elitebook": [
+                        {"timestamp": 2.0, "status": "unknown", "cpu_percent": null, "mem_percent": null, "reason": "timed out"},
+                    ],
+                }
+            });
+            let series = parse_machine_metrics_series(&body);
+            assert_eq!(series.len(), 2);
+            assert_eq!(series["dellserver"][0].cpu, Some(10.0));
+            assert_eq!(series["elitebook"][0].cpu, None);
+            assert_eq!(series["elitebook"][0].reason.as_deref(), Some("timed out"));
+        }
+
+        /// A flat `{"<machine>": [samples...]}` body (no `"machines"`
+        /// wrapper) is also accepted, so a wire-shape variation doesn't need
+        /// a coord-tui change to match.
+        #[test]
+        fn series_parses_the_flat_shape() {
+            let body = serde_json::json!({
+                "dellserver": [
+                    {"timestamp": 1.0, "status": "ok", "cpu_percent": 10.0, "mem_percent": 20.0},
+                ],
+            });
+            let series = parse_machine_metrics_series(&body);
+            assert_eq!(series.len(), 1);
+            assert_eq!(series["dellserver"][0].cpu, Some(10.0));
+        }
+
+        /// A row that's present but not an array (malformed) is skipped
+        /// rather than failing the whole response.
+        #[test]
+        fn a_malformed_machine_entry_is_skipped_not_fatal() {
+            let body = serde_json::json!({
+                "dellserver": "not an array",
+                "elitebook": [
+                    {"timestamp": 1.0, "status": "ok", "cpu_percent": 5.0, "mem_percent": 6.0},
+                ],
+            });
+            let series = parse_machine_metrics_series(&body);
+            assert!(!series.contains_key("dellserver"));
+            assert_eq!(series["elitebook"][0].cpu, Some(5.0));
         }
     }
 }

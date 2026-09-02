@@ -1016,6 +1016,194 @@
         );
     }
 
+    // ── #44: Machines panel ACTIVE WORKERS/JOB HISTORY from GET /machines/stats ─
+
+    /// The regression #44 exists to fix: the old `machine_detail_list()`
+    /// took the first 20 `self.data.assignments` rows in board order
+    /// (`.take(20)`, no sort). This fixture deliberately makes board order
+    /// disagree with `finished_at` order — the assignments list is seeded
+    /// with issues `#97/#98/#99` that the pre-#44 code would have rendered,
+    /// while `machine_stats`' `job_history` (what the daemon actually
+    /// returns, already sorted newest-first by `finished_at`) carries a
+    /// disjoint set of issues in `[newest, middle, oldest]` order. The panel
+    /// must render the `job_history` set, in the `job_history` order, and
+    /// must not surface the assignments-derived issues at all.
+    #[test]
+    fn machine_detail_job_history_renders_daemon_order_not_board_order_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut stale_assignment = make_assignment_typed("running", 99, "coord-tui", Some("work"));
+        stale_assignment.machine = "dellserver".to_string();
+        let mut stale_assignment2 = make_assignment_typed("done", 98, "coord-tui", Some("work"));
+        stale_assignment2.machine = "dellserver".to_string();
+        let mut stale_assignment3 = make_assignment_typed("failed", 97, "coord-tui", Some("work"));
+        stale_assignment3.machine = "dellserver".to_string();
+
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                assignments: vec![stale_assignment, stale_assignment2, stale_assignment3],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_stats_status = MachineStatsStatus::Ok;
+        app.machine_stats.insert(
+            "dellserver".to_string(),
+            MachineStats {
+                capacity_active: 1,
+                capacity_max: 8,
+                completed: 2,
+                failed: 0,
+                job_history: vec![
+                    MachineJobHistoryEntry {
+                        assignment_id: "newest".to_string(),
+                        repo_name: "coord-tui".to_string(),
+                        issue_number: 2,
+                        issue_title: "newest job".to_string(),
+                        assignment_type: Some("work".to_string()),
+                        status: "merged".to_string(),
+                        dispatched_at: Some(100.0),
+                        finished_at: Some(300.0),
+                    },
+                    MachineJobHistoryEntry {
+                        assignment_id: "middle".to_string(),
+                        repo_name: "coord-tui".to_string(),
+                        issue_number: 3,
+                        issue_title: "middle job".to_string(),
+                        assignment_type: Some("work".to_string()),
+                        status: "merged".to_string(),
+                        dispatched_at: Some(50.0),
+                        finished_at: Some(200.0),
+                    },
+                    MachineJobHistoryEntry {
+                        assignment_id: "oldest".to_string(),
+                        repo_name: "coord-tui".to_string(),
+                        issue_number: 1,
+                        issue_title: "oldest job".to_string(),
+                        assignment_type: Some("work".to_string()),
+                        status: "merged".to_string(),
+                        dispatched_at: Some(10.0),
+                        finished_at: Some(100.0),
+                    },
+                ],
+            },
+        );
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        for stale in ["#97", "#98", "#99"] {
+            assert!(
+                !screen.contains(stale),
+                "#44: JOB HISTORY must not fall back to the local \
+                 `self.data.assignments` derivation — {stale} only exists \
+                 in the stale assignments list, not in the daemon's \
+                 job_history:\n{screen}",
+            );
+        }
+
+        let (_, y2) = driver.find("#2").expect("issue #2 (newest) must render");
+        let (_, y3) = driver.find("#3").expect("issue #3 (middle) must render");
+        let (_, y1) = driver.find("#1").expect("issue #1 (oldest) must render");
+        assert!(
+            y2 < y3 && y3 < y1,
+            "#44: job history must render in the daemon's newest-first \
+             order (#2, #3, #1), not board/insertion order:\n{screen}",
+        );
+    }
+
+    /// The capacity ceiling — unavailable before #44 — must be visible as
+    /// `active/max` in the ACTIVE WORKERS header.
+    #[test]
+    fn machine_detail_shows_capacity_ceiling_and_counts_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_stats_status = MachineStatsStatus::Ok;
+        app.machine_stats.insert(
+            "dellserver".to_string(),
+            MachineStats {
+                capacity_active: 1,
+                capacity_max: 8,
+                completed: 1685,
+                failed: 54,
+                job_history: Vec::new(),
+            },
+        );
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        assert!(
+            screen.contains("ACTIVE WORKERS (1/8)"),
+            "#44: the capacity ceiling must render as active/max:\n{screen}",
+        );
+        assert!(
+            screen.contains("1685"),
+            "#44: the completed count must be visible:\n{screen}",
+        );
+        assert!(
+            screen.contains("54"),
+            "#44: the failed count must be visible:\n{screen}",
+        );
+    }
+
+    /// A daemon that 404s `GET /machines/stats` (predates `v0.5.342`) must
+    /// degrade to an explicit unavailable state naming the required
+    /// version — never a silently zeroed or locally-derived panel.
+    #[test]
+    fn machine_detail_shows_unavailable_state_on_daemon_404_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut stale_assignment = make_assignment_typed("running", 99, "coord-tui", Some("work"));
+        stale_assignment.machine = "dellserver".to_string();
+
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                assignments: vec![stale_assignment],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_stats_status = MachineStatsStatus::NotSupported;
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        assert!(
+            screen.contains("unavailable") && screen.contains("v0.5.342"),
+            "#44: a daemon predating /machines/stats must show an explicit \
+             unavailable state naming the required version:\n{screen}",
+        );
+        assert!(
+            !screen.contains("ACTIVE WORKERS"),
+            "#44: the unavailable state must replace the normal ACTIVE \
+             WORKERS/JOB HISTORY layout entirely:\n{screen}",
+        );
+        assert!(
+            !screen.contains("#99"),
+            "#44: the 404 case must not silently fall back to a local \
+             `self.data.assignments` derivation:\n{screen}",
+        );
+    }
+
     // ── #40: Machines panel charts carry a real grid + axis scale ─────────
 
     /// A machine with a normal metrics history for a fixture shared by the

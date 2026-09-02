@@ -1190,6 +1190,40 @@ fn kv_item(key: &str, val: &str, val_color: Option<Color>) -> ListItem {
     }
 }
 
+/// #44: presentational label + colour for one `MachineJobHistoryEntry`'s
+/// `status` string, as rendered in the Machines panel's JOB HISTORY list.
+/// This is display tint only — it does NOT feed the completed/failed
+/// counts shown above the list (those come verbatim from the daemon's own
+/// `counts` object), so widening this match with a new terminal status the
+/// daemon starts emitting is not a "duplicated business rule": worst case a
+/// row falls through to the neutral default colour, it never mis-categorizes
+/// a count.
+fn job_history_status_style(status: &str) -> (&str, Color) {
+    match status {
+        "done" | "merged" => (status, Color::rgb(140, 140, 140)),
+        "failed" => (status, Color::rgb(220, 80, 80)),
+        "cancelled" | "refused_policy" => (status, Color::rgb(180, 140, 60)),
+        _ => (status, Color::rgb(200, 200, 100)),
+    }
+}
+
+/// #44: age string for a job-history entry's epoch-seconds timestamp
+/// (`finished_at`, falling back to `dispatched_at` — the same fallback
+/// order the daemon sorts job history by). `None` (neither timestamp known)
+/// renders as `"-"`, matching `Assignment::age_str`'s convention.
+fn epoch_age_str(ts: Option<f64>) -> String {
+    match ts {
+        None => "-".to_string(),
+        Some(ts) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            fmt_dur((now - ts).max(0.0) as u64)
+        }
+    }
+}
+
 /// #1084: label + colour for one oracle-loop pre-req stage
 /// ([`crate::app::pipeline::PrereqStage`]) — mirrors the colour palette the
 /// rest of the Pipeline detail panel uses for [`StageStatus`] (Done/Failed
@@ -3115,6 +3149,28 @@ pub struct CoordApp {
     /// most recent fetch succeeded, even if the series it returned is empty.
     machine_metrics_status: MachineMetricsStatus,
 
+    // ── #44: Machines panel stats (capacity, completed/failed, job history) ─
+    /// Per-machine stats from the daemon's `GET /machines/stats`, keyed by
+    /// machine name. Replaces `machine_detail_list()`'s old local derivation
+    /// from `self.data.assignments` (own `status == "running"` filter, no
+    /// completed/failed counts, unsorted `.take(20)` job history) with the
+    /// same rules the daemon's dispatcher itself uses
+    /// (`reconcile._running_by_machine`/`_machine_capacity`).
+    machine_stats: std::collections::HashMap<String, MachineStats>,
+    /// In-flight whole-fleet `GET /machines/stats` fetch, if any.
+    pending_machine_stats: Option<std::sync::mpsc::Receiver<MachineStatsOutcome>>,
+    /// When the last `/machines/stats` poll was kicked. The next round fires
+    /// after [`MACHINE_STATS_CADENCE`] has elapsed and the Machines panel is
+    /// visible.
+    machine_stats_last_polled: Instant,
+    /// Last-known reachability of the daemon's `/machines/stats` route, so
+    /// the panel can show an explicit "unavailable" state (naming the
+    /// required daemon version) instead of silently falling back to a local
+    /// recomputation of the same rules this route exists to stop
+    /// duplicating — see the issue's "honest gap" reasoning, the same
+    /// principle #39 applied to `unknown` vs `0.0`.
+    machine_stats_status: MachineStatsStatus,
+
     // ── #487: live tmux session discovery ──────────────────────────────────
     /// Running `coord-*` tmux sessions discovered at startup via
     /// `coord sessions --json`.  Each entry represents an interactive
@@ -4079,6 +4135,16 @@ impl CoordApp {
                 .checked_sub(METRICS_CADENCE)
                 .unwrap_or_else(Instant::now),
             machine_metrics_status: MachineMetricsStatus::Unknown,
+            // #44: Machines panel stats, sourced from the daemon's
+            // `GET /machines/stats`. Backdated by a full cadence for the
+            // same reason as `metrics_last_polled` above — the first tick
+            // the Machines panel is visible should fetch immediately.
+            machine_stats: std::collections::HashMap::new(),
+            pending_machine_stats: None,
+            machine_stats_last_polled: Instant::now()
+                .checked_sub(MACHINE_STATS_CADENCE)
+                .unwrap_or_else(Instant::now),
+            machine_stats_status: MachineStatsStatus::Unknown,
             // #487: live tmux session discovery.
             live_tmux_sessions: fetch_live_tmux_sessions(),
             pending_remote_sessions: Some(spawn_remote_tmux_sessions_fetch(
@@ -8773,120 +8839,126 @@ impl CoordApp {
 
                 items.push(kv_item("", "", None)); // blank
 
-                // ── Active workers ───────────────────────────────────────
-                let active_workers: Vec<&Assignment> = self
-                    .data
-                    .assignments
-                    .iter()
-                    .filter(|a| a.machine == m.name && a.status == "running")
-                    .collect();
-
-                items.push(ListItem {
-                    text: StyledText {
-                        spans: vec![StyledSpan::with_fg(
-                            format!(" ACTIVE WORKERS ({}) ", active_workers.len()),
-                            Color::rgb(130, 130, 150),
-                        )],
-                    },
-                    icon: None,
-                    detail: None,
-                    decoration: Decoration::Header,
-                });
-
-                if active_workers.is_empty() {
-                    items.push(kv_item("", "  idle", Some(Color::rgb(80, 80, 80))));
-                } else {
-                    for a in &active_workers {
-                        let id8 = trunc(&a.id, 8);
-                        let type_label = a.assignment_type.as_deref().unwrap_or("work");
-                        let text = StyledText {
-                            spans: vec![
-                                StyledSpan::with_fg(
-                                    format!("  {} ", id8),
-                                    Color::rgb(100, 100, 180),
-                                ),
-                                StyledSpan::with_fg(
-                                    format!("#{:<6}", a.issue_number),
-                                    Color::rgb(150, 150, 240),
-                                ),
-                                StyledSpan::with_fg(
-                                    format!("{:<8}", type_label),
-                                    Color::rgb(150, 180, 150),
-                                ),
-                                StyledSpan::with_fg(
-                                    format!("  {}", trunc(&a.repo, 18)),
-                                    Color::rgb(110, 110, 110),
-                                ),
-                            ],
-                        };
+                // ── #44: Active workers, completed/failed counts, and job
+                // history — all sourced from the daemon's
+                // `GET /machines/stats`, never re-derived locally from
+                // `self.data.assignments`. That local derivation used to
+                // miscount active workers (its own `status == "running"`
+                // filter, rather than the daemon's dispatch-gating
+                // `_running_by_machine`/`_machine_capacity`), never showed
+                // the capacity ceiling at all, never counted completed/
+                // failed jobs, and rendered job history in board order
+                // (`.take(20)`, no sort) instead of newest-first.
+                match &self.machine_stats_status {
+                    MachineStatsStatus::NotSupported | MachineStatsStatus::Error(_) => {
                         items.push(ListItem {
-                            text,
-                            icon: None,
-                            detail: Some(StyledText {
+                            text: StyledText {
                                 spans: vec![StyledSpan::with_fg(
-                                    a.age_str(),
-                                    Color::rgb(90, 90, 90),
+                                    " MACHINE STATS ",
+                                    Color::rgb(130, 130, 150),
                                 )],
-                            }),
-                            decoration: Decoration::Normal,
-                        });
-                    }
-                }
-
-                items.push(kv_item("", "", None)); // blank
-
-                // ── Job history ──────────────────────────────────────────
-                items.push(ListItem {
-                    text: StyledText {
-                        spans: vec![StyledSpan::with_fg(
-                            " JOB HISTORY ",
-                            Color::rgb(130, 130, 150),
-                        )],
-                    },
-                    icon: None,
-                    detail: None,
-                    decoration: Decoration::Header,
-                });
-
-                let machine_jobs: Vec<&Assignment> = self
-                    .data
-                    .assignments
-                    .iter()
-                    .filter(|a| a.machine == m.name)
-                    .take(20)
-                    .collect();
-
-                if machine_jobs.is_empty() {
-                    items.push(kv_item("", "  No jobs found", None));
-                } else {
-                    for a in machine_jobs {
-                        let sc = a.status_color(&self.active_theme);
-                        let issue = format!("  #{:<5}", a.issue_number);
-                        let repo = format!("{:<15}", trunc(&a.repo, 15));
-                        let st = a.status_label();
-                        let text = StyledText {
-                            spans: vec![
-                                StyledSpan::with_fg(&issue, Color::rgb(150, 150, 240)),
-                                StyledSpan::plain(&repo),
-                                StyledSpan::with_fg(st, sc),
-                            ],
-                        };
-                        let detail = Some(StyledText {
-                            spans: vec![StyledSpan::with_fg(
-                                a.age_str(),
-                                Color::rgb(100, 100, 100),
-                            )],
-                        });
-                        items.push(ListItem {
-                            text,
-                            icon: None,
-                            detail,
-                            decoration: if a.status == "failed" {
-                                Decoration::Error
-                            } else {
-                                Decoration::Normal
                             },
+                            icon: None,
+                            detail: None,
+                            decoration: Decoration::Header,
                         });
+                        let msg = match &self.machine_stats_status {
+                            MachineStatsStatus::NotSupported => {
+                                "unavailable — needs daemon ≥ v0.5.342".to_string()
+                            }
+                            MachineStatsStatus::Error(e) => format!("unavailable — {e}"),
+                            _ => unreachable!(),
+                        };
+                        items.push(kv_item("", &format!("  {msg}"), Some(Color::rgb(220, 160, 60))));
+                    }
+                    MachineStatsStatus::Unknown | MachineStatsStatus::Ok => {
+                        let empty = MachineStats::default();
+                        let stats = self.machine_stats.get(&m.name).unwrap_or(&empty);
+
+                        // ── Active workers (capacity ceiling) ────────────
+                        items.push(ListItem {
+                            text: StyledText {
+                                spans: vec![StyledSpan::with_fg(
+                                    format!(
+                                        " ACTIVE WORKERS ({}/{}) ",
+                                        stats.capacity_active, stats.capacity_max
+                                    ),
+                                    Color::rgb(130, 130, 150),
+                                )],
+                            },
+                            icon: None,
+                            detail: None,
+                            decoration: Decoration::Header,
+                        });
+                        if stats.capacity_active == 0 {
+                            items.push(kv_item("", "  idle", Some(Color::rgb(80, 80, 80))));
+                        }
+                        items.push(kv_item(
+                            "Completed",
+                            &stats.completed.to_string(),
+                            Some(Color::rgb(80, 160, 80)),
+                        ));
+                        items.push(kv_item(
+                            "Failed",
+                            &stats.failed.to_string(),
+                            Some(if stats.failed > 0 {
+                                Color::rgb(220, 80, 80)
+                            } else {
+                                Color::rgb(110, 110, 110)
+                            }),
+                        ));
+
+                        items.push(kv_item("", "", None)); // blank
+
+                        // ── Job history — rendered in wire order, which the
+                        // daemon already sorts newest-first by `finished_at`
+                        // (falling back to `dispatched_at`), capped at 20.
+                        // Never re-sorted or re-filtered here.
+                        items.push(ListItem {
+                            text: StyledText {
+                                spans: vec![StyledSpan::with_fg(
+                                    " JOB HISTORY ",
+                                    Color::rgb(130, 130, 150),
+                                )],
+                            },
+                            icon: None,
+                            detail: None,
+                            decoration: Decoration::Header,
+                        });
+
+                        if stats.job_history.is_empty() {
+                            items.push(kv_item("", "  No jobs found", None));
+                        } else {
+                            for entry in &stats.job_history {
+                                let (st_label, st_color) = job_history_status_style(&entry.status);
+                                let issue = format!("  #{:<5}", entry.issue_number);
+                                let repo = format!("{:<15}", trunc(&entry.repo_name, 15));
+                                let text = StyledText {
+                                    spans: vec![
+                                        StyledSpan::with_fg(&issue, Color::rgb(150, 150, 240)),
+                                        StyledSpan::plain(&repo),
+                                        StyledSpan::with_fg(st_label, st_color),
+                                    ],
+                                };
+                                let age = epoch_age_str(entry.finished_at.or(entry.dispatched_at));
+                                let detail = Some(StyledText {
+                                    spans: vec![StyledSpan::with_fg(
+                                        age,
+                                        Color::rgb(100, 100, 100),
+                                    )],
+                                });
+                                items.push(ListItem {
+                                    text,
+                                    icon: None,
+                                    detail,
+                                    decoration: if entry.status == "failed" {
+                                        Decoration::Error
+                                    } else {
+                                        Decoration::Normal
+                                    },
+                                });
+                            }
+                        }
                     }
                 }
 

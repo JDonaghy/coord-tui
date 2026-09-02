@@ -1044,46 +1044,69 @@ impl CoordApp {
             }
         }
 
-        // #207: Machine metrics polling — only when the Machines panel is
-        // visible so we don't burn background threads when the user is on
-        // another view.
+        // #39: Machine metrics polling — a single whole-fleet
+        // `GET /machines/metrics` daemon fetch, only while the Machines
+        // panel is visible so we don't burn a background thread when the
+        // user is elsewhere. Replaces #207's per-machine `:7433/metrics`
+        // agent poll entirely: one daemon call instead of N agent
+        // connections, and the daemon's own ring buffer means there's
+        // history to show even on the very first tick.
         if self.active_view == SidebarView::Machines {
-            // Drain any completed in-flight metrics fetches first.
-            let mut drained: Vec<PendingMetrics> = Vec::new();
-            for pm in self.pending_metrics.drain(..) {
-                match pm.rx.try_recv() {
-                    Ok(Ok(sample)) => {
-                        let buf = self.machine_metrics
-                            .entry(pm.machine)
-                            .or_default();
-                        buf.push_back(sample);
-                        if buf.len() > METRICS_HISTORY {
-                            buf.pop_front();
+            if let Some(rx) = &self.pending_machine_metrics {
+                match rx.try_recv() {
+                    Ok(MachineMetricsOutcome::Series(series)) => {
+                        self.machine_metrics_status = MachineMetricsStatus::Ok;
+                        // Replace each machine's local buffer wholesale with
+                        // the daemon's own series rather than appending —
+                        // the daemon already retains history across TUI
+                        // restarts, so there is no incremental client state
+                        // to merge. The local `VecDeque` is purely a
+                        // render-side cap on how much of that series we
+                        // hold at once (see `METRICS_HISTORY`).
+                        for (machine, samples) in series {
+                            let buf: std::collections::VecDeque<MetricSample> = {
+                                let len = samples.len();
+                                let skip = len.saturating_sub(METRICS_HISTORY);
+                                samples.into_iter().skip(skip).collect()
+                            };
+                            self.machine_metrics.insert(machine, buf);
                         }
+                        self.pending_machine_metrics = None;
                         needs_redraw = true;
                     }
-                    Ok(Err(_)) => {}  // fetch failed — silently skip
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        // Still in flight — put it back.
-                        drained.push(pm);
+                    Ok(MachineMetricsOutcome::NoBoardService) => {
+                        self.machine_metrics_status = MachineMetricsStatus::Error(
+                            "no board service configured".to_string(),
+                        );
+                        self.pending_machine_metrics = None;
+                        needs_redraw = true;
                     }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+                    Ok(MachineMetricsOutcome::NotSupported) => {
+                        self.machine_metrics_status = MachineMetricsStatus::NotSupported;
+                        self.pending_machine_metrics = None;
+                        needs_redraw = true;
+                    }
+                    Ok(MachineMetricsOutcome::Unreachable(msg)) => {
+                        self.machine_metrics_status = MachineMetricsStatus::Error(msg);
+                        self.pending_machine_metrics = None;
+                        needs_redraw = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still in flight.
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.pending_machine_metrics = None;
+                    }
                 }
             }
-            self.pending_metrics = drained;
 
-            // Kick a new round when the cadence has elapsed and no fetches
-            // are outstanding (avoids piling up requests when the agent is slow).
-            if self.pending_metrics.is_empty()
+            // Kick a new round when the cadence has elapsed and no fetch is
+            // outstanding (avoids piling up requests when the daemon is slow).
+            if self.pending_machine_metrics.is_none()
                 && self.metrics_last_polled.elapsed() >= METRICS_CADENCE
             {
                 self.metrics_last_polled = Instant::now();
-                for m in &self.data.machines {
-                    if m.reachable && !m.host.is_empty() {
-                        let pm = spawn_machine_metrics(&m.host, 7433, m.name.clone());
-                        self.pending_metrics.push(pm);
-                    }
-                }
+                self.pending_machine_metrics = Some(spawn_machine_metrics_fetch());
             }
         }
 

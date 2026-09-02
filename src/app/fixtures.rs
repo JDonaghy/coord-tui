@@ -273,10 +273,13 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         left_mouse_down_seen: false,
         // #790
         terminal_copy_mode: false,
-        // #207
+        // #207 / #39
         machine_metrics: std::collections::HashMap::new(),
-        pending_metrics: Vec::new(),
-        metrics_last_polled: Instant::now(),
+        pending_machine_metrics: None,
+        metrics_last_polled: Instant::now()
+            .checked_sub(METRICS_CADENCE)
+            .unwrap_or_else(Instant::now),
+        machine_metrics_status: MachineMetricsStatus::Unknown,
         // #487
         live_tmux_sessions: Vec::new(),
         pending_remote_sessions: None,

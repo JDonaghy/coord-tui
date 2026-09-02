@@ -827,10 +827,7 @@
                 .entry("dellserver".to_string())
                 .or_default();
             for _ in 0..(METRICS_HISTORY + 20) {
-                buf.push_back(MetricSample {
-                    cpu: 100.0,
-                    mem: 100.0,
-                });
+                buf.push_back(MetricSample::ok(100.0, 100.0));
                 // Mirror the push-site cap in settings_ui.rs so the deque's
                 // shape (and internal ring offset) matches production once
                 // it's been full and wrapping for a while.
@@ -838,7 +835,7 @@
                     buf.pop_front();
                 }
             }
-            buf.push_back(MetricSample { cpu: 14.0, mem: 11.0 });
+            buf.push_back(MetricSample::ok(14.0, 11.0));
             if buf.len() > METRICS_HISTORY {
                 buf.pop_front();
             }
@@ -871,6 +868,151 @@
             mem_row.contains("11%"),
             "#2088: the Mem readout has the identical defect and must also \
              track the newest sample (11%):\n{mem_row}\nfull screen:\n{screen}",
+        );
+    }
+
+    // ── #39: honest-gap rule for /machines/metrics ────────────────────────
+
+    /// A daemon `unknown` reading (the machine timed out, `cpu_percent`/
+    /// `mem_percent` both `null`) must never render as a `0` datapoint or
+    /// a `0%` label — that was the #39 bug: a timed-out machine drew as
+    /// idle. The CPU/Mem readout for the newest sample must show something
+    /// that is visibly NOT a percentage (here, the daemon's own `reason`)
+    /// when that sample's value is absent.
+    #[test]
+    fn machine_sparkline_unknown_reading_is_not_rendered_as_zero_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_metrics_status = MachineMetricsStatus::Ok;
+
+        {
+            let buf = app
+                .machine_metrics
+                .entry("dellserver".to_string())
+                .or_default();
+            buf.push_back(MetricSample::ok(0.0, 0.0));
+            buf.push_back(MetricSample::unknown("timed out"));
+        }
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        let (_, cpu_y) = driver
+            .find("CPU")
+            .expect("CPU sparkline label must render");
+        let cpu_row: String = screen_row(&screen, cpu_y).into_iter().collect();
+        assert!(
+            cpu_row.contains("timed out"),
+            "#39: the newest sample's absent value must surface its \
+             `reason`, not a percentage:\n{cpu_row}\nfull screen:\n{screen}",
+        );
+        assert!(
+            !cpu_row.contains("0%"),
+            "#39: an `unknown` reading must never render as `0%` — that's \
+             the exact bug (a timed-out machine drawing as idle) this issue \
+             fixes:\n{cpu_row}\nfull screen:\n{screen}",
+        );
+
+        let (_, mem_y) = driver
+            .find("Mem")
+            .expect("Mem sparkline label must render");
+        let mem_row: String = screen_row(&screen, mem_y).into_iter().collect();
+        assert!(
+            mem_row.contains("timed out"),
+            "#39: the Mem readout has the identical requirement:\n{mem_row}\n\
+             full screen:\n{screen}",
+        );
+        assert!(
+            !mem_row.contains("0%"),
+            "#39: the Mem readout must also never show `0%` for an unknown \
+             reading:\n{mem_row}\nfull screen:\n{screen}",
+        );
+    }
+
+    /// A real `0.0` reading (genuinely idle machine) still renders as a
+    /// plain `0%` — the honest-gap rule only withholds the percentage when
+    /// the value itself is absent, never when it's a real zero.
+    #[test]
+    fn machine_sparkline_a_genuine_zero_still_renders_as_zero_percent_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_metrics_status = MachineMetricsStatus::Ok;
+
+        {
+            let buf = app
+                .machine_metrics
+                .entry("dellserver".to_string())
+                .or_default();
+            buf.push_back(MetricSample::ok(0.0, 0.0));
+        }
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        let (_, cpu_y) = driver
+            .find("CPU")
+            .expect("CPU sparkline label must render");
+        let cpu_row: String = screen_row(&screen, cpu_y).into_iter().collect();
+        assert!(
+            cpu_row.contains("0%"),
+            "a genuine 0.0 reading must still render as 0%, not be \
+             mistaken for an absent one:\n{cpu_row}\nfull screen:\n{screen}",
+        );
+    }
+
+    /// An older daemon that 404s `GET /machines/metrics` (predates #39) must
+    /// degrade to an explicit "unavailable" state, not an empty-but-normal
+    /// chart — the latter would read as "this machine has no activity",
+    /// which is a different (false) claim.
+    #[test]
+    fn machine_sparkline_shows_unavailable_state_on_daemon_404_black_box() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = CoordApp {
+            data: BoardData {
+                machines: vec![mk_machine("dellserver", "dellserver.tail", true, &[])],
+                ..BoardData::default()
+            },
+            ..make_test_app(BoardData::default())
+        };
+        app.active_view = SidebarView::Machines;
+        app.machine_sel = 0;
+        app.machine_metrics_status = MachineMetricsStatus::NotSupported;
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        driver.render();
+        let screen = driver.screen();
+
+        assert!(
+            screen.contains("metrics unavailable"),
+            "#39: a daemon predating /machines/metrics must show an \
+             explicit unavailable state:\n{screen}",
+        );
+        assert!(
+            driver.find("CPU").is_none(),
+            "#39: the unavailable state replaces the sparkline layout \
+             entirely — no empty-but-normal CPU/Mem chart underneath it:\n\
+             {screen}",
         );
     }
 

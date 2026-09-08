@@ -548,9 +548,12 @@ pub(crate) enum PipelineNotVisible {
     Untracked,
     /// A member, but dismissed from the Pipeline sidebar this session.
     Dismissed,
-    /// #2405: a member classified into the "done" bucket. The Pipeline
-    /// sidebar no longer has a Done section at all — completed issues live
-    /// in the `Completed` tab's grid — so there is no sidebar row to jump to.
+    /// A member classified into the "done" bucket, but outside the revived
+    /// Done section's bounded window (#50's `DONE_WINDOW_DAYS`) — or, for a
+    /// daemon predating #913, with no resolvable done-at timestamp at all.
+    /// Either way there is no sidebar row to jump to; the `Completed` tab's
+    /// grid (#2405) has its own, wider time-range controls and can still
+    /// find it.
     Completed,
 }
 
@@ -561,7 +564,7 @@ impl PipelineNotVisible {
         match self {
             Self::Untracked => "no coord label",
             Self::Dismissed => "dismissed",
-            Self::Completed => "see Completed tab",
+            Self::Completed => "too old for Done",
         }
     }
 
@@ -575,7 +578,8 @@ impl PipelineNotVisible {
                 format!("#{issue_number} was dismissed from the Pipeline this session.")
             }
             Self::Completed => format!(
-                "#{issue_number} is completed — open the Pipeline's Completed tab to find it."
+                "#{issue_number} completed too long ago for the Pipeline's Done section — \
+                 open the Completed tab instead."
             ),
         }
     }
@@ -1193,13 +1197,11 @@ impl CoordApp {
         {
             return Err(PipelineNotVisible::Dismissed);
         }
-        // #2405: "done" has no sidebar section any more — completed issues
-        // are reachable only through the Completed tab's grid — so it can
-        // never resolve to a sidebar row, whatever its timestamps say.
+        // #50: "done" is reachable again, but only inside the revived Done
+        // section's `DONE_WINDOW_DAYS` window — a `done` issue older than
+        // that has no sidebar row at all (by design, see
+        // `pipeline_done_by_repo`), so it still reports `Completed`.
         let lc = self.pipeline_lifecycle_section(issue);
-        if lc == "done" {
-            return Err(PipelineNotVisible::Completed);
-        }
         // #2449: visibility is checked with the Pipeline search filter
         // IGNORED (`apply_search = false`) — "View in Pipeline" opens or
         // activates a document tab, which doesn't need the issue's row to
@@ -1208,6 +1210,14 @@ impl CoordApp {
         // check is filter-blind.
         let visible = match lc {
             "in-progress" => self.pipeline_active_issues_impl(false).contains(&idx),
+            // `pipeline_done_by_repo` has no `apply_search`-style bypass
+            // (it isn't meant to be filter-sensitive at all — the window
+            // bound is the only exclusion rule) so it's used as-is here,
+            // same as every other jump-target check in this match.
+            "done" => self
+                .pipeline_done_by_repo()
+                .iter()
+                .any(|(_, idxs)| idxs.contains(&idx)),
             lc => self
                 .pipeline_repos_for_state_impl(lc, false)
                 .iter()
@@ -1930,6 +1940,60 @@ impl CoordApp {
             })
             .filter_map(|a| a.dispatched_at)
             .reduce(f64::min)
+    }
+
+    /// #50: how far back the revived Done sidebar section looks, in days.
+    ///
+    /// A single named constant rather than a number threaded through the
+    /// grouping/search/rebuild call sites — #728's original Done section had
+    /// no bound at all (later replaced by the user-cycled `DoneWindow` enum,
+    /// itself removed by #2405), and the ask this time is explicitly a fixed,
+    /// easy-to-change bound instead of either extreme. Bump this one line to
+    /// change the window; nothing else should hardcode "3".
+    pub(crate) const DONE_WINDOW_DAYS: i64 = 3;
+
+    /// Issues eligible for the revived Done sidebar section: lifecycle
+    /// `"done"` (see [`Self::pipeline_lifecycle_section`]) *and* finished
+    /// within [`Self::DONE_WINDOW_DAYS`] of now — grouped by repo in the same
+    /// shape [`Self::pipeline_repos_for_state`] already produces for New /
+    /// Refining / Pending, so the Done section renders through that same
+    /// generic repo-grouped arm instead of a bespoke one.
+    ///
+    /// A `done` issue with no resolvable [`Self::issue_done_at`] (rows that
+    /// predate the relevant columns) is excluded rather than kept — with no
+    /// timestamp there is no way to tell whether it falls inside the window,
+    /// and silently including it would make the "roughly three days" bound a
+    /// lie. This is a pure filter over data the periodic `/board` refresh
+    /// already fetched for every other section: there is no separate network
+    /// round trip here to fail slowly, so unlike Audit/Reports there is no
+    /// `_fetch_error` state to surface — the one failure mode (a done issue
+    /// missing a timestamp) degrades to "not shown" rather than an error.
+    pub(crate) fn pipeline_done_by_repo(&self) -> Vec<(String, Vec<usize>)> {
+        let cutoff = Self::now_epoch_secs() - (Self::DONE_WINDOW_DAYS * 86_400) as f64;
+        self.pipeline_repos_for_state("done")
+            .into_iter()
+            .filter_map(|(repo, idxs)| {
+                let mut kept: Vec<usize> = idxs
+                    .into_iter()
+                    .filter(|&i| {
+                        self.issue_done_at(&self.pipeline_issues[i])
+                            .is_some_and(|done_at| done_at >= cutoff)
+                    })
+                    .collect();
+                kept.sort_unstable();
+                (!kept.is_empty()).then_some((repo, kept))
+            })
+            .collect()
+    }
+
+    /// Current wall-clock time as Unix seconds. Extracted so
+    /// [`Self::pipeline_done_by_repo`]'s window math has one place to read
+    /// "now" from.
+    fn now_epoch_secs() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
     }
 
     // ── #2405: the completed-issues grid ─────────────────────────────────
@@ -5402,11 +5466,17 @@ impl CoordApp {
         let refining_by_repo: Vec<(String, Vec<usize>)> =
             self.pipeline_repos_for_state("refining");
         let pending_by_repo: Vec<(String, Vec<usize>)> = self.pipeline_repos_for_state("pending");
+        // #50: revived Done section — repo-grouped like Refining/Pending,
+        // but bounded to `DONE_WINDOW_DAYS` instead of the full lifecycle
+        // history (see `pipeline_done_by_repo`'s doc comment for why).
+        let done_by_repo: Vec<(String, Vec<usize>)> = self.pipeline_done_by_repo();
         // Build the list of non-empty state sections in display order.
         // #815: In-progress on top — active work is the most relevant item
         // to see immediately; the pre-dispatch lifecycle states follow in
-        // order (New → Refining → Pending). #2405: there is no Done section
-        // any more — completed issues live in the `Completed` tab's grid.
+        // order (New → Refining → Pending). #2405 removed the Done section
+        // that used to sit last (completed issues moved to the `Completed`
+        // tab's grid); #50 puts it back, still last — it's the one section
+        // that is a record rather than something to act on.
         let mut state_sections: Vec<(&'static str, &'static str)> = Vec::new();
         if !active_flat.is_empty() {
             state_sections.push(("in-progress", "In-progress"));
@@ -5420,6 +5490,9 @@ impl CoordApp {
         if !pending_by_repo.is_empty() {
             state_sections.push(("pending", "Pending"));
         }
+        if !done_by_repo.is_empty() {
+            state_sections.push(("done", "Done"));
+        }
 
         // ── Build sidebar section definitions ────────────────────────────
         let mut defs: Vec<SidebarSectionDef> = Vec::new();
@@ -5430,6 +5503,7 @@ impl CoordApp {
                 "refining" => "Refining".to_string(),
                 "pending" => "Pending".to_string(),
                 "in-progress" => "In-progress".to_string(),
+                "done" => "Done".to_string(),
                 other => other.to_string(),
             };
             let mut def =
@@ -5470,6 +5544,7 @@ impl CoordApp {
             "pending" => Color::rgb(140, 180, 240),
             "refining" => Color::rgb(200, 170, 90), // amber — refinement in flight
             "new" => Color::rgb(160, 160, 200),     // muted — pre-pipeline / no label
+            "done" => Color::rgb(100, 180, 100), // green — matches the Completed grid's "✓ merged/closed"
             _ => Color::rgb(140, 140, 160),
         };
 
@@ -5710,6 +5785,7 @@ impl CoordApp {
                         "new" => &new_by_repo,
                         "refining" => &refining_by_repo,
                         "pending" => &pending_by_repo,
+                        "done" => &done_by_repo,
                         // `state_sections` is built in this function and only
                         // ever contains the five known keys above — this arm
                         // is unreachable.
@@ -5964,7 +6040,11 @@ impl CoordApp {
                                 }
                             }
                         } else {
-                            // Refining / Pending — 2-level tree: repo → issue.
+                            // Refining / Pending / Done — 2-level tree: repo →
+                            // issue. (Done additionally windows to
+                            // `DONE_WINDOW_DAYS` via `pipeline_done_by_repo`,
+                            // computed above into `done_by_repo` — this loop
+                            // itself doesn't care which lc_key it's rendering.)
                             // #1197: nest each epic's children beneath its
                             // row instead of listing them a second time as
                             // flat siblings in this bucket.
@@ -6172,13 +6252,24 @@ impl CoordApp {
             }
         }
         // Restore per-section collapse state by state key.  New sections
-        // that weren't present before default to expanded. (#815's
-        // collapsed-by-default carve-out was Done-only and went with it in
-        // #2405 — every remaining section is active work.)
+        // that weren't present before default to expanded — except Done
+        // (#815's original collapsed-by-default carve-out, revived by #50):
+        // it is a record, not a queue of things to act on, and per #50's
+        // "lazy-loaded... do not load it until the node is opened" ask, the
+        // heavier per-row rendering work below is skipped for a collapsed
+        // section the same way it already is for every other one, so
+        // leaving Done collapsed on first appearance is what makes opening
+        // it an actual, deliberate step rather than free with every refresh.
         for (i, &state_key) in self.pipeline_state_section_names.iter().enumerate() {
-            if let Some(&was_collapsed) = prev_state_collapsed.get(state_key) {
-                self.pipeline_sidebar
-                    .set_collapsed(i + search_offset, was_collapsed);
+            match prev_state_collapsed.get(state_key) {
+                Some(&was_collapsed) => {
+                    self.pipeline_sidebar
+                        .set_collapsed(i + search_offset, was_collapsed);
+                }
+                None if state_key == "done" => {
+                    self.pipeline_sidebar.set_collapsed(i + search_offset, true);
+                }
+                None => {}
             }
         }
         // Restore panel scroll so the visible area doesn't jump back to the
@@ -6213,8 +6304,10 @@ impl CoordApp {
     ///   `repo_idx` indexes `pipeline_active_by_repo`; #1487 replaced the
     ///   old Live/Idle liveness bucket with a repo node)
     /// - `new`: `[repo_idx, milestone_idx, issue_idx]` (3-level, #668)
-    /// - `done`: `[0, issue_idx]` (2-level flat, #728 — no repo/milestone groups)
-    /// - `refining` / `pending`: `[repo_idx, issue_idx]` (2-level)
+    /// - `refining` / `pending` / `done`: `[repo_idx, issue_idx]` (2-level —
+    ///   `done`'s `repo_idx` indexes `pipeline_done_by_repo`, #50; #728's
+    ///   original Done section was flat with no repo grouping at all, which
+    ///   this revival intentionally does not repeat)
     ///
     /// A path shorter than the minimum for the state (header row selected)
     /// returns `None`.
@@ -6274,13 +6367,23 @@ impl CoordApp {
                 Some(parent_idx)
             }
         } else {
-            // refining / pending — 2-level [repo_idx, issue_idx].
+            // refining / pending / done — 2-level [repo_idx, issue_idx].
+            // #50: `done` must resolve through `pipeline_done_by_repo` (the
+            // `DONE_WINDOW_DAYS`-bounded grouping the rows were actually
+            // rendered from), not the unwindowed `pipeline_repos_for_state`
+            // — the two can disagree on membership/order once the window
+            // excludes something, which would resolve `path` to the wrong
+            // issue.
             if path.len() < 2 {
                 return None; // repo sub-header selected
             }
             let gi = path[0] as usize;
             let ii = path[1] as usize;
-            let groups = self.pipeline_repos_for_state(state_key);
+            let groups = if state_key == "done" {
+                self.pipeline_done_by_repo()
+            } else {
+                self.pipeline_repos_for_state(state_key)
+            };
             let (_, issue_idxs) = groups.get(gi)?;
             let parent_idx = issue_idxs.get(ii).copied()?;
             if path.len() > 2 {
@@ -6365,6 +6468,17 @@ impl CoordApp {
                 }
                 "refining" | "pending" => self
                     .pipeline_repos_for_state(state_key)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ri, (_, idxs))| (vec![ri as u16], idxs, false))
+                    .collect(),
+                // #50: `done` mirrors refining/pending's 2-level shape, but
+                // — same reason as `selected_pipeline_index` — must walk the
+                // `DONE_WINDOW_DAYS`-bounded grouping, not the raw lifecycle
+                // bucket, so the path this yields agrees with what was
+                // actually rendered.
+                "done" => self
+                    .pipeline_done_by_repo()
                     .into_iter()
                     .enumerate()
                     .map(|(ri, (_, idxs))| (vec![ri as u16], idxs, false))

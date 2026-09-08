@@ -666,241 +666,258 @@ impl CoordApp {
             epic_issue.and_then(|iss| self.milestone_tracking_issue_for(iss));
 
         if issue_number.is_some() {
-            // #486 Leg 4 UX: when a live interactive session already exists for
-            // this issue, the only sensible interactive action is to reattach —
-            // every mode would attach to the same session, and you can't start a
-            // review/fix while the work session is still live.  Offer one clear
-            // "Reattach" item (flat, no submenu) and hide the Start variants.
-            //
-            // #727: extend to zombie sessions — a tmux session that is still
-            // alive (shown as In-progress:Live by `issue_session_is_live`) but
-            // whose board assignment has already been finalised (`done`/`failed`)
-            // or is absent.  The zombie case adds "Reattach" alongside the Start
-            // actions rather than hard-locking the menu, so the operator can
-            // still access Kill/Diagnose/Drop-to-backlog (#676 guard).
-            // #983: gate on the repo-precise variants when the row's repo is
-            // known, so a live/zombie session for repo-a/#N does not falsely
-            // show "Reattach" on repo-b/#N's menu.  Falls back to the
-            // repo-agnostic helpers only when repo_name is unknown.
-            let has_running = issue_number
-                .map(|n| match repo_name {
-                    Some(r) => self.issue_has_live_session_for_repo(n, r),
-                    None => self.issue_has_live_session(n),
-                })
-                .unwrap_or(false);
-            let has_zombie = !has_running
-                && issue_number
+            // #50: the revived Done sidebar section made `PipelineRowLifecycle::
+            // Done` reachable from a real row selection for the first time —
+            // before this, nothing in the Pipeline sidebar could select a done
+            // issue, so the launcher block below (Reattach, Start
+            // (interactive)/(automated), Attach/Stop drive) was dead for a
+            // done issue in practice, and #leg1/#607's "also offered on Done
+            // rows" test coverage exercised a path the UI could never
+            // actually reach. #50 is explicit that a finished issue is a
+            // record, not a control surface — nothing under Done may re-run
+            // or re-dispatch anything — so this launcher block is skipped
+            // for Done. `chat-about-issue` and the epic-only "Audit
+            // outcomes" further down are left unconditional: neither
+            // re-runs or re-dispatches a pipeline stage, and the former has
+            // its own explicit "every lifecycle, including Done" coverage
+            // (#628 / `chat_about_issue_is_universal`).
+            if !matches!(lifecycle, PipelineRowLifecycle::Done) {
+                // #486 Leg 4 UX: when a live interactive session already exists for
+                // this issue, the only sensible interactive action is to reattach —
+                // every mode would attach to the same session, and you can't start a
+                // review/fix while the work session is still live.  Offer one clear
+                // "Reattach" item (flat, no submenu) and hide the Start variants.
+                //
+                // #727: extend to zombie sessions — a tmux session that is still
+                // alive (shown as In-progress:Live by `issue_session_is_live`) but
+                // whose board assignment has already been finalised (`done`/`failed`)
+                // or is absent.  The zombie case adds "Reattach" alongside the Start
+                // actions rather than hard-locking the menu, so the operator can
+                // still access Kill/Diagnose/Drop-to-backlog (#676 guard).
+                // #983: gate on the repo-precise variants when the row's repo is
+                // known, so a live/zombie session for repo-a/#N does not falsely
+                // show "Reattach" on repo-b/#N's menu.  Falls back to the
+                // repo-agnostic helpers only when repo_name is unknown.
+                let has_running = issue_number
                     .map(|n| match repo_name {
-                        Some(r) => self.issue_has_any_discovered_session_for_repo(n, r),
-                        None => self.issue_has_any_discovered_session(n),
+                        Some(r) => self.issue_has_live_session_for_repo(n, r),
+                        None => self.issue_has_live_session(n),
                     })
                     .unwrap_or(false);
-            // #1398: a live `coord drive --tmux` run is a THIRD kind of
-            // liveness, independent of the interactive-session axis above —
-            // it dispatches Work/Test/Review/Merge itself, so every "Start …"
-            // action would race it for the same gate (offering "Start
-            // testing" mid-drive is the two-writers case the issue calls
-            // out). Only checked when `repo_name` is known: a drive session
-            // is always repo-scoped (unlike the interactive fallback above,
-            // there is no repo-agnostic variant to fall back to).
-            let has_live_drive = issue_number
-                .zip(repo_name)
-                .map(|(n, r)| self.issue_has_live_drive(n, r))
-                .unwrap_or(false);
-            if has_running {
-                // Running session — collapse the entire launcher block to a
-                // single Reattach item; everything else is unreachable anyway.
-                items.push(ContextMenuItem::action(
-                    "reattach-live-session",
-                    "Reattach to live session",
-                ));
-            } else if has_live_drive {
-                // Driving — collapse to Attach/Stop; every manual Start
-                // action is unreachable (coord drive dispatches them itself).
-                items.push(ContextMenuItem::action("attach-drive", "Attach to drive"));
-                items.push(ContextMenuItem::action("stop-drive", "Stop drive"));
-            } else {
-                // Zombie session — offer Reattach alongside Start launchers so
-                // the operator can reach both the still-alive tmux session AND
-                // the normal pipeline actions.
-                if has_zombie {
+                let has_zombie = !has_running
+                    && issue_number
+                        .map(|n| match repo_name {
+                            Some(r) => self.issue_has_any_discovered_session_for_repo(n, r),
+                            None => self.issue_has_any_discovered_session(n),
+                        })
+                        .unwrap_or(false);
+                // #1398: a live `coord drive --tmux` run is a THIRD kind of
+                // liveness, independent of the interactive-session axis above —
+                // it dispatches Work/Test/Review/Merge itself, so every "Start …"
+                // action would race it for the same gate (offering "Start
+                // testing" mid-drive is the two-writers case the issue calls
+                // out). Only checked when `repo_name` is known: a drive session
+                // is always repo-scoped (unlike the interactive fallback above,
+                // there is no repo-agnostic variant to fall back to).
+                let has_live_drive = issue_number
+                    .zip(repo_name)
+                    .map(|(n, r)| self.issue_has_live_drive(n, r))
+                    .unwrap_or(false);
+                if has_running {
+                    // Running session — collapse the entire launcher block to a
+                    // single Reattach item; everything else is unreachable anyway.
                     items.push(ContextMenuItem::action(
                         "reattach-live-session",
                         "Reattach to live session",
                     ));
-                }
-
-                // ── Start (interactive) submenu ───────────────────────────
-                let mut interactive_children: Vec<ContextMenuItem> = Vec::new();
-                interactive_children.push(ContextMenuItem::action(
-                    "start-work-interactive",
-                    "Work",
-                ));
-                interactive_children.push(ContextMenuItem::action(
-                    "start-plan-interactive",
-                    "Plan",
-                ));
-                // #1104: Continue shown only when the issue's LATEST work
-                // attempt failed outright (worker-reported, no test/review
-                // gate — that's Fix's territory) while leaving a real branch
-                // behind. Additive, mirroring the Fix precedent: Work is left
-                // unchanged (always forks fresh) rather than auto-swapping its
-                // behavior based on hidden state.
-                if self.selected_failed_work_aid_with_branch().is_some() {
-                    interactive_children.push(ContextMenuItem::action(
-                        "start-continue-interactive",
-                        "Continue",
-                    ));
-                }
-                // #539: Review gated on a completed work assignment.
-                let mut review_item = ContextMenuItem::action("start-review-interactive", "Review");
-                review_item.disabled = self.selected_completed_work_aid().is_none();
-                interactive_children.push(review_item);
-                // Leg 3 (#517 / #581): Fix shown only when a request-changes
-                // review OR a test-failure exists for this issue.
-                if self.selected_row_has_request_changes_for(issue_number)
-                    || self.selected_test_failed_work_aid().is_some()
-                {
-                    interactive_children.push(ContextMenuItem::action(
-                        "start-fix-interactive",
-                        "Fix",
-                    ));
-                }
-                // Leg 3c / A3 (#517 / #581 / #306): Testing and Merge gated on
-                // a completed work assignment.
-                let mut test_item = ContextMenuItem::action("start-testing-interactive", "Testing");
-                test_item.disabled = self.selected_completed_work_aid().is_none();
-                interactive_children.push(test_item);
-                let mut merge_item = ContextMenuItem::action("start-merge-interactive", "Merge");
-                merge_item.disabled = self.selected_completed_work_aid().is_none();
-                interactive_children.push(merge_item);
-
-                // #1223 (docs/ORACLE_LOOP.md, #1173): the JIT test-authoring
-                // track's human-attended sibling nests here too — same
-                // Start (interactive) submenu as Work/Review/Fix/Testing/
-                // Merge, instead of a flat top-level item. NOT epic-gated:
-                // applies to ordinary member issues of a milestone's `##
-                // Work order`, resolved via `milestone_tracking_issue_for`.
-                // Gated on the milestone's Gate A contract existing on disk
-                // — the independent test-author reads it from its own
-                // checkout (#931).
-                if let Some(iss) = epic_issue {
-                    if member_tracking_issue.is_some() {
-                        let mut author_interactive_item = ContextMenuItem::action(
-                            "author-acceptance-tests-interactive",
-                            "Author acceptance tests (interactive)",
-                        );
-                        author_interactive_item.disabled = !self.gate_a_contract_exists_for(iss);
-                        interactive_children.push(author_interactive_item);
+                } else if has_live_drive {
+                    // Driving — collapse to Attach/Stop; every manual Start
+                    // action is unreachable (coord drive dispatches them itself).
+                    items.push(ContextMenuItem::action("attach-drive", "Attach to drive"));
+                    items.push(ContextMenuItem::action("stop-drive", "Stop drive"));
+                } else {
+                    // Zombie session — offer Reattach alongside Start launchers so
+                    // the operator can reach both the still-alive tmux session AND
+                    // the normal pipeline actions.
+                    if has_zombie {
+                        items.push(ContextMenuItem::action(
+                            "reattach-live-session",
+                            "Reattach to live session",
+                        ));
                     }
-                }
 
-                items.push(ContextMenuItem::parent("Start (interactive)", interactive_children));
-
-                // ── Start (automated) submenu ─────────────────────────────
-                // #leg1: non-interactive (claude -p) dispatch.  Claim-check in
-                // dispatch_pipeline_work/plan refuses a duplicate on an already-
-                // active issue gracefully.
-                // `start-skip-plan` = work directly; `start-with-plan` = plan-then-work.
-                // #684: `start-merge-automated` = headless merge via the existing
-                // merge queue (`coord merge --order <aid>`).  Gated on a completed
-                // work assignment; disabled when an interactive --merge-of session
-                // is already running for this issue (branch-race guard).
-                let mut automated_children = vec![
-                    ContextMenuItem::action("start-skip-plan", "Work"),
-                    ContextMenuItem::action("start-with-plan", "Plan"),
-                ];
-                let mut auto_merge_item =
-                    ContextMenuItem::action("start-merge-automated", "Merge");
-                auto_merge_item.disabled = self.selected_completed_work_aid().is_none()
-                    || issue_number
-                        .map(|n| self.has_active_interactive_merge_for_issue(n))
-                        .unwrap_or(false);
-                automated_children.push(auto_merge_item);
-
-                // #1223: the JIT test-authoring track's headless dispatch +
-                // its "record acceptance" trust-gate re-run nest into Start
-                // (automated) alongside Work/Plan/Merge — same gating as the
-                // interactive sibling above.
-                if let Some(iss) = epic_issue {
-                    if member_tracking_issue.is_some() {
-                        let mut author_item = ContextMenuItem::action(
-                            "author-acceptance-tests",
-                            "Author acceptance tests",
-                        );
-                        author_item.disabled = !self.gate_a_contract_exists_for(iss);
-                        automated_children.push(author_item);
-
-                        let mut record_item =
-                            ContextMenuItem::action("record-acceptance", "Record acceptance");
-                        record_item.disabled = self.selected_completed_work_aid().is_none();
-                        automated_children.push(record_item);
+                    // ── Start (interactive) submenu ───────────────────────────
+                    let mut interactive_children: Vec<ContextMenuItem> = Vec::new();
+                    interactive_children.push(ContextMenuItem::action(
+                        "start-work-interactive",
+                        "Work",
+                    ));
+                    interactive_children.push(ContextMenuItem::action(
+                        "start-plan-interactive",
+                        "Plan",
+                    ));
+                    // #1104: Continue shown only when the issue's LATEST work
+                    // attempt failed outright (worker-reported, no test/review
+                    // gate — that's Fix's territory) while leaving a real branch
+                    // behind. Additive, mirroring the Fix precedent: Work is left
+                    // unchanged (always forks fresh) rather than auto-swapping its
+                    // behavior based on hidden state.
+                    if self.selected_failed_work_aid_with_branch().is_some() {
+                        interactive_children.push(ContextMenuItem::action(
+                            "start-continue-interactive",
+                            "Continue",
+                        ));
                     }
-                }
+                    // #539: Review gated on a completed work assignment.
+                    let mut review_item = ContextMenuItem::action("start-review-interactive", "Review");
+                    review_item.disabled = self.selected_completed_work_aid().is_none();
+                    interactive_children.push(review_item);
+                    // Leg 3 (#517 / #581): Fix shown only when a request-changes
+                    // review OR a test-failure exists for this issue.
+                    if self.selected_row_has_request_changes_for(issue_number)
+                        || self.selected_test_failed_work_aid().is_some()
+                    {
+                        interactive_children.push(ContextMenuItem::action(
+                            "start-fix-interactive",
+                            "Fix",
+                        ));
+                    }
+                    // Leg 3c / A3 (#517 / #581 / #306): Testing and Merge gated on
+                    // a completed work assignment.
+                    let mut test_item = ContextMenuItem::action("start-testing-interactive", "Testing");
+                    test_item.disabled = self.selected_completed_work_aid().is_none();
+                    interactive_children.push(test_item);
+                    let mut merge_item = ContextMenuItem::action("start-merge-interactive", "Merge");
+                    merge_item.disabled = self.selected_completed_work_aid().is_none();
+                    interactive_children.push(merge_item);
 
-                items.push(ContextMenuItem::parent("Start (automated)", automated_children));
+                    // #1223 (docs/ORACLE_LOOP.md, #1173): the JIT test-authoring
+                    // track's human-attended sibling nests here too — same
+                    // Start (interactive) submenu as Work/Review/Fix/Testing/
+                    // Merge, instead of a flat top-level item. NOT epic-gated:
+                    // applies to ordinary member issues of a milestone's `##
+                    // Work order`, resolved via `milestone_tracking_issue_for`.
+                    // Gated on the milestone's Gate A contract existing on disk
+                    // — the independent test-author reads it from its own
+                    // checkout (#931).
+                    if let Some(iss) = epic_issue {
+                        if member_tracking_issue.is_some() {
+                            let mut author_interactive_item = ContextMenuItem::action(
+                                "author-acceptance-tests-interactive",
+                                "Author acceptance tests (interactive)",
+                            );
+                            author_interactive_item.disabled = !self.gate_a_contract_exists_for(iss);
+                            interactive_children.push(author_interactive_item);
+                        }
+                    }
 
-                // #1398: "Drive (automated)" — hands the WHOLE Work → Test →
-                // Review → Merge sequence to the automated driver, unlike the
-                // single-stage items above. Flat, not nested, for visibility
-                // — this is the marquee one-click entry point the issue asks
-                // for. Only offered when `has_running`/`has_live_drive` are
-                // both false (this whole `else` branch) — like the "Start
-                // (automated)" parent item right above it, `has_zombie` does
-                // NOT gate this: it still appears alongside "Reattach to live
-                // session" when a zombie session exists.
-                //
-                // #2634: this used to launch `coord drive --tmux` in a LOCAL
-                // PTY — a driver that runs correctly but writes nothing to
-                // the daemon's `drive_queue` table, so it could never appear
-                // in the Queue panel and died with the operator's laptop.
-                // The name promised "the automated driver" while the
-                // mechanism was a local, ephemeral one; the durable,
-                // board-backed queue (visible in the Queue panel, survives a
-                // restart, subject to the queue's ordering/overlap/hold
-                // machinery) is what "the automated driver" should mean, so
-                // this item now dispatches through the SAME
-                // `"drive-queue-add"` seam the Board/Pipeline "Add to drive
-                // queue" items use (`dispatch_context_menu_action`).
-                items.push(ContextMenuItem::action("start-drive", "Drive (automated)"));
-                // #2634: the OLD behavior, demoted and distinctly named so
-                // it can never again be mistaken for the durable queue path
-                // above — a local `coord drive --tmux` run that dies with
-                // this machine/tmux and is invisible to the Queue panel by
-                // construction (see `drive.rs`'s module doc). Kept for an
-                // operator deliberately choosing a local, unqueued run.
-                items.push(ContextMenuItem::action(
-                    "start-drive-local",
-                    "Drive locally (tmux, this machine)",
-                ));
+                    items.push(ContextMenuItem::parent("Start (interactive)", interactive_children));
 
-                // #685: "Set test mode" — pick smoke vs auto policy for headless Work.
-                if let Some(num) = issue_number {
-                    // Find current mode from pipeline issue labels.
-                    let current_mode = self
-                        .pipeline_issues
-                        .iter()
-                        .find(|iss| iss.number == num)
-                        .and_then(|iss| {
-                            if iss.all_labels.iter().any(|l| l == "test-mode:auto") {
-                                Some("auto")
-                            } else if iss.all_labels.iter().any(|l| l == "test-mode:smoke") {
-                                Some("smoke")
-                            } else {
-                                None
-                            }
-                        });
-                    let mode_suffix = match current_mode {
-                        Some("auto") => " (auto)",
-                        Some("smoke") => " (smoke)",
-                        _ => "",
-                    };
+                    // ── Start (automated) submenu ─────────────────────────────
+                    // #leg1: non-interactive (claude -p) dispatch.  Claim-check in
+                    // dispatch_pipeline_work/plan refuses a duplicate on an already-
+                    // active issue gracefully.
+                    // `start-skip-plan` = work directly; `start-with-plan` = plan-then-work.
+                    // #684: `start-merge-automated` = headless merge via the existing
+                    // merge queue (`coord merge --order <aid>`).  Gated on a completed
+                    // work assignment; disabled when an interactive --merge-of session
+                    // is already running for this issue (branch-race guard).
+                    let mut automated_children = vec![
+                        ContextMenuItem::action("start-skip-plan", "Work"),
+                        ContextMenuItem::action("start-with-plan", "Plan"),
+                    ];
+                    let mut auto_merge_item =
+                        ContextMenuItem::action("start-merge-automated", "Merge");
+                    auto_merge_item.disabled = self.selected_completed_work_aid().is_none()
+                        || issue_number
+                            .map(|n| self.has_active_interactive_merge_for_issue(n))
+                            .unwrap_or(false);
+                    automated_children.push(auto_merge_item);
+
+                    // #1223: the JIT test-authoring track's headless dispatch +
+                    // its "record acceptance" trust-gate re-run nest into Start
+                    // (automated) alongside Work/Plan/Merge — same gating as the
+                    // interactive sibling above.
+                    if let Some(iss) = epic_issue {
+                        if member_tracking_issue.is_some() {
+                            let mut author_item = ContextMenuItem::action(
+                                "author-acceptance-tests",
+                                "Author acceptance tests",
+                            );
+                            author_item.disabled = !self.gate_a_contract_exists_for(iss);
+                            automated_children.push(author_item);
+
+                            let mut record_item =
+                                ContextMenuItem::action("record-acceptance", "Record acceptance");
+                            record_item.disabled = self.selected_completed_work_aid().is_none();
+                            automated_children.push(record_item);
+                        }
+                    }
+
+                    items.push(ContextMenuItem::parent("Start (automated)", automated_children));
+
+                    // #1398: "Drive (automated)" — hands the WHOLE Work → Test →
+                    // Review → Merge sequence to the automated driver, unlike the
+                    // single-stage items above. Flat, not nested, for visibility
+                    // — this is the marquee one-click entry point the issue asks
+                    // for. Only offered when `has_running`/`has_live_drive` are
+                    // both false (this whole `else` branch) — like the "Start
+                    // (automated)" parent item right above it, `has_zombie` does
+                    // NOT gate this: it still appears alongside "Reattach to live
+                    // session" when a zombie session exists.
+                    //
+                    // #2634: this used to launch `coord drive --tmux` in a LOCAL
+                    // PTY — a driver that runs correctly but writes nothing to
+                    // the daemon's `drive_queue` table, so it could never appear
+                    // in the Queue panel and died with the operator's laptop.
+                    // The name promised "the automated driver" while the
+                    // mechanism was a local, ephemeral one; the durable,
+                    // board-backed queue (visible in the Queue panel, survives a
+                    // restart, subject to the queue's ordering/overlap/hold
+                    // machinery) is what "the automated driver" should mean, so
+                    // this item now dispatches through the SAME
+                    // `"drive-queue-add"` seam the Board/Pipeline "Add to drive
+                    // queue" items use (`dispatch_context_menu_action`).
+                    items.push(ContextMenuItem::action("start-drive", "Drive (automated)"));
+                    // #2634: the OLD behavior, demoted and distinctly named so
+                    // it can never again be mistaken for the durable queue path
+                    // above — a local `coord drive --tmux` run that dies with
+                    // this machine/tmux and is invisible to the Queue panel by
+                    // construction (see `drive.rs`'s module doc). Kept for an
+                    // operator deliberately choosing a local, unqueued run.
                     items.push(ContextMenuItem::action(
-                        "set-test-mode",
-                        &format!("Set test mode…{}", mode_suffix),
+                        "start-drive-local",
+                        "Drive locally (tmux, this machine)",
                     ));
+
+                    // #685: "Set test mode" — pick smoke vs auto policy for headless Work.
+                    if let Some(num) = issue_number {
+                        // Find current mode from pipeline issue labels.
+                        let current_mode = self
+                            .pipeline_issues
+                            .iter()
+                            .find(|iss| iss.number == num)
+                            .and_then(|iss| {
+                                if iss.all_labels.iter().any(|l| l == "test-mode:auto") {
+                                    Some("auto")
+                                } else if iss.all_labels.iter().any(|l| l == "test-mode:smoke") {
+                                    Some("smoke")
+                                } else {
+                                    None
+                                }
+                            });
+                        let mode_suffix = match current_mode {
+                            Some("auto") => " (auto)",
+                            Some("smoke") => " (smoke)",
+                            _ => "",
+                        };
+                        items.push(ContextMenuItem::action(
+                            "set-test-mode",
+                            &format!("Set test mode…{}", mode_suffix),
+                        ));
+                    }
                 }
-            }
+            } // #50: end of the Done-excluded launcher block.
             // #628: "Chat about issue" on EVERY pipeline row, any lifecycle — a
             // human-attended session seeded with the issue's data: ask
             // questions, sketch the UX, diagnose a stall, edit the issue, send it

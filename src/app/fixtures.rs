@@ -900,6 +900,21 @@ impl MockBoardService {
         requests: &std::sync::Mutex<Vec<String>>,
     ) {
         use std::io::{BufRead, BufReader, Write};
+        // #50: put the ACCEPTED socket back into blocking mode before
+        // reading. `start` marks the *listener* non-blocking so the accept
+        // loop can poll `shutdown`, and on macOS/BSD (unlike Linux) a socket
+        // returned by `accept()` inherits the listener's `O_NONBLOCK` flag.
+        // Without this the `read_line` below returns `WouldBlock` the instant
+        // the client's request bytes have not landed yet — the request line
+        // is then silently dropped from `requests` while the canned 200 is
+        // still written, so the client sees a perfectly successful POST and
+        // only the test's `mock.requests()` assertion fails, intermittently
+        // and under load ("expected exactly one request to reach the daemon;
+        // got []", or 2 of 3 on the fan-out tests). The `set_read_timeout`
+        // on the next line is what actually bounds this read; it is a no-op
+        // on a non-blocking socket, which is why the timeout alone did not
+        // already cover the case.
+        let _ = stream.set_nonblocking(false);
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
         // Only the request line matters for the mock's purposes (method +
         // path + query); headers/body (if any) are left undrained on the
@@ -1234,5 +1249,57 @@ mod tests {
             "malformed JSON must not flip plan_roster_supported"
         );
         assert!(app.data.plan_roster.is_empty());
+    }
+
+    /// #50 regression: [`MockBoardService`] must log a request whose bytes
+    /// arrive *after* the connection is accepted.
+    ///
+    /// The listener is non-blocking (so the accept loop can poll `shutdown`),
+    /// and on macOS/BSD the socket handed back by `accept()` inherits that
+    /// `O_NONBLOCK`. Before the `set_nonblocking(false)` in `respond`, the
+    /// request-line read then failed with `WouldBlock` whenever the client
+    /// had not already pushed its bytes — the canned 200 was still written,
+    /// so the client saw a clean POST and only `requests()` came up short.
+    /// That is exactly how it failed in CI: the `/issue-label` tests
+    /// intermittently saw `[]` (or 2 of 3 on the fan-out cases) under a
+    /// loaded full-parallel `cargo test`.
+    ///
+    /// The deliberate connect→sleep→write split below makes that race
+    /// deterministic rather than load-dependent: with the fix the request
+    /// line is recorded regardless of when the bytes land.
+    #[test]
+    fn mock_board_service_logs_a_request_whose_bytes_arrive_after_accept() {
+        use std::io::{Read, Write};
+
+        let mock = MockBoardService::start(r#"{"ok": true}"#);
+        let addr = mock.url().replace("http://", "");
+
+        let mut client = std::net::TcpStream::connect(&addr).expect("connect to mock");
+        // Long enough for the accept loop to have accepted and attempted the
+        // read before a single request byte exists to be read.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        client
+            .write_all(b"POST /issue-label HTTP/1.1\r\nHost: x\r\n\r\n")
+            .expect("write request line");
+        client.flush().expect("flush request");
+
+        // Read the response so the exchange is complete before asserting.
+        let mut response = String::new();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("set client read timeout");
+        let _ = client.read_to_string(&mut response);
+        assert!(
+            response.contains("200 OK"),
+            "mock must still answer 200; got: {response:?}"
+        );
+
+        assert_eq!(
+            mock.requests(),
+            vec!["POST /issue-label HTTP/1.1".to_string()],
+            "the request line must be recorded even though the bytes arrived \
+             after accept() — a dropped entry here is the silent flake that \
+             made the /issue-label tests fail with an empty request log"
+        );
     }
 }

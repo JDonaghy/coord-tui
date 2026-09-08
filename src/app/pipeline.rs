@@ -1210,12 +1210,15 @@ impl CoordApp {
         // check is filter-blind.
         let visible = match lc {
             "in-progress" => self.pipeline_active_issues_impl(false).contains(&idx),
-            // `pipeline_done_by_repo` has no `apply_search`-style bypass
-            // (it isn't meant to be filter-sensitive at all — the window
-            // bound is the only exclusion rule) so it's used as-is here,
-            // same as every other jump-target check in this match.
+            // #50 review fix: `pipeline_done_by_repo_impl(false)` — same
+            // `apply_search = false` bypass as every other arm in this
+            // match, so a Done issue's jump target doesn't falsely report
+            // `Completed` just because unrelated text happens to be sitting
+            // in the Pipeline sidebar's search box. The window bound
+            // (`DONE_WINDOW_DAYS`) is still the only exclusion rule that
+            // applies here — search never was one.
             "done" => self
-                .pipeline_done_by_repo()
+                .pipeline_done_by_repo_impl(false)
                 .iter()
                 .any(|(_, idxs)| idxs.contains(&idx)),
             lc => self
@@ -1969,8 +1972,22 @@ impl CoordApp {
     /// `_fetch_error` state to surface — the one failure mode (a done issue
     /// missing a timestamp) degrades to "not shown" rather than an error.
     pub(crate) fn pipeline_done_by_repo(&self) -> Vec<(String, Vec<usize>)> {
+        self.pipeline_done_by_repo_impl(true)
+    }
+
+    /// Shared implementation behind [`Self::pipeline_done_by_repo`] and
+    /// [`Self::pipeline_jump_target`]'s `"done"` arm — mirrors the
+    /// `apply_search` split [`Self::pipeline_repos_for_state_impl`] already
+    /// has for the same reason (#2449): rendering and selection-resolution
+    /// (`pipeline_done_by_repo`, `selected_pipeline_index`,
+    /// `locate_pipeline_selection`) must agree with what the sidebar's
+    /// search box actually filtered down to, but `pipeline_jump_target`'s
+    /// enablement check must NOT be at the mercy of whatever text happens to
+    /// be sitting in that search box when "View in Pipeline" is invoked —
+    /// same as every other lifecycle arm in that match.
+    fn pipeline_done_by_repo_impl(&self, apply_search: bool) -> Vec<(String, Vec<usize>)> {
         let cutoff = Self::now_epoch_secs() - (Self::DONE_WINDOW_DAYS * 86_400) as f64;
-        self.pipeline_repos_for_state("done")
+        self.pipeline_repos_for_state_impl("done", apply_search)
             .into_iter()
             .filter_map(|(repo, idxs)| {
                 let mut kept: Vec<usize> = idxs

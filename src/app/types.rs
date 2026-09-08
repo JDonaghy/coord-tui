@@ -38,13 +38,17 @@ pub(crate) struct TestStepJob {
 /// The tabs shown in the Pipeline view detail panel.
 ///
 /// #818: Redesigned tab set — Stages and Refinement removed; Pipeline renamed
-/// to Overview.  A universal read-only stage strip is pinned at the top of
-/// every non-Overview tab when a pipeline entry exists.
+/// to Overview.  A universal stage strip is pinned at the top of every
+/// non-Overview, non-Completed tab when a pipeline entry exists. #49: the
+/// strip is a second, more obvious route to a stage's log alongside the Log
+/// tab's numeric `LOG SOURCE` picker — clicking a box (or `[`/`]`) focuses
+/// that stage and pins the Log tab to its newest assignment, for any issue
+/// in any state, including a merged one.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(crate) enum PipelineDetailTab {
     /// Overview: horizontal stage boxes (click a box to expand that stage's
     /// detail inline), repo/labels/gates meta, and focused-stage content.
-    /// Actions (Go / dispatch) are only available here.
+    /// Dispatch actions (Go / Retry) are only available here.
     #[default]
     Overview,
     /// Full issue body text (scrollable with j/k).

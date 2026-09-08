@@ -11110,6 +11110,195 @@
         );
     }
 
+    // ── #49: pipeline rail selects a stage's log, in any issue state ────────
+
+    /// `log_candidate_for_stage_name` must pick the *newest* leg of a stage
+    /// that ran more than once (a retried work leg, several review rounds) —
+    /// mirroring `log_candidates_for_issue`'s own newest-first ordering —
+    /// rather than the first one found or an arbitrary one.
+    #[test]
+    fn log_candidate_for_stage_name_prefers_newest_leg_of_that_stage() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("rev-1", "review", 100.0, "done"));
+        app.data.assignments.push(_stage_assignment("rev-2", "review", 200.0, "done"));
+        let issue = app.pipeline_issues[0].clone();
+        let picked = app.log_candidate_for_stage_name(&issue, "review");
+        assert_eq!(
+            picked.map(|a| a.id.as_str()),
+            Some("rev-2"),
+            "must resolve to the newest-dispatched review leg, not the oldest"
+        );
+    }
+
+    /// "Test" has no assignment type of its own — its verdict lives on the
+    /// Work assignment's `test_state` (`test_stage_status_for`,
+    /// `stage_content_test`) — so clicking the Test stage box must resolve
+    /// through the Work assignment, not come up empty.
+    #[test]
+    fn log_candidate_for_stage_name_resolves_test_stage_through_work_assignment() {
+        let mut app = make_pipeline_app_with_test_gate();
+        app.data
+            .assignments
+            .push(_work_assignment("w1", 100.0, "done", Some("passed")));
+        let issue = app.pipeline_issues[0].clone();
+        let picked = app.log_candidate_for_stage_name(&issue, "test");
+        assert_eq!(
+            picked.map(|a| a.id.as_str()),
+            Some("w1"),
+            "Test stage must resolve to the Work assignment carrying its verdict"
+        );
+    }
+
+    /// A stage that never ran (Pending/Skipped, or "merge" which isn't
+    /// itself a worker type) has no candidate to pin to — the existing pin
+    /// must be left untouched rather than cleared, so the Log tab keeps
+    /// showing whatever was last visible instead of going blank.
+    #[test]
+    fn log_candidate_for_stage_name_none_for_a_stage_with_no_assignment() {
+        let app = make_pipeline_app();
+        let issue = app.pipeline_issues[0].clone();
+        assert!(app.log_candidate_for_stage_name(&issue, "merge").is_none());
+    }
+
+    /// `pin_log_source_for_focused_stage` is the rail's side of #49: it must
+    /// pin the Log tab to whatever `log_candidate_for_stage_name` resolves
+    /// for the currently-focused stage, keyed the same way
+    /// `pipeline_log_pin_key` already keys the numeric picker's pin.
+    #[test]
+    fn pin_log_source_for_focused_stage_pins_the_focused_stages_newest_leg() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("rev-1", "review", 100.0, "done"));
+        app.data.assignments.push(_stage_assignment("rev-2", "review", 200.0, "done"));
+        app.pipeline_sel = Some(0);
+        // Stages for make_pipeline_app's gates ["review", "merge"]: work(0),
+        // review(1), merge(2).
+        app.pipeline_focused_stage = Some(1);
+        app.pin_log_source_for_focused_stage();
+        let issue = app.pipeline_issues[0].clone();
+        assert_eq!(
+            app.pipeline_log_pinned_assignment.get(&pipeline_log_pin_key(&issue)),
+            Some(&"rev-2".to_string()),
+            "focusing the Review stage must pin the Log tab to its newest leg"
+        );
+    }
+
+    /// Focusing a stage with nothing to show (Merge, with no assignment of
+    /// its own) must not blank out a pin the user already had from a
+    /// previous stage selection.
+    #[test]
+    fn pin_log_source_for_focused_stage_keeps_existing_pin_when_stage_has_no_candidate() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("rev-1", "review", 100.0, "done"));
+        app.pipeline_sel = Some(0);
+        let issue = app.pipeline_issues[0].clone();
+        app.pipeline_log_pinned_assignment
+            .insert(pipeline_log_pin_key(&issue), "rev-1".to_string());
+        app.pipeline_focused_stage = Some(2); // "merge" — no assignment of that type
+        app.pin_log_source_for_focused_stage();
+        assert_eq!(
+            app.pipeline_log_pinned_assignment.get(&pipeline_log_pin_key(&issue)),
+            Some(&"rev-1".to_string()),
+            "a stage with no candidate must not clear an existing pin"
+        );
+    }
+
+    /// The headline #49 scenario: clicking a stage box in the pipeline rail
+    /// while already on the Log tab pins that stage's newest leg — and it
+    /// works identically for a merged/closed issue, since it reads the same
+    /// state-agnostic `data.assignments` the numeric `LOG SOURCE` picker
+    /// does. Before #49 the rail's click handler only fired on the Overview
+    /// tab; the compact strip #818 pins above the Log tab was paint-only.
+    #[test]
+    fn tuidriver_log_tab_rail_click_pins_stage_newest_leg_for_closed_issue() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        let mut review1 = _stage_assignment("rev-1", "review", 100.0, "done");
+        review1.machine = "review-host-1".to_string();
+        app.data.assignments.push(review1);
+        let mut review2 = _stage_assignment("rev-2", "review", 200.0, "done");
+        review2.machine = "review-host-2".to_string();
+        app.data.assignments.push(review2);
+        // Newest overall candidate is a *Work* retry — newer than either
+        // review leg — so the default (unpinned) pick differs from what
+        // clicking Review must select, proving the click (not the default
+        // heuristic) is what changes the shown log.
+        let mut work_retry = _stage_assignment("work-2", "work", 250.0, "done");
+        work_retry.machine = "work-host-retry".to_string();
+        app.data.assignments.push(work_retry);
+        // The scenario #49 is about: the issue already merged.
+        app.pipeline_issues[0].is_closed = true;
+
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_focused_stage = None;
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 160, 40);
+        driver.render();
+        assert!(
+            driver.screen().contains("work · work-host-retry · elapsed"),
+            "sanity: with no pin, the newest-overall leg (the Work retry) is \
+             shown by default, even though the issue is closed:\n{}",
+            driver.screen()
+        );
+
+        let (x, y) = driver.find("Review").unwrap_or_else(|| {
+            panic!(
+                "Review stage box must render on the Log tab's pinned strip \
+                 (#818) even for a closed issue:\n{}",
+                driver.screen()
+            )
+        });
+        driver.click(x, y);
+        driver.render();
+        let screen = driver.screen();
+        assert!(
+            screen.contains("review · review-host-2 · elapsed"),
+            "clicking Review must pin the Log tab to the newest review leg:\n{screen}"
+        );
+        assert!(
+            !screen.contains("work · work-host-retry · elapsed"),
+            "the Work retry must no longer be the shown log after the click:\n{screen}"
+        );
+        assert!(
+            !screen.contains("review · review-host-1 · elapsed"),
+            "the older review leg must not be shown — the newest one must win:\n{screen}"
+        );
+    }
+
+    /// `[`/`]` are the keyboard half of the same rail — #818's "Overview tab
+    /// only" restriction predates the pinned strip existing on every other
+    /// tab, so it must follow the strip: cycling the focused stage from the
+    /// Log tab must also pin the Log tab's source, exactly like a click.
+    #[test]
+    fn tuidriver_log_tab_bracket_key_cycles_stage_and_pins_log_source() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        let mut review = _stage_assignment("rev-1", "review", 100.0, "done");
+        review.machine = "review-host-1".to_string();
+        app.data.assignments.push(review);
+        let mut work = _stage_assignment("work-1", "work", 50.0, "done");
+        work.machine = "work-host-1".to_string();
+        app.data.assignments.push(work);
+
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_focused_stage = Some(0); // "work"
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 160, 40);
+        driver.press(Key::Char(']'));
+        driver.render();
+        assert!(
+            driver.screen().contains("review · review-host-1 · elapsed"),
+            "pressing ] on the Log tab must advance focus to Review and pin \
+             its log:\n{}",
+            driver.screen()
+        );
+    }
+
     // ── #200: Test gate ──────────────────────────────────────────────────────
 
     /// Build a pipeline app whose default gates include "test" (the production

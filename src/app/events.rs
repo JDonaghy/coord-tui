@@ -2823,21 +2823,28 @@ impl CoordApp {
                         needs_redraw = true;
                     }
 
-                    // ── [ / ] — cycle focused stage (Overview tab) ────────
+                    // ── [ / ] — cycle focused stage ───────────────────────
                     // Sets `pipeline_focused_stage`, which the rasteriser
                     // draws with an accent border on the stage boxes and
-                    // selects which stage's content the scrollable panel shows.
-                    // #818: available on the Overview tab only (Stages tab removed).
+                    // selects which stage's content the scrollable panel
+                    // shows — and, per #49, also pins the Log tab to that
+                    // stage's newest assignment (`pin_log_source_for_
+                    // focused_stage`), so this is a second way to reach a
+                    // stage's log alongside the numeric picker there.
+                    // #818: the pinned stage strip renders on every tab
+                    // except Completed (which deliberately has none, #2405),
+                    // so the keybind follows it there instead of staying
+                    // Overview-only.
                     Key::Char('[')
                         if self.active_view == SidebarView::Pipeline
-                            && self.pipeline_detail_tab == PipelineDetailTab::Overview =>
+                            && self.pipeline_detail_tab != PipelineDetailTab::Completed =>
                     {
                         self.focus_prev_pipeline_stage();
                         needs_redraw = true;
                     }
                     Key::Char(']')
                         if self.active_view == SidebarView::Pipeline
-                            && self.pipeline_detail_tab == PipelineDetailTab::Overview =>
+                            && self.pipeline_detail_tab != PipelineDetailTab::Completed =>
                     {
                         self.focus_next_pipeline_stage();
                         needs_redraw = true;
@@ -5820,9 +5827,41 @@ impl CoordApp {
                             // panel below switches to this stage's output.
                             self.pipeline_focused_stage = Some(stage_idx);
                             self.pipeline_stage_content_scroll = 0;
+                            // #49: a rail click is a second, more obvious way
+                            // to reach a stage's log — pin the Log tab to
+                            // match, so switching there (or already being
+                            // there) shows it.
+                            self.pin_log_source_for_focused_stage();
                             return true;
                         }
                         PipelineHit::Empty => return false,
+                    }
+                }
+            }
+            // #49: the compact read-only stage strip pinned above every
+            // non-Overview, non-Completed tab (#818's `content_below_strip`)
+            // was paint-only — clicking it did nothing. Make its boxes
+            // clickable exactly like the Overview tab's full-size widget:
+            // same layout call (`pipeline_detail_pv_rect_strip` mirrors
+            // `pipeline_detail_pv_rect`), same hit-test, same focus + Log-pin
+            // side effect — so the rail is a real second route to a stage's
+            // log from wherever the user actually is, not just Overview.
+            if self.pipeline_detail_tab != PipelineDetailTab::Completed {
+                if let Some(view) = self.build_pipeline_widget() {
+                    let content_rect = Rect::new(
+                        main_b.x,
+                        main_b.y + tab_h,
+                        main_b.width,
+                        (main_b.height - tab_h).max(0.0),
+                    );
+                    let strip_rect = pipeline_detail_pv_rect_strip(content_rect, lh);
+                    let render_view = pipeline_view_for_render(&view);
+                    let layout = backend.pipeline_view_layout(strip_rect, &render_view);
+                    if let PipelineHit::Body(stage_idx) = layout.hit_test(pos.x, pos.y) {
+                        self.pipeline_focused_stage = Some(stage_idx);
+                        self.pipeline_stage_content_scroll = 0;
+                        self.pin_log_source_for_focused_stage();
+                        return true;
                     }
                 }
             }

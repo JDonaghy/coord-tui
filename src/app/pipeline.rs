@@ -7485,6 +7485,9 @@ impl CoordApp {
         };
         self.pipeline_focused_stage = Some(next);
         self.pipeline_stage_content_scroll = 0;
+        // #49: keyboard stage-cycling is the same "select a stage" action a
+        // rail click is — keep the Log tab's pin in sync either way.
+        self.pin_log_source_for_focused_stage();
     }
 
     /// Move the Pipeline > Stages focus to the previous stage (left).
@@ -7503,6 +7506,63 @@ impl CoordApp {
         };
         self.pipeline_focused_stage = Some(prev);
         self.pipeline_stage_content_scroll = 0;
+        // #49: keyboard stage-cycling is the same "select a stage" action a
+        // rail click is — keep the Log tab's pin in sync either way.
+        self.pin_log_source_for_focused_stage();
+    }
+
+    /// #49: resolve which assignment a stage box's log should point at,
+    /// given the stage *name* the rail shows (from
+    /// `pipeline_stage_names_for_issue`). Reuses `assignments_for_stage`'s
+    /// own stage→assignment-type mapping (including its "plan folds into
+    /// work" rule) with one addition: "test" has no assignment type of its
+    /// own — its verdict lives on the Work assignment's `test_state`
+    /// (`test_stage_status_for`, `stage_content_test`) — so it resolves
+    /// through "work" too. Returns the newest (by `dispatched_at`) matching
+    /// assignment, or `None` when the stage has never run (a Pending/
+    /// Skipped box, or a gate name with no worker of its own, e.g. "merge").
+    pub(crate) fn log_candidate_for_stage_name<'a>(
+        &'a self,
+        issue: &PipelineIssue,
+        stage_name: &str,
+    ) -> Option<&'a Assignment> {
+        let lookup = if stage_name == "test" { "work" } else { stage_name };
+        self.assignments_for_stage(issue, lookup)
+            .into_iter()
+            .max_by(|a, b| {
+                a.dispatched_at
+                    .partial_cmp(&b.dispatched_at)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    /// #49: the pipeline rail's second, more obvious route to a stage's
+    /// log, alongside the numeric `LOG SOURCE` picker in the Log tab
+    /// (`log_candidates_for_issue` / `pick_log_source`). Whenever the user
+    /// selects a stage box — click or `[`/`]` — pin the Log tab to that
+    /// stage's newest assignment so switching to (or already being on) the
+    /// Log tab shows it, for any issue in any state, including a merged
+    /// one: this reads the same state-agnostic `data.assignments` the
+    /// numeric picker does, so completion never narrows what's offered.
+    ///
+    /// A stage with no assignment of its own (Pending/Skipped, or a gate
+    /// like "merge" that isn't itself a worker type) leaves the existing
+    /// pin untouched rather than clearing it — better to keep showing
+    /// whatever was last visible than to blank the Log tab.
+    pub(crate) fn pin_log_source_for_focused_stage(&mut self) {
+        let Some(idx) = self.pipeline_sel else { return };
+        let Some(issue) = self.pipeline_issues.get(idx) else { return };
+        let Some(stage_idx) = self.pipeline_focused_stage else { return };
+        let stage_names = self.pipeline_stage_names_for_issue(issue);
+        let Some(stage_name) = stage_names.get(stage_idx) else { return };
+        let Some(target_id) = self
+            .log_candidate_for_stage_name(issue, stage_name)
+            .map(|a| a.id.clone())
+        else {
+            return;
+        };
+        let key = pipeline_log_pin_key(issue);
+        self.pipeline_log_pinned_assignment.insert(key, target_id);
     }
 
     /// #264: True when the currently-open `inject_chat` overlay is bound to

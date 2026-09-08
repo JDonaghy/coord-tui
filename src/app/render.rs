@@ -3403,6 +3403,7 @@ impl CoordApp {
         match stage_name {
             "review" => self.stage_content_review(issue),
             "test" => self.stage_content_test(issue),
+            "uat" => self.stage_content_uat(issue),
             "merge" => self.stage_content_merge(issue),
             // Plan: prefer the structured plan cached in the plans table
             // (parsed by `coord notify`); fall back to log tail if no row.
@@ -3863,6 +3864,55 @@ impl CoordApp {
                 rows.push(kv_item("", &format!("   {trimmed}"), None));
             }
         }
+        rows
+    }
+
+    /// #52: Uat stage content — the box only ever renders Pending/Failed,
+    /// with no room to say *why* (a person hasn't looked yet vs a person
+    /// already looked and said no — indistinguishable before #52) or *what
+    /// to look at* (the preview URL and the assignment id `coord uat <id>
+    /// --passed|--failed` needs), forcing a trip to GitHub to find either.
+    /// Reads `uat_block_info_for`, which is itself read-only board state —
+    /// no new I/O here, mirrors `stage_content_merge`'s shape.
+    ///
+    /// Empty when `uat_block_info_for` returns `None` — either the verdict
+    /// already passed (nothing left to explain) or Work hasn't finished
+    /// yet (nothing to explain *yet*); the caller's "(no content available
+    /// for this stage yet)" fallback covers both.
+    pub(crate) fn stage_content_uat(&self, issue: &PipelineIssue) -> Vec<ListItem> {
+        let Some(info) = self.uat_block_info_for(issue) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<ListItem> = Vec::new();
+        let (status_text, status_color) = if info.failed {
+            ("✗ failed — a person looked and said no", Color::rgb(220, 100, 100))
+        } else {
+            ("⏳ waiting for a person to look", Color::rgb(220, 180, 80))
+        };
+        rows.push(kv_item("Status", status_text, Some(status_color)));
+        rows.push(kv_item(
+            "Assignment",
+            &info.assignment_id,
+            Some(Color::rgb(160, 160, 180)),
+        ));
+        if let Some(reason) = &info.fail_reason {
+            rows.push(kv_item("Reason", reason, Some(Color::rgb(220, 160, 140))));
+        }
+        if let Some(url) = &info.preview_url {
+            rows.push(kv_item("Preview", url, Some(Color::rgb(140, 190, 230))));
+        } else {
+            rows.push(kv_item(
+                "Preview",
+                "(no preview URL resolved yet — configure the repo's uat_preview/ \
+                 uat_live_preview, or wait for the next merge-queue evaluation)",
+                Some(Color::rgb(160, 160, 160)),
+            ));
+        }
+        rows.push(kv_item(
+            "Run",
+            &format!("coord uat {} --passed|--failed", info.assignment_id),
+            Some(Color::rgb(160, 200, 160)),
+        ));
         rows
     }
 

@@ -936,6 +936,24 @@ impl CoordApp {
                 .unwrap_or(false);
             if is_epic_row {
                 items.push(ContextMenuItem::action("audit-outcomes", "Audit outcomes"));
+                // #50 review fix: `is_epic_row` alone carries no lifecycle
+                // check — it's true whenever the SELECTED row's own labels
+                // include `epic`, regardless of whether that row is Done.
+                // The revived Done section (this same PR) makes a closed
+                // epic tracking issue selectable in the sidebar for the
+                // first time, so without a guard here a Done epic row would
+                // unconditionally offer four real mutating/dispatch actions
+                // — "Dispatch Gate A mock" spawns `coord acceptance mock`,
+                // "Approve/Request Gate A changes" record a board verdict,
+                // and "Publish mocks to portal" triggers a network publish
+                // — directly violating #50's "nothing under Done offers an
+                // action that would re-run or re-dispatch anything; a
+                // finished issue is a record, not a control surface."
+                // `audit-outcomes` (above) and the two `view-gate-a-mock*`
+                // items (below) stay unconditional: all three only READ
+                // state (an analyst session, opening a PR, opening a local
+                // file) and never re-run or re-dispatch anything.
+                let allow_gate_a_mutations = !matches!(lifecycle, PipelineRowLifecycle::Done);
                 // #1059 (docs/ORACLE_LOOP.md, #930/#947): Gate A dispatch +
                 // sign-off for the milestone this epic tracks. "Dispatch Gate
                 // A mock" runs `coord acceptance mock <repo> <tracking_issue>`
@@ -968,10 +986,12 @@ impl CoordApp {
                 // at it directly. Interim and acceptable per that amendment,
                 // but worth being precise about here rather than implying
                 // both paths land in the browser equally.
-                items.push(ContextMenuItem::action(
-                    "dispatch-gate-a-mock",
-                    "Dispatch Gate A mock",
-                ));
+                if allow_gate_a_mutations {
+                    items.push(ContextMenuItem::action(
+                        "dispatch-gate-a-mock",
+                        "Dispatch Gate A mock",
+                    ));
+                }
                 let mut view_gate_a_item =
                     ContextMenuItem::action("view-gate-a-mock", "View Gate A mock (PR)");
                 view_gate_a_item.disabled =
@@ -992,14 +1012,16 @@ impl CoordApp {
                 // board verdict (`coord gate-a`) that
                 // `coord.milestone_dispatch.issue_oracle_ready` refuses
                 // dispatch without.
-                items.push(ContextMenuItem::action(
-                    "approve-gate-a",
-                    "Approve Gate A",
-                ));
-                items.push(ContextMenuItem::action(
-                    "request-gate-a-changes",
-                    "Request Gate A changes",
-                ));
+                if allow_gate_a_mutations {
+                    items.push(ContextMenuItem::action(
+                        "approve-gate-a",
+                        "Approve Gate A",
+                    ));
+                    items.push(ContextMenuItem::action(
+                        "request-gate-a-changes",
+                        "Request Gate A changes",
+                    ));
+                }
                 // #2513 (PDR-5): "Publish mocks to portal" — on-demand
                 // counterpart to PDR-3's merge-triggered auto-push, for
                 // iterating on a local `--amend` before it's merged, or
@@ -1014,14 +1036,16 @@ impl CoordApp {
                 // itself fails loud with that exact remedy rather than a
                 // silent no-op, so the item stays enabled and the CLI
                 // surfaces that failure as a toast via the usual path.
-                let mut publish_mocks_item = ContextMenuItem::action(
-                    "publish-mocks-to-portal",
-                    "Publish mocks to portal",
-                );
-                publish_mocks_item.disabled = !epic_issue
-                    .map(|iss| self.gate_a_mocks_dir_exists_for(iss))
-                    .unwrap_or(false);
-                items.push(publish_mocks_item);
+                if allow_gate_a_mutations {
+                    let mut publish_mocks_item = ContextMenuItem::action(
+                        "publish-mocks-to-portal",
+                        "Publish mocks to portal",
+                    );
+                    publish_mocks_item.disabled = !epic_issue
+                        .map(|iss| self.gate_a_mocks_dir_exists_for(iss))
+                        .unwrap_or(false);
+                    items.push(publish_mocks_item);
+                }
             }
             // #1223 (was #1060, docs/ORACLE_LOOP.md, #931/#932): the
             // per-issue acceptance actions — JIT authoring of THIS issue's

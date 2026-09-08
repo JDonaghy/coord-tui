@@ -20877,6 +20877,51 @@
         assert!(!action_ids.contains(&"drop-to-backlog"));
     }
 
+    /// #50 review fix: `pipeline_done_row_offers_no_dispatch_actions` above
+    /// calls with issue 42 against `make_app_default()`, where 42 isn't in
+    /// `pipeline_issues` at all — `epic_issue` resolves to `None`, so
+    /// `is_epic_row` is false and the Gate-A branch is never exercised.
+    /// A closed/merged EPIC tracking issue is exactly the row the revived
+    /// Done section makes selectable for the first time (an `epic`-labeled
+    /// row whose `is_closed` is true and whose `issue_done_at` falls inside
+    /// `DONE_WINDOW_DAYS`), so this test drives that combination directly:
+    /// issue 751 (the `epic`-labeled fixture row) at
+    /// `PipelineRowLifecycle::Done` must NOT offer any of the four
+    /// mutating/dispatch Gate-A actions, while the three read-only ones
+    /// (`audit-outcomes`, `view-gate-a-mock`, `view-gate-a-mock-local`) and
+    /// the universal `chat-about-issue` still appear.
+    #[test]
+    fn pipeline_done_epic_row_offers_no_gate_a_dispatch_actions() {
+        let app = make_pipeline_app_for_audit_menu_test(0);
+        let items = app.context_menu_items_for_pipeline_row(
+            Some(751),
+            &PipelineRowLifecycle::Done,
+            Some("api"),
+        );
+        let action_ids = all_action_ids_recursive(&items);
+        assert!(
+            !action_ids.contains(&"dispatch-gate-a-mock"),
+            "Done epic row must not offer Dispatch Gate A mock: {action_ids:?}"
+        );
+        assert!(
+            !action_ids.contains(&"approve-gate-a"),
+            "Done epic row must not offer Approve Gate A: {action_ids:?}"
+        );
+        assert!(
+            !action_ids.contains(&"request-gate-a-changes"),
+            "Done epic row must not offer Request Gate A changes: {action_ids:?}"
+        );
+        assert!(
+            !action_ids.contains(&"publish-mocks-to-portal"),
+            "Done epic row must not offer Publish mocks to portal: {action_ids:?}"
+        );
+        // Read-only actions remain reachable — Done is a record, not a dead end.
+        assert!(action_ids.contains(&"audit-outcomes"));
+        assert!(action_ids.contains(&"view-gate-a-mock"));
+        assert!(action_ids.contains(&"view-gate-a-mock-local"));
+        assert!(action_ids.contains(&"chat-about-issue"));
+    }
+
     // ── #607: pull-right submenu structure ──────────────────────────────────
 
     #[test]
@@ -34909,6 +34954,50 @@
             Some(2),
             "api's Done group must have exactly its 2 in-window issues: {:?}",
             done_by_repo
+        );
+    }
+
+    /// #50 review fix (non-blocking finding): `pipeline_jump_target`'s
+    /// `"done"` arm must resolve through `pipeline_done_by_repo_impl(false)`
+    /// — search-filter-blind, like every other arm in that match — not the
+    /// search-sensitive `pipeline_done_by_repo()` the pre-fix code called.
+    /// Without the fix, typing an unrelated query into the Pipeline
+    /// sidebar's own search box and then invoking "View in Pipeline" for a
+    /// Done issue that doesn't match that query incorrectly reports
+    /// `PipelineNotVisible::Completed` ("too old for Done") even though the
+    /// issue is well within `DONE_WINDOW_DAYS` — the window bound is meant
+    /// to be the only exclusion rule for Done, same as #2449 established for
+    /// every other lifecycle.
+    #[test]
+    fn pipeline_jump_target_done_arm_ignores_the_search_filter() {
+        let mut app = make_completed_app();
+        // Issue #201 ("Completed thing 201") is 30 minutes old — well inside
+        // DONE_WINDOW_DAYS — but this query matches neither its number nor
+        // its title.
+        app.pipeline_search.set_value("zzznomatch");
+        app.rebuild_pipeline_sidebar(None);
+
+        // Precondition: the search filter really does hide #201 from
+        // `pipeline_done_by_repo` (the search-sensitive, rendering-facing
+        // query).
+        assert!(
+            app.pipeline_done_by_repo()
+                .iter()
+                .flat_map(|(_, idxs)| idxs.iter())
+                .all(|&i| app.pipeline_issues[i].number != 201),
+            "precondition: the search filter must hide #201 from the \
+             rendering-facing Done grouping"
+        );
+
+        assert_eq!(
+            app.pipeline_jump_target("api", 201),
+            Ok(app
+                .pipeline_issues
+                .iter()
+                .position(|i| i.number == 201)
+                .unwrap()),
+            "#50: the jump/enablement check for a Done issue must not be \
+             gated by the Pipeline sidebar's own search filter"
         );
     }
 

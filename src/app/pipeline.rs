@@ -305,6 +305,33 @@ pub(crate) fn collapse_prereq_pipeline_status(status: &PrereqPipelineStatus) -> 
     }
 }
 
+/// #52: everything needed to explain a not-yet-passed Uat box — *why* it's
+/// blocked (a person hasn't looked yet, vs a person already looked and said
+/// no — indistinguishable before #52), the exact page to go look at, and
+/// the assignment id `coord uat <id> --passed|--failed` needs (previously
+/// not on screen anywhere, forcing a trip to GitHub or the DB).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UatBlockInfo {
+    /// The work assignment `coord uat <id> --passed|--failed` targets —
+    /// the same row `uat_state`/`uat_reason` are stamped onto (mirrors
+    /// `test_state`/`test_reason`'s shape, not a dedicated `type="uat"`
+    /// assignment).
+    pub(crate) assignment_id: String,
+    /// `true` when a person already recorded `--failed` — a real verdict,
+    /// never to be confused with "hasn't been looked at yet".
+    pub(crate) failed: bool,
+    /// The operator-entered reason from `coord uat <id> --failed <reason>`
+    /// (`Assignment.uat_reason`) — only ever `Some` when `failed`.
+    pub(crate) fail_reason: Option<String>,
+    /// The preview URL resolved server-side
+    /// (`coord.merge_queue.evaluate_uat_verdict`), read out of the
+    /// matching `merge_plan` entry's block reason. `None` until the
+    /// issue's branch has gone through a merge-gate evaluation (Review/
+    /// Test not both done yet, or no `merge_plan` entry for this issue in
+    /// this `/board` payload yet) — never fabricated.
+    pub(crate) preview_url: Option<String>,
+}
+
 /// #863: the iteration cap was hit — awaiting the operator's one-key confirm
 /// to re-dispatch the SAME Fix with `--force` (#862's override).  Raised by
 /// the `PendingFixCapPreflight` completion handler; consumed by
@@ -6889,6 +6916,76 @@ impl CoordApp {
         Self::merge_plan_block_reason(self.merge_plan_entry_for_issue(repo_slug, issue_number))
     }
 
+    /// #52: resolve `issue`'s Uat box "why blocked" info — `None` when the
+    /// gate isn't actionable yet (no Work assignment reaches a verdict) or
+    /// has already passed, in which case the box reads Done/Pending on its
+    /// own and there is nothing more to explain.
+    ///
+    /// Reads `uat_state`/`uat_reason` straight off the latest Work
+    /// assignment that carries a verdict — exactly the shape
+    /// `test_stage_status_for` reads `test_state`/`test_reason` from
+    /// (`coord uat <id> --passed|--failed` stamps the work row directly,
+    /// never a dedicated `type="uat"` assignment) — so this works
+    /// identically with or without a `coord serve` daemon. The preview URL
+    /// is the one piece that genuinely needs the daemon: it's resolved
+    /// server-side (`coord.merge_queue.evaluate_uat_verdict`, live
+    /// GitHub-Deployment lookups included) and only reaches the TUI
+    /// embedded in the matching `merge_plan` entry's block reason —
+    /// `extract_uat_preview_url` pulls just the URL back out, and only
+    /// when that reason is actually about the UAT gate (some other gate
+    /// may be what's blocking the merge instead).
+    pub(crate) fn uat_block_info_for(&self, issue: &PipelineIssue) -> Option<UatBlockInfo> {
+        // Mirrors `test_stage_status_for`'s Work-gating: a verdict can't be
+        // actionable ("waiting for a person") before Work itself has
+        // finished — without this an issue mid-Work would misreport as
+        // "waiting for a person to look" when the real story is "nobody
+        // can look yet, it isn't built".
+        if self.stage_status_for_internal_work(issue) != StageStatus::Done {
+            return None;
+        }
+        let work = self.assignments_for_stage(issue, "work");
+        let latest_with_verdict = work
+            .iter()
+            .filter(|a| a.uat_state.as_deref().map(|s| !s.is_empty()).unwrap_or(false))
+            .max_by(|a, b| {
+                a.dispatched_at
+                    .partial_cmp(&b.dispatched_at)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        let state = latest_with_verdict.and_then(|a| a.uat_state.as_deref());
+        if state == Some("passed") {
+            return None;
+        }
+        // No verdict recorded yet — still need a Work assignment to attach
+        // the eventual `coord uat <id>` to. Falls back to the latest Work
+        // row regardless of verdict (mirrors `test_stage_status_for`'s
+        // "no matching assignment" posture).
+        let target = latest_with_verdict.or_else(|| {
+            work.iter().max_by(|a, b| {
+                a.dispatched_at
+                    .partial_cmp(&b.dispatched_at)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        })?;
+        let failed = state == Some("failed");
+        let fail_reason = if failed {
+            latest_with_verdict.and_then(|a| a.uat_reason.clone())
+        } else {
+            None
+        };
+        let preview_url = self
+            .merge_plan_entry_for_issue(&issue.repo_slug, issue.number)
+            .and_then(|e| e.reason.as_deref())
+            .and_then(extract_uat_preview_url)
+            .map(|s| s.to_string());
+        Some(UatBlockInfo {
+            assignment_id: target.id.clone(),
+            failed,
+            fail_reason,
+            preview_url,
+        })
+    }
+
     /// True when *entry*'s PR has a fetched CI summary with failing checks.
     /// Looks up `pipeline_ci_checks` by `(repo_github, pr_number)`; returns
     /// false when the entry has no PR yet or no summary has been fetched.
@@ -7777,6 +7874,32 @@ impl CoordApp {
                         self.merge_plan_block_reason_for_issue(&issue.repo_slug, issue.number)
                     {
                         label = format!("{}\n{}", label, reason);
+                    }
+                }
+                // #52: the Uat box's "why blocked" — previously a bare
+                // "Uat — pending"/"Uat — failed" with no statement of *why*,
+                // making a person-hasn't-looked-yet wait read identically to
+                // an actual failure (the entire complaint #52 files). Shown
+                // on both Pending and Failed so a rejected verdict's reason
+                // is visible without switching to the Stages tab, and always
+                // names the assignment id `coord uat <id> --passed|--failed`
+                // needs — the id is not otherwise on screen anywhere.
+                if name == "uat" && matches!(status, StageStatus::Pending | StageStatus::Failed) {
+                    if let Some(info) = self.uat_block_info_for(issue) {
+                        let mut line = if info.failed {
+                            "✗ a person said no".to_string()
+                        } else {
+                            "waiting for a person to look".to_string()
+                        };
+                        if let Some(url) = &info.preview_url {
+                            line.push('\n');
+                            line.push_str(trunc(url, 40));
+                        }
+                        line.push_str(&format!(
+                            "\nid: {}",
+                            info.assignment_id.chars().take(8).collect::<String>()
+                        ));
+                        label = format!("{}\n{}", label, line);
                     }
                 }
                 // #2427: annotate the box a dead-end `coord escalate record`

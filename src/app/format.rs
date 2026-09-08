@@ -132,6 +132,37 @@ pub(crate) fn fmt_merge_block_reason(reason: Option<&str>) -> Option<String> {
     Some(format!("{} [{}]", trunc(reason, 80), affordance))
 }
 
+/// #52: pull the preview URL out of a UAT-gate block reason
+/// (`coord.merge_queue.evaluate_uat_verdict`'s message, reaching the TUI as
+/// `PlannedMergeEntry.reason`) — the one thing the gate asks the operator
+/// to go look at, previously findable only by opening GitHub.
+///
+/// `evaluate_uat_verdict` always emits either `"… — preview: <url> — run:
+/// …"` (a resolver — the repo's `uat_preview` override or a live GitHub
+/// Deployment lookup — produced a real link) or `"… — preview URL could
+/// not be resolved (…) — run: …"` (neither resolution path had one).
+/// Splitting on `"preview: "` and taking the clause up to the next `" — "`
+/// isolates just the URL in the first case; in the second, the extracted
+/// text is the "could not be resolved" prose, which never starts with
+/// `"http"` — filtered out below so this never returns a placeholder that
+/// merely looks like a link (#2948's exact bug, one layer up).
+///
+/// Returns `None` when *reason* isn't a UAT-gate reason at all (some other
+/// gate — review/smoke/CI — is what's actually blocking; `reason` came
+/// from a merge-plan entry that may not be blocked on UAT specifically).
+pub(crate) fn extract_uat_preview_url(reason: &str) -> Option<&str> {
+    if !reason.starts_with("uat verdict") {
+        return None;
+    }
+    let after = reason.split_once("preview: ")?.1;
+    let url = after.split(" — ").next().unwrap_or(after).trim();
+    if url.starts_with("http") {
+        Some(url)
+    } else {
+        None
+    }
+}
+
 /// Capitalize the first ASCII character of `s` (no-op when `s` is empty
 /// or starts with a non-ASCII character).
 pub(crate) fn capitalize(s: &str) -> String {

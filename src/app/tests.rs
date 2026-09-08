@@ -463,6 +463,46 @@
         assert!(out.contains("needs a person"), "got: {out}");
     }
 
+    // ── #52: extract_uat_preview_url ────────────────────────────────────────
+
+    #[test]
+    fn extract_uat_preview_url_pulls_url_out_of_missing_verdict_message() {
+        let reason = "uat verdict missing — preview: \
+                       https://e891fe0a.format-converter-6bi.pages.dev — run: \
+                       coord uat f0e55cdeb1e1 --passed|--failed";
+        assert_eq!(
+            extract_uat_preview_url(reason),
+            Some("https://e891fe0a.format-converter-6bi.pages.dev")
+        );
+    }
+
+    #[test]
+    fn extract_uat_preview_url_pulls_url_out_of_failed_verdict_message() {
+        let reason = "uat verdict FAILED: broke checkout — preview: \
+                       https://example.pages.dev — run: coord uat abc123 --passed|--failed";
+        assert_eq!(
+            extract_uat_preview_url(reason),
+            Some("https://example.pages.dev")
+        );
+    }
+
+    #[test]
+    fn extract_uat_preview_url_none_when_unresolved() {
+        // #2948: the resolver came back empty — never fabricate a link.
+        let reason = "uat verdict missing — preview URL could not be resolved \
+                       (no uat_preview override configured and no matching GitHub \
+                       Deployment found for this branch) — run: coord uat abc --passed|--failed";
+        assert_eq!(extract_uat_preview_url(reason), None);
+    }
+
+    #[test]
+    fn extract_uat_preview_url_none_for_non_uat_reason() {
+        // Some other gate (review/smoke/CI) is what's actually blocking —
+        // must not be misread as a UAT reason just because it mentions
+        // "preview" somewhere.
+        assert_eq!(extract_uat_preview_url("review not approved"), None);
+    }
+
     // ── trunc ──────────────────────────────────────────────────────────────────
 
     #[test]
@@ -15842,6 +15882,184 @@
         assert!(label.starts_with("Merge\n"), "got: {label}");
         assert!(label.contains("review not approved"), "got: {label}");
         assert!(label.contains("needs a person"), "got: {label}");
+    }
+
+    /// #52: a Pending Uat box (no verdict recorded yet) must say *why* —
+    /// "waiting for a person to look", not a bare "pending" that reads
+    /// identically to a stall — and must carry the preview URL (resolved
+    /// server-side, reaching the TUI embedded in the matching `merge_plan`
+    /// entry's block reason) plus the assignment id `coord uat <id>
+    /// --passed|--failed` needs, since that id isn't otherwise on screen.
+    #[test]
+    fn build_pipeline_widget_uat_pending_shows_preview_url_and_assignment_id() {
+        let mut app = make_pipeline_app();
+        app.data.pipeline_default_gates =
+            vec!["review".to_string(), "uat".to_string(), "merge".to_string()];
+        app.data.assignments.push(_stage_assignment("w1", "work", 1.0, "done"));
+        app.data.assignments.push(_stage_assignment("r1", "review", 3.0, "done"));
+        app.data.merge_plan.push(planned_entry(
+            "w1",
+            "api",
+            "acme/api",
+            "main",
+            42,
+            "Add cool thing",
+            1,
+            None,
+            "BLOCKED",
+            Some(
+                "uat verdict missing — preview: \
+                 https://e891fe0a.format-converter-6bi.pages.dev — run: \
+                 coord uat w1 --passed|--failed",
+            ),
+        ));
+
+        let view = app.build_pipeline_widget().unwrap();
+        // Stage order: [work, review, uat, merge].
+        let uat = &view.stages[2];
+        assert!(uat.label.starts_with("Uat\n"), "got: {}", uat.label);
+        assert!(
+            uat.label.contains("waiting for a person to look"),
+            "got: {}",
+            uat.label
+        );
+        // The box is narrow — the URL is truncated for at-a-glance display
+        // (`trunc(url, 40)`); the FULL untruncated URL belongs to the
+        // Stage-content detail (`stage_content_uat_renders_assignment_
+        // preview_and_run_command`, below), not this compact box.
+        assert!(
+            uat.label.contains("https://e891fe0a.format-converter"),
+            "got: {}",
+            uat.label
+        );
+        assert!(uat.label.contains("id: w1"), "got: {}", uat.label);
+    }
+
+    /// #52: a Failed Uat box (a person recorded `--failed`) must read as a
+    /// real rejection, not "waiting" — the whole point of distinguishing
+    /// the two framings the issue asks for.
+    #[test]
+    fn build_pipeline_widget_uat_failed_shows_rejection_not_waiting() {
+        let mut app = make_pipeline_app();
+        app.data.pipeline_default_gates =
+            vec!["review".to_string(), "uat".to_string(), "merge".to_string()];
+        app.data.assignments.push(_stage_assignment("w1", "work", 1.0, "done"));
+        app.data.assignments.push(_stage_assignment("r1", "review", 3.0, "done"));
+        if let Some(w1) = app.data.assignments.iter_mut().find(|a| a.id == "w1") {
+            w1.uat_state = Some("failed".to_string());
+            w1.uat_reason = Some("checkout is broken on mobile".to_string());
+        }
+        app.data.issue_stage_projection.push(IssueStageProjection {
+            repo_name: "api".to_string(),
+            issue_number: 42,
+            issue_title: "Add cool thing".to_string(),
+            stages: [("uat".to_string(), "failed".to_string())]
+                .into_iter()
+                .collect(),
+            has_approved_review: true,
+        });
+
+        let view = app.build_pipeline_widget().unwrap();
+        let uat = &view.stages[2];
+        assert_eq!(uat.status, StageStatus::Failed);
+        assert!(
+            uat.label.contains("a person said no"),
+            "got: {}",
+            uat.label
+        );
+        assert!(
+            !uat.label.contains("waiting for a person to look"),
+            "a rejected verdict must not still read as \"waiting\": got {}",
+            uat.label
+        );
+    }
+
+    /// #52: `uat_block_info_for` must not report "waiting for a person to
+    /// look" while Work itself is still unsettled — the real story there is
+    /// "nobody can look yet, it isn't built", not a stalled human gate.
+    #[test]
+    fn uat_block_info_for_none_while_work_unsettled() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("w1", "work", 1.0, "running"));
+        let issue = app.pipeline_issues[0].clone();
+        assert_eq!(app.uat_block_info_for(&issue), None);
+    }
+
+    /// #52: a passed UAT verdict has nothing left to explain — the box
+    /// already reads Done, so `uat_block_info_for` (and therefore the
+    /// annotation and the Stage-content detail) must go quiet.
+    #[test]
+    fn uat_block_info_for_none_when_passed() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("w1", "work", 1.0, "done"));
+        if let Some(w1) = app.data.assignments.iter_mut().find(|a| a.id == "w1") {
+            w1.uat_state = Some("passed".to_string());
+        }
+        let issue = app.pipeline_issues[0].clone();
+        assert_eq!(app.uat_block_info_for(&issue), None);
+    }
+
+    /// #52: the Stage-content detail (Stages tab / Overview strip) for the
+    /// Uat stage must render the assignment id, the exact `coord uat`
+    /// command, and the preview URL as plain readable/copyable rows — the
+    /// full-detail counterpart to the terse box annotation above.
+    #[test]
+    fn stage_content_uat_renders_assignment_preview_and_run_command() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("w1", "work", 1.0, "done"));
+        app.data.assignments.push(_stage_assignment("r1", "review", 3.0, "done"));
+        app.data.merge_plan.push(planned_entry(
+            "w1",
+            "api",
+            "acme/api",
+            "main",
+            42,
+            "Add cool thing",
+            1,
+            None,
+            "BLOCKED",
+            Some(
+                "uat verdict missing — preview: https://example.pages.dev — run: \
+                 coord uat w1 --passed|--failed",
+            ),
+        ));
+        let issue = app.pipeline_issues[0].clone();
+
+        let rows = app.stage_content_uat(&issue);
+        let text = rows
+            .iter()
+            .map(|r| r.text.spans.iter().map(|s| s.text.clone()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("waiting for a person to look"), "got: {text}");
+        assert!(text.contains("w1"), "got: {text}");
+        assert!(text.contains("https://example.pages.dev"), "got: {text}");
+        assert!(
+            text.contains("coord uat w1 --passed|--failed"),
+            "got: {text}"
+        );
+    }
+
+    /// #52: a failed verdict's operator-entered reason (`coord uat <id>
+    /// --failed <reason>`) must show up in the Stage-content detail too.
+    #[test]
+    fn stage_content_uat_renders_failure_reason() {
+        let mut app = make_pipeline_app();
+        app.data.assignments.push(_stage_assignment("w1", "work", 1.0, "done"));
+        if let Some(w1) = app.data.assignments.iter_mut().find(|a| a.id == "w1") {
+            w1.uat_state = Some("failed".to_string());
+            w1.uat_reason = Some("checkout is broken on mobile".to_string());
+        }
+        let issue = app.pipeline_issues[0].clone();
+
+        let rows = app.stage_content_uat(&issue);
+        let text = rows
+            .iter()
+            .map(|r| r.text.spans.iter().map(|s| s.text.clone()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("a person looked and said no"), "got: {text}");
+        assert!(text.contains("checkout is broken on mobile"), "got: {text}");
     }
 
     /// #2427: a dead-end `coord escalate record` naming this issue's Review

@@ -346,6 +346,29 @@ impl SidebarView {
     }
 }
 
+/// The read half of the generated wire contract (`generated.rs`), emitted by
+/// code-coordinator's `scripts/codegen.py --rust` and byte-compared by
+/// `.github/workflows/codegen-drift.yml`.
+///
+/// The blanket `#[allow(dead_code)]` is on the *module*, not hand-written into
+/// the file, because the file is generated and must never be hand-edited — the
+/// only supported way to change it is to re-run the generator and commit its
+/// output verbatim.
+///
+/// The generator marks mechanically-derived fields `#[allow(dead_code)]`
+/// individually, but a field pinned in upstream's `RUST_FIELD_OVERRIDES`
+/// (`coord/codegen.py`) is emitted *without* that attribute — the override list
+/// assumes a pinned field already has a TUI consumer. That assumption breaks
+/// the moment upstream pins a brand-new field before this repo grows a reader
+/// for it: coord 0.5.412 added `Assignment::cost_capture_state` (#3158) that
+/// way, and a plain regenerate-and-commit — the exact fix the drift gate tells
+/// you to perform — then ships an unfixable `field is never read` warning.
+/// Suppressing it here keeps "regenerate, commit, build clean" true.
+///
+/// Little is masked in exchange: an unread wire field is the normal steady
+/// state for this module, and a field that a consumer *does* read disappearing
+/// from a regen is a hard compile error, not a warning.
+#[allow(dead_code)]
 mod generated;
 pub use generated::Assignment;
 

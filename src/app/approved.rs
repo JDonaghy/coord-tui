@@ -645,6 +645,19 @@ mod tests {
             approved_submissions: approved_rows(n),
             ..BoardData::default()
         });
+        // Disarm the periodic auto-refresh for exactly the reason
+        // `make_app_with_drive_queue` does (see its doc comment): this
+        // fixture is `BoardData::default()` + only `approved_submissions`,
+        // which leaves `apply_pending_data`'s #620 degraded-tick guard
+        // inert — it keys on machines/issues/assignments, all empty here —
+        // so a refresh tick firing mid-test wholesale-replaces `self.data`
+        // with the empty payload and wipes the seeded rows. The scroll
+        // tests below drive 50 keypresses through the real event loop, and
+        // on a loaded machine that can exceed the default 5 s cadence in
+        // wall-clock time; when it did, the panel repainted as "No approved
+        // work items yet" and the assertion failed with the fixture gone
+        // rather than with a scrolling bug.
+        app.settings.refresh_cadence = crate::settings::RefreshCadence::Off;
         app.active_view = SidebarView::Approved;
         let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
         driver.render();

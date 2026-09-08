@@ -899,7 +899,7 @@ impl MockBoardService {
         body: &str,
         requests: &std::sync::Mutex<Vec<String>>,
     ) {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         // #50: put the ACCEPTED socket back into blocking mode before
         // reading. `start` marks the *listener* non-blocking so the accept
         // loop can poll `shutdown`, and on macOS/BSD (unlike Linux) a socket
@@ -915,10 +915,7 @@ impl MockBoardService {
         // on a non-blocking socket, which is why the timeout alone did not
         // already cover the case.
         let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-        // Only the request line matters for the mock's purposes (method +
-        // path + query); headers/body (if any) are left undrained on the
-        // socket, which is fine since we respond and close immediately.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream for read"));
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).is_ok() {
@@ -929,6 +926,48 @@ impl MockBoardService {
                 }
             }
         }
+        // #50: DRAIN the rest of the request — headers, then exactly
+        // `Content-Length` body bytes — before answering.
+        //
+        // This used to be skipped ("fine since we respond and close
+        // immediately"), and that was the second silent flake in this
+        // fixture. Closing a TCP socket that still has unread bytes in its
+        // receive buffer makes the kernel send an RST instead of a FIN
+        // (BSD/macOS especially), and an RST can discard data already
+        // queued for the peer — so the client's `ureq` call intermittently
+        // failed with a connection reset *even though the request had
+        // arrived and been logged here*. That asymmetry is exactly the
+        // shape the flakes had: `requests()` showed the POST, but the
+        // caller took its error branch (an error toast instead of the
+        // success one, a soft-failed parse instead of the parsed payload).
+        // It only ever bit POSTs, because only they send a body — the
+        // body-less `GET /audit` / `GET /pause` tests never flaked.
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            match reader.read_line(&mut header) {
+                // EOF or a bare CRLF — end of the header block.
+                Ok(0) => break,
+                Ok(_) => {
+                    let header = header.trim_end();
+                    if header.is_empty() {
+                        break;
+                    }
+                    if let Some(value) = header
+                        .split_once(':')
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, value)| value.trim())
+                    {
+                        content_length = value.parse().unwrap_or(0);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if content_length > 0 {
+            let mut body_buf = vec![0u8; content_length];
+            let _ = reader.read_exact(&mut body_buf);
+        }
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -936,6 +975,9 @@ impl MockBoardService {
         );
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
+        // Half-close the write side so the peer sees a clean FIN and can
+        // read the response to completion before this socket is dropped.
+        let _ = stream.shutdown(std::net::Shutdown::Write);
     }
 }
 
@@ -1300,6 +1342,70 @@ mod tests {
             "the request line must be recorded even though the bytes arrived \
              after accept() — a dropped entry here is the silent flake that \
              made the /issue-label tests fail with an empty request log"
+        );
+    }
+
+    /// #50 regression: a POST **with a body** must round-trip — the client
+    /// gets the full canned JSON back, not a connection reset.
+    ///
+    /// `respond` used to read only the request line and leave the body
+    /// undrained on the socket. Closing a TCP connection with unread bytes
+    /// still in the receive buffer makes the kernel send an RST rather than
+    /// a FIN, and an RST can discard data already queued for the peer — so
+    /// the caller's `ureq` POST intermittently errored out even though the
+    /// request had arrived and been logged. Only POSTs were affected (they
+    /// are the only requests here carrying a body), which is exactly which
+    /// tests flaked.
+    ///
+    /// Unlike the accept-race test above, the RST window cannot be forced
+    /// deterministically from a single-shot test, so this asserts the
+    /// invariant that closes it: the mock drains `Content-Length` bytes and
+    /// half-closes, and a body-carrying POST comes back whole.
+    #[test]
+    fn mock_board_service_round_trips_a_post_with_a_body() {
+        let mock = MockBoardService::start(r#"{"labels": ["coord"], "changed": true}"#);
+        let body = serde_json::json!({
+            "repo_name": "repo-a",
+            "issue_number": 42,
+            "add": ["coord"],
+            "remove": [],
+            // Padded well past a single small write so the body is a real
+            // multi-byte payload the mock has to actively consume.
+            "note": "x".repeat(4096),
+        });
+
+        for attempt in 0..5 {
+            let resp = super::super::data::post_daemon_json(
+                &mock.url(),
+                None,
+                "/issue-label",
+                &body,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "attempt {attempt}: POST with a body must round-trip through \
+                     the mock, got transport error: {e}"
+                )
+            });
+            assert_eq!(
+                resp.get("changed").and_then(|v| v.as_bool()),
+                Some(true),
+                "attempt {attempt}: the canned body must come back parsed and whole"
+            );
+        }
+
+        assert_eq!(
+            mock.requests().len(),
+            5,
+            "every POST must be logged exactly once: {:?}",
+            mock.requests()
+        );
+        assert!(
+            mock.requests()
+                .iter()
+                .all(|r| r.starts_with("POST /issue-label")),
+            "got: {:?}",
+            mock.requests()
         );
     }
 }

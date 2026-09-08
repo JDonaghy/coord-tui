@@ -47216,6 +47216,16 @@ Milestone tracking issue.
         });
         app.data.pipeline_repos = vec![("repo-a".to_string(), "org/repo-a".to_string())];
         app.rebuild_board_sidebar();
+        // Disarm the periodic auto-refresh: this test asserts on the EXACT
+        // request count reaching the mock, and the cadence tick
+        // (`settings_ui.rs`'s `on_tick`) re-arms `spawn_paused_machines_fetch`,
+        // which resolves the board service on THIS thread — so it sees the
+        // `set_test_board_service` override and dials the same mock, adding a
+        // stray `GET /pause` to `mock.requests()`. The driver's event chain
+        // below can exceed the default 5 s cadence in wall-clock time on a
+        // loaded machine, which made this fail intermittently under a full
+        // parallel suite run with "expected exactly one request; got 2".
+        app.settings.refresh_cadence = crate::settings::RefreshCadence::Off;
 
         let mock = MockBoardService::start(r#"{"labels": ["coord", "status:ready"], "changed": true}"#);
         let _guard = set_test_board_service(mock.url(), None);
@@ -47378,6 +47388,13 @@ Milestone tracking issue.
 
         let mut app = make_test_app(make_plan_roster_board_data());
         app.active_view = SidebarView::Plans;
+        // Disarm the periodic auto-refresh for the same reason as
+        // `tuidriver_send_to_pipeline_posts_directly_to_daemon_no_subprocess`
+        // above — the cadence tick's `spawn_paused_machines_fetch` resolves
+        // the thread-local board-service override and lands a stray
+        // `GET /pause` on this test's mock, breaking the exact-request-count
+        // assertion below intermittently under a loaded parallel suite run.
+        app.settings.refresh_cadence = crate::settings::RefreshCadence::Off;
 
         let mock = MockBoardService::start(r#"{"labels": ["coord", "status:ready"], "changed": true}"#);
         let _guard = set_test_board_service(mock.url(), None);

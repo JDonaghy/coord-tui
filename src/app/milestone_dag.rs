@@ -1383,6 +1383,7 @@ mod pure_tests {
             review_verdict: None,
             review_of_assignment_id: None,
             cost_usd: None,
+            cost_capture_state: None,
             smoke_tests: None,
             review_findings: None,
             review_findings_truncated: false,

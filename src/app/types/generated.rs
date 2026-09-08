@@ -154,6 +154,14 @@ pub struct Assignment {
     /// `None` for in-flight workers and for pre-#208 rows.
     #[serde(default)]
     pub(crate) cost_usd: Option<f64>,
+    /// #3158: tri-states cost_usd's own NULL so "un-measured" (a terminal
+    /// row whose log conclusively has no cost) stays distinguishable from
+    /// "uncaptured" (a backfill candidate the daemon has not examined yet).
+    /// None (never examined) | "captured" (cost_usd set) | "unmeasured"
+    /// (log confirmed to carry no cost — excluded from future backfill
+    /// candidate queries so it is not re-fetched forever).
+    #[serde(default)]
+    pub(crate) cost_capture_state: Option<String>,
     /// #252: worker-emitted smoke-test list, parsed from the SMOKE_TESTS
     /// block in the worker's log.
     ///

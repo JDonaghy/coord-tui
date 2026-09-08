@@ -9517,9 +9517,14 @@
 
     #[test]
     fn pipeline_new_done_sections_grouped_by_repo() {
-        // New section must sub-group by repo. #2405: a closed issue no longer
-        // produces a Done section — this pins that the *New* grouping is
-        // unaffected by the removal.
+        // New section must sub-group by repo. #50: the revived Done section
+        // only ever shows issues with a resolvable `issue_done_at` (see
+        // `pipeline_done_by_repo`) — a closed issue with no merge_queue/
+        // assignment timestamp at all still produces no Done section, same
+        // outcome #2405 pinned (there it was because the section didn't
+        // exist; here it's because this issue can't be dated into the
+        // window) — this test pins that either way, the *New* grouping is
+        // unaffected.
         let mut app = make_pipeline_app();
         // Add a closed issue in the second repo.
         app.pipeline_issues.push(PipelineIssue {
@@ -20853,13 +20858,23 @@
     }
 
     #[test]
-    fn pipeline_done_row_offers_noninteractive_start() {
-        // #leg1 / #607: also offered on Done rows — nested in Start (automated).
+    fn pipeline_done_row_offers_no_dispatch_actions() {
+        // #leg1 / #607 originally offered Start here too, but that path was
+        // dead in practice — nothing in the Pipeline sidebar could select a
+        // done issue until #50 revived the Done section. #50 is explicit
+        // that a finished issue is a record, not a control surface: nothing
+        // under Done may re-run or re-dispatch anything, so Start (and
+        // Reattach/Drive/Drop-to-backlog) must NOT appear here any more —
+        // only the read-only "Open PR" (see `pipeline_done_row_offers_open_pr`).
         let app = make_app_default();
         let items = app.context_menu_items_for_pipeline_row(Some(42), &PipelineRowLifecycle::Done, None);
         let action_ids = all_action_ids_recursive(&items);
-        assert!(action_ids.contains(&"start-with-plan"));
-        assert!(action_ids.contains(&"start-skip-plan"));
+        assert!(!action_ids.contains(&"start-with-plan"));
+        assert!(!action_ids.contains(&"start-skip-plan"));
+        assert!(!action_ids.contains(&"start-work-interactive"));
+        assert!(!action_ids.contains(&"start-merge-automated"));
+        assert!(!action_ids.contains(&"reattach-live-session"));
+        assert!(!action_ids.contains(&"drop-to-backlog"));
     }
 
     // ── #607: pull-right submenu structure ──────────────────────────────────
@@ -34849,19 +34864,132 @@
         app
     }
 
-    /// The Done section is gone from the sidebar entirely — closed issues
-    /// contribute no state section, whatever their timestamps.
+    /// #50: the Done sidebar section is back — populated for closed issues
+    /// within `DONE_WINDOW_DAYS`, sub-grouped by repo like Refining/Pending
+    /// — but still bounded, which is exactly what #2405 replaced it over
+    /// (the original #728 section had no bound at all). The Completed tab
+    /// #2405 introduced is untouched by this: it keeps its own, wider
+    /// time-range controls and is unaffected by the sidebar's fixed window.
     #[test]
-    fn completed_grid_removed_the_done_sidebar_section() {
+    fn done_sidebar_section_is_windowed_and_grouped_by_repo() {
         let app = make_completed_app();
         assert!(
-            !app.pipeline_state_section_names.contains(&"done"),
-            "#2405: no Done section may survive, got {:?}",
+            app.pipeline_state_section_names.contains(&"done"),
+            "#50: the revived Done section must appear once a done issue \
+             falls inside DONE_WINDOW_DAYS, got {:?}",
             app.pipeline_state_section_names
         );
-        // …and the classifier still says these issues ARE done, so their
-        // absence is the section's removal, not a mis-classification.
+        // …and the classifier still says these issues ARE done — same
+        // precondition #2405's coverage checked.
         assert_eq!(app.pipeline_lifecycle_section(&app.pipeline_issues[0]), "done");
+
+        let done_by_repo = app.pipeline_done_by_repo();
+        let done_numbers: Vec<u64> = done_by_repo
+            .iter()
+            .flat_map(|(_, idxs)| idxs.iter().map(|&i| app.pipeline_issues[i].number))
+            .collect();
+        assert!(
+            done_numbers.contains(&201) && done_numbers.contains(&202) && done_numbers.contains(&204),
+            "the 30m/3h/1h-old issues must all be inside the Done window: {:?}",
+            done_numbers
+        );
+        assert!(
+            !done_numbers.contains(&203),
+            "#50: the 5-day-old issue must fall OUTSIDE DONE_WINDOW_DAYS (3) \
+             — the whole point of the bound: {:?}",
+            done_numbers
+        );
+
+        // Grouped by repo like Refining/Pending: `api`'s two in-window
+        // issues (201, 202 — 203 is windowed out) land in one group,
+        // `web`'s one (204) in another.
+        let api_group = done_by_repo.iter().find(|(repo, _)| repo == "api");
+        assert_eq!(
+            api_group.map(|(_, idxs)| idxs.len()),
+            Some(2),
+            "api's Done group must have exactly its 2 in-window issues: {:?}",
+            done_by_repo
+        );
+    }
+
+    /// #50 end-to-end: the Done section starts collapsed (so it doesn't cost
+    /// anything until opened), expanding it reveals its issues, and
+    /// selecting one renders the SAME pipeline view shape as a live issue —
+    /// the Work→Test→Review→Merge stage rail with each stage's final state
+    /// — with no dispatch affordance anywhere (a finished issue is a
+    /// record, not a control surface).
+    #[test]
+    fn tuidriver_done_section_expands_and_shows_readonly_stage_rail() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_completed_app();
+        app.pipeline_detail_tab = PipelineDetailTab::Overview;
+        let done_idx = app
+            .pipeline_issues
+            .iter()
+            .position(|i| i.number == 201)
+            .expect("fixture must contain issue #201");
+
+        // Model-level assertions on the plain `CoordApp` first — `driver.app()`
+        // isn't `CoordApp` once wrapped by `driver_with_shell` (see the other
+        // `TuiDriver` tests' comment on this), so the read-only guarantee is
+        // checked directly against `build_pipeline_widget` here rather than by
+        // screen-scraping for the absence of button text.
+        app.pipeline_sel = Some(done_idx);
+        let view = app
+            .build_pipeline_widget()
+            .expect("a done issue with real assignments still renders a stage rail");
+        assert!(
+            view.stages.iter().all(|s| s.action.is_none()),
+            "no stage of a Done issue may offer a dispatch action: {:?}",
+            view.stages.iter().map(|s| &s.action).collect::<Vec<_>>()
+        );
+        assert!(
+            app.pipeline_action_button().is_none(),
+            "a Done issue must have no [Go]/[Retry] action bar"
+        );
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let before = driver.screen();
+        assert!(
+            driver.screen_contains("Done"),
+            "the revived Done section header must render even while collapsed:\n{before}"
+        );
+        assert!(
+            !before.contains("#201"),
+            "sanity: Done starts collapsed by default, so its rows aren't \
+             visible yet — the whole point of #50's \"lazy, don't load until \
+             opened\" ask:\n{before}"
+        );
+
+        // Expand the Done section via its chevron — painted just left of the
+        // label, same convention as
+        // `tuidriver_pipeline_new_milestone_chevron_click_expands_and_persists`.
+        let (label_x, label_y) = driver
+            .find("Done")
+            .unwrap_or_else(|| panic!("Done section header not found:\n{before}"));
+        driver.click((label_x - 2.0).max(0.0), label_y);
+
+        let expanded = driver.screen();
+        assert!(
+            expanded.contains("#201"),
+            "expanding Done must reveal its issues:\n{expanded}"
+        );
+
+        // Select the row and confirm the detail pane shows the same shape as
+        // a live issue's Overview: the stage rail (#1199/#2405's
+        // `pipeline_tab_body_list_for` + the PipelineView box above it).
+        let (row_x, row_y) = driver
+            .find("#201")
+            .unwrap_or_else(|| panic!("issue #201 row not found after expanding Done:\n{expanded}"));
+        driver.click(row_x, row_y);
+
+        let detail = driver.screen();
+        assert!(
+            driver.find("Work").is_some(),
+            "selecting a Done issue must show its Work→Test→Review→Merge \
+             stage rail, same as a live issue:\n{detail}"
+        );
     }
 
     /// The default 24h window includes the 30 min / 1 h / 3 h issues and
@@ -36196,7 +36324,7 @@
             .iter()
             .find(|i| i.action_id.as_deref() == Some("drive-queue-view-in-pipeline"))
             .expect("View in Pipeline must be present");
-        assert_eq!(item.disabled_reason.as_deref(), Some("see Completed tab"));
+        assert_eq!(item.disabled_reason.as_deref(), Some("too old for Done"));
     }
 
     /// #2449 AC5: the Board's "View in Pipeline" entry (`jump_board_to_pipeline`,
@@ -36561,11 +36689,11 @@
             "#1598: 'View in Pipeline' must still appear in the menu:\n{menu_screen}"
         );
         assert!(
-            menu_screen.contains("see Completed tab"),
-            "#1598 + #2405: the disabled item must show a visible reason \
-             instead of a silent disabled==true with no explanation — and \
-             since the Done section is gone, that reason now points at the \
-             Completed grid:\n{menu_screen}"
+            menu_screen.contains("too old for Done"),
+            "#1598 + #2405 + #50: the disabled item must show a visible \
+             reason instead of a silent disabled==true with no explanation \
+             — this issue's near-epoch `last_attempt` is outside the \
+             revived Done section's bounded window, so the reason says so:\n{menu_screen}"
         );
         driver.press_named(quadraui::NamedKey::Escape); // dismiss the menu
 

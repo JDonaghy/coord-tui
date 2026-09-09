@@ -3922,12 +3922,10 @@ pub struct CoordApp {
     /// inside a segmented control.  `FormLayout` bounds are **form-local**
     /// (origin `(0, 0)`), so hit-testing subtracts the stored rect.
     pub(crate) completed_form_layout: std::cell::RefCell<Option<(Rect, FormLayout)>>,
-    /// The completed grid's last-painted `DataTable` geometry, with the rect
-    /// it was painted into.  Same render-then-hit-test pattern (and same
-    /// reason for carrying the rect) as `reports_table_layout`: the table does
-    /// not start at the main panel's origin, so a bare `pos - main_b` would
-    /// mis-hit-test by the control row's height.
-    pub(crate) completed_table_layout: std::cell::RefCell<Option<(Rect, DataTableLayout)>>,
+    // #72: the completed grid's last-painted `DataTable` geometry moved into
+    // `completed_grid.table.layout` (a `TableState`, shared shape with the
+    // other three tables) — see that field's own doc for the
+    // render-then-hit-test contract it still carries.
 
     // ── #816: PTY-panic modal ─────────────────────────────────────────────────
     /// When `Some`, a dismissible modal dialog is shown explaining that a vt100
@@ -4506,7 +4504,6 @@ impl CoordApp {
             // #2405: completed-issues grid defaults (24h / all repos).
             completed_grid: CompletedGrid::default(),
             completed_form_layout: std::cell::RefCell::new(None),
-            completed_table_layout: std::cell::RefCell::new(None),
             // #816: no pending PTY-panic dialog on startup.
             pty_panic_dialog: None,
             // #1059: no pending Gate A dispatch-failure dialog on startup.

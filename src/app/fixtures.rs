@@ -448,7 +448,6 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         // #2405: completed-issues grid defaults (24h / all repos).
         completed_grid: CompletedGrid::default(),
         completed_form_layout: std::cell::RefCell::new(None),
-        completed_table_layout: std::cell::RefCell::new(None),
         // #816: no pending PTY-panic dialog in test helpers.
         pty_panic_dialog: None,
         // #1059: no pending Gate A dispatch-failure dialog in test helpers.

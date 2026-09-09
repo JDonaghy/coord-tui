@@ -2262,7 +2262,7 @@ impl CoordApp {
             })
             .collect();
 
-        Self::sort_completed_rows(&mut rows, self.completed_grid.sort);
+        Self::sort_completed_rows(&mut rows, self.completed_grid.table.sort);
         Ok(rows)
     }
 
@@ -2272,7 +2272,10 @@ impl CoordApp {
     /// A secondary key of `issue_ref` keeps the order total, so a repaint
     /// can never reshuffle rows that tie on the sort column (two issues that
     /// merged in the same second, or a whole column of `—`).
-    pub(crate) fn sort_completed_rows(rows: &mut [CompletedRow], sort: Option<(usize, bool)>) {
+    pub(crate) fn sort_completed_rows(
+        rows: &mut [CompletedRow],
+        sort: Option<(usize, SortDirection)>,
+    ) {
         use std::cmp::Ordering;
         // `None` sorts last in *both* directions: a missing timestamp is an
         // absence, not a small value, and burying it under an ascending sort
@@ -2285,7 +2288,7 @@ impl CoordApp {
                 (None, None) => Ordering::Equal,
             }
         }
-        let Some((col, ascending)) = sort else {
+        let Some((col, dir)) = sort else {
             rows.sort_by(|a, b| {
                 opt_cmp(b.finished_at, a.finished_at).then_with(|| a.issue_ref.cmp(&b.issue_ref))
             });
@@ -2298,7 +2301,10 @@ impl CoordApp {
                 2 => opt_cmp(a.started_at, b.started_at),
                 _ => opt_cmp(a.finished_at, b.finished_at),
             };
-            let primary = if ascending { primary } else { primary.reverse() };
+            let primary = match dir {
+                SortDirection::Ascending => primary,
+                SortDirection::Descending => primary.reverse(),
+            };
             primary.then_with(|| a.issue_ref.cmp(&b.issue_ref))
         });
     }
@@ -2476,7 +2482,7 @@ impl CoordApp {
             2 => self.completed_grid.repo = value,
             _ => return,
         }
-        self.completed_grid.scroll = 0;
+        self.completed_grid.table.scroll = 0;
         self.completed_grid.detail = None;
     }
 
@@ -2526,19 +2532,16 @@ impl CoordApp {
     /// already opens in), a second click flips to ascending, a third clears
     /// back to the default newest-finished-first order.
     ///
-    /// Same three-state cycle as `reports_sort_by_column`, so a header click
-    /// means the same thing in both grids.
+    /// Same three-state cycle as `reports_sort_by_column` — just started in
+    /// the opposite direction — so #72 generalised it as
+    /// `TableState::sort_by_column`'s `first` parameter rather than
+    /// special-casing Completed.
     pub(crate) fn completed_sort_by_column(&mut self, col: usize) -> bool {
-        if col >= Self::COMPLETED_COLUMNS.len() {
-            return false;
-        }
-        self.completed_grid.sort = match self.completed_grid.sort {
-            Some((c, false)) if c == col => Some((col, true)),
-            Some((c, true)) if c == col => None,
-            _ => Some((col, false)),
-        };
-        self.completed_grid.scroll = 0;
-        true
+        self.completed_grid.table.sort_by_column(
+            col,
+            Self::COMPLETED_COLUMNS.len(),
+            SortDirection::Descending,
+        )
     }
 
     /// Open the detail view for the `n`-th row of the current grid.
@@ -2715,7 +2718,7 @@ impl CoordApp {
         // `render_reports_result`: every path below that paints a table
         // re-sets it, and every path that doesn't must leave a click with
         // nothing to hit rather than a table that is no longer on screen.
-        *self.completed_table_layout.borrow_mut() = None;
+        *self.completed_grid.table.layout.borrow_mut() = None;
         *self.completed_form_layout.borrow_mut() = None;
 
         if self.completed_grid.detail.is_some() {
@@ -2781,17 +2784,8 @@ impl CoordApp {
             columns: Self::completed_columns(),
             rows: Self::completed_data_rows(&rows),
             selected_idx: None,
-            scroll_offset: self.completed_grid.scroll.min(rows.len().saturating_sub(1)),
-            sort: self.completed_grid.sort.map(|(c, asc)| {
-                (
-                    c,
-                    if asc {
-                        SortDirection::Ascending
-                    } else {
-                        SortDirection::Descending
-                    },
-                )
-            }),
+            scroll_offset: self.completed_grid.table.scroll.min(rows.len().saturating_sub(1)),
+            sort: self.completed_grid.table.sort,
             has_focus: false,
             show_scrollbar: true,
             min_total_width: None,
@@ -2799,13 +2793,19 @@ impl CoordApp {
             // it there: `DataTableLayout::hit_test` has no concept of
             // `h_scroll` while the renderer subtracts it, so a non-zero value
             // would shift the painted headers out from under the hit-test and
-            // route sort clicks to the wrong column.
+            // route sort clicks to the wrong column. Completed doesn't drive
+            // `table.h_scroll` (unlike Queue), so this is the same "always
+            // 0.0" as before #72, not a behavior change.
             h_scroll: 0.0,
-            column_overrides: Vec::new(),
+            // #72: resize now flows through the shared `TableState` — this
+            // is the "field and a match arm" the extraction promised (see
+            // `completed_main_click`'s `HeaderDivider` arm and
+            // `completed_update_resize_drag`).
+            column_overrides: self.completed_grid.table.column_overrides.clone(),
             footer: None,
         };
         let layout = backend.draw_data_table(body_rect, &table, None);
-        *self.completed_table_layout.borrow_mut() = Some((body_rect, layout));
+        *self.completed_grid.table.layout.borrow_mut() = Some((body_rect, layout));
     }
 
     /// The open row's detail: the Overview tab's content for that issue —
@@ -2872,28 +2872,23 @@ impl CoordApp {
         }
     }
 
+    /// Minimum width (cells) either half of a dragged divider pair may be
+    /// squeezed to — same floor as `AUDIT_MIN_COLUMN_WIDTH` /
+    /// `REPORTS_MIN_COLUMN_WIDTH` / `QUEUE_MIN_COLUMN_WIDTH`.
+    pub(crate) const COMPLETED_MIN_COLUMN_WIDTH: f32 = 4.0;
+
     /// Hit-test a click against the last-painted grid, or `None` when no grid
     /// is on screen. Same render-then-hit-test pattern (and same cached-rect
-    /// reason) as `reports_table_hit`.
+    /// reason) as `reports_table_hit`, now via the shared `TableState::hit`.
     pub(crate) fn completed_table_hit(&self, pos: Point) -> Option<DataTableHit> {
         let n = self.completed_rows().ok()?.len();
-        if n == 0 {
-            return None;
-        }
-        let cache = self.completed_table_layout.borrow();
-        let (rect, layout) = cache.as_ref()?;
-        Some(layout.hit_test(
-            pos.x - rect.x,
-            pos.y - rect.y,
-            self.completed_grid.scroll,
-            n,
-        ))
+        self.completed_grid.table.hit(pos, n)
     }
 
     /// How many body rows the painted grid can show — the clamp the wheel
     /// handler needs. `None` when no grid is on screen.
     pub(crate) fn completed_visible_rows(&self) -> Option<usize> {
-        let cache = self.completed_table_layout.borrow();
+        let cache = self.completed_grid.table.layout.borrow();
         let (_, layout) = cache.as_ref()?;
         Some(layout.visible_rows.max(1))
     }
@@ -2906,12 +2901,26 @@ impl CoordApp {
         };
         let visible = self.completed_visible_rows().unwrap_or(1);
         let max = rows.len().saturating_sub(visible);
-        let next = (self.completed_grid.scroll as isize + delta).clamp(0, max as isize) as usize;
-        if next == self.completed_grid.scroll {
+        let next =
+            (self.completed_grid.table.scroll as isize + delta).clamp(0, max as isize) as usize;
+        if next == self.completed_grid.table.scroll {
             return false;
         }
-        self.completed_grid.scroll = next;
+        self.completed_grid.table.scroll = next;
         true
+    }
+
+    /// Continue an in-progress Completed-grid column-resize drag, started by
+    /// a `MouseDown` on a `DataTableHit::HeaderDivider` (`completed_main_
+    /// click`'s `HeaderDivider` arm) and released on `MouseUp` alongside the
+    /// other tables' drags (`events.rs`). #72: this — a field
+    /// (`completed_grid.table.resize_col`) and a match arm — is the whole
+    /// cost of Completed's resize, which is the point of the extraction:
+    /// the arithmetic itself lives once, in `TableState::update_resize_drag`.
+    pub(crate) fn completed_update_resize_drag(&mut self, pos: Point) -> bool {
+        self.completed_grid
+            .table
+            .update_resize_drag(pos, Self::COMPLETED_MIN_COLUMN_WIDTH)
     }
 
     /// Route a click that landed inside the `Completed` tab's content rect.
@@ -2937,6 +2946,16 @@ impl CoordApp {
         match self.completed_table_hit(pos) {
             Some(DataTableHit::Header { col }) => self.completed_sort_by_column(col),
             Some(DataTableHit::Row { idx }) => self.completed_open_row(idx),
+            // #72: a divider hit begins a column-resize drag, continued in
+            // `completed_update_resize_drag` (wired into `events.rs`'s
+            // `MouseMoved` arm) and released on `MouseUp` alongside
+            // Audit/Reports/Queue's own `resize_col`s. `hit_test` gives the
+            // divider grab zone priority over the header body, so this arm
+            // is what keeps a drag from also toggling the sort.
+            Some(DataTableHit::HeaderDivider { col }) => {
+                self.completed_grid.table.resize_col = Some(col);
+                true
+            }
             _ => false,
         }
     }

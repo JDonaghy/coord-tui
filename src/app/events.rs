@@ -4626,6 +4626,17 @@ impl CoordApp {
                     {
                         redraw |= self.pipeline_log_apply_vscroll(pos);
                     }
+                    // #72: continue an in-progress Completed-grid
+                    // column-resize drag, started by a `MouseDown` on a
+                    // `DataTableHit::HeaderDivider` (`completed_main_click`)
+                    // — same precedence and shape as the Audit/Reports/Queue
+                    // blocks above.
+                    if self.active_view == SidebarView::Pipeline
+                        && self.pipeline_detail_tab == PipelineDetailTab::Completed
+                        && buttons.left
+                    {
+                        redraw |= self.completed_update_resize_drag(pos);
+                    }
                     // #2017: resize-cursor hover affordance over the
                     // separator — "should show a resize affordance on hover
                     // if the backend supports it". `set_cursor` no-ops on
@@ -4799,6 +4810,10 @@ impl CoordApp {
                     released |= std::mem::take(&mut self.queue_vscroll_drag);
                     released |= std::mem::take(&mut self.queue_hscroll_drag);
                     released |= std::mem::take(&mut self.queue_detail_vscroll_drag);
+                    // #72: end an in-progress Completed-grid column-resize
+                    // drag, same shape as Audit/Reports/Queue's own
+                    // `resize_col`s just above.
+                    released |= self.completed_grid.table.resize_col.take().is_some();
                     // #64: end a Pipeline Log tab vertical-scrollbar-track drag.
                     released |= std::mem::take(&mut self.pipeline_log_scrollbar_drag);
                     // #2288 (ms-65 §9): end a Board pane divider drag.

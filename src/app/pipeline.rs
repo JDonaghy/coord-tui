@@ -2851,6 +2851,11 @@ impl CoordApp {
         );
         match self.completed_detail_index() {
             Some(idx) => {
+                // #55: same stash `render_content`'s Overview arm does — see
+                // `last_stage_content_cols`'s doc comment for why one shared
+                // `Cell` is safe here (this tab and Overview never paint in
+                // the same frame).
+                self.last_stage_content_cols.set(body_rect.width as usize);
                 backend.draw_list(body_rect, &self.pipeline_tab_body_list_for(Some(idx)))
             }
             None => backend.draw_list(

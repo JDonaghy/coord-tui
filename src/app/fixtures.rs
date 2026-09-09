@@ -194,6 +194,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         last_log_panel_cols: std::cell::Cell::new(120),
         last_issue_panel_cols: std::cell::Cell::new(120),
         board_pane_issue_cols: std::cell::RefCell::new(Vec::new()),
+        last_stage_content_cols: std::cell::Cell::new(120),
         purge_days: 7,
         sidebar_action_bar_hover: ToolbarHoverTracker::new(),
         panel_toolbar_hover: ToolbarHoverTracker::new(),

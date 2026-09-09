@@ -22616,6 +22616,110 @@
         );
     }
 
+    #[test]
+    fn stage_content_review_word_wraps_long_finding_instead_of_clipping() {
+        // #55: a reviewer's finding is routinely one logical line of
+        // 300-800 chars with no hard wrap. The old code clipped every line
+        // at a fixed 180 chars with no ellipsis or continuation row, so a
+        // truncated finding was visually indistinguishable from a complete
+        // one. Pin the stashed pane width explicitly (rather than depending
+        // on a real render pass) so the wrap budget in this test is exact.
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.last_stage_content_cols.set(60);
+
+        let long_line = format!("{} TAILMARKER", "finding ".repeat(40).trim());
+        assert!(long_line.chars().count() > 180, "fixture must exceed the old 180-char clip");
+        let mut review = _stage_assignment("rev-wrap", "review", 200.0, "done");
+        review.issue_number = 42;
+        review.review_verdict = Some("approve".to_string());
+        review.review_findings =
+            Some(serde_json::json!({"verdict": "approve", "body": long_line}).to_string());
+        app.data.assignments.push(review);
+
+        let rows = app.stage_content_review(&app.pipeline_issues[0].clone());
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|r| r.text.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+
+        // The tail must survive — the old code discarded everything past
+        // column 180 with no trace it had ever been cut.
+        assert!(
+            joined.iter().any(|l| l.contains("TAILMARKER")),
+            "expected the wrapped tail to survive; got rows: {joined:?}",
+        );
+        // Every produced row must fit the stashed budget — proves this is a
+        // wrap (many short rows), not a second, wider clip (one long row).
+        for line in &joined {
+            assert!(
+                line.chars().count() <= 60,
+                "wrapped row exceeds the stashed pane width of 60: {line:?}",
+            );
+        }
+        // A single 300+ char line at 60 columns has to become several rows.
+        let body_rows = joined
+            .iter()
+            .filter(|l| l.trim_start().starts_with("finding"))
+            .count();
+        assert!(body_rows > 1, "expected multiple wrapped rows; got: {joined:?}");
+    }
+
+    #[test]
+    fn review_stage_detail_panel_shows_wrapped_tail_of_long_finding_on_screen() {
+        // #55 acceptance: drive the real `event → handle → render` path
+        // (not just the row builder) and assert the tail of a long finding
+        // is actually painted on screen at a normal window width. Asserting
+        // on the builder's `Vec<ListItem>` alone (as the test above does)
+        // would not have caught a bug where wrapping happened in the data
+        // but the render path still clipped/cut off what reached the
+        // screen — this is the black-box check CLAUDE.md requires for a
+        // user-visible rendering fix.
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Overview;
+        // `make_pipeline_app`'s BoardData carries pipeline_default_gates =
+        // ["review", "merge"], so issue 42's stage list is
+        // ["work", "review", "merge"] — focus index 1 ("review").
+        let stage_names = app.pipeline_stage_names_for_issue(&app.pipeline_issues[0]);
+        let review_idx = stage_names
+            .iter()
+            .position(|s| s == "review")
+            .expect("review must be one of this issue's stages");
+        app.pipeline_focused_stage = Some(review_idx);
+
+        let long_line = format!("{} TAILMARKER", "finding ".repeat(60).trim());
+        let mut review = _stage_assignment("rev-wrap", "review", 200.0, "done");
+        review.issue_number = 42;
+        review.review_verdict = Some("approve".to_string());
+        review.review_findings =
+            Some(serde_json::json!({"verdict": "approve", "body": long_line}).to_string());
+        app.data.assignments.push(review);
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        assert!(
+            driver.screen_contains("TAILMARKER"),
+            "the wrapped tail of a 500+ char finding must be visible on \
+             screen at a normal window width, not silently discarded past \
+             column 180:\n{}",
+            driver.screen(),
+        );
+        // Sanity check that wrapping, not an unbroken overflowing row, is
+        // what put it there: the full unwrapped line can't appear verbatim
+        // on a 120-column screen.
+        assert!(
+            !driver.screen_contains(&long_line),
+            "the full 500+ char line must not appear as one unbroken row \
+             on a 120-col screen:\n{}",
+            driver.screen(),
+        );
+    }
+
     // ── #2497: closed-issue body hydration (mirrors #1337's findings pattern) ──
 
     #[test]

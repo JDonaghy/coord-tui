@@ -343,6 +343,11 @@ impl ShellApp for CoordApp {
                             } else {
                                 backend.draw_list(pv_rect, &self.pipeline_placeholder_list());
                             }
+                            // #55: stash content width so stage_content_review /
+                            // stage_content_test / stage_content_plan can
+                            // word-wrap prose to the viewport instead of
+                            // clipping it at a fixed character count.
+                            self.last_stage_content_cols.set(meta_rect.width as usize);
                             backend.draw_list(meta_rect, &self.pipeline_tab_body_list());
                         }
                         PipelineDetailTab::Issue => {
@@ -3634,6 +3639,17 @@ impl CoordApp {
         // styling lands once quadraui#262 ships and we adopt it).
         // Filter out the coord:review header — that's machine-readable
         // metadata, not user-facing prose.
+        //
+        // #55: a reviewer's finding is routinely one logical line of
+        // 300-800 chars with no hard wrap. Word-wrap to the pane width
+        // stashed by `render_content` (same `word_wrap` + stash-a-Cell
+        // pattern as the Log tab's #385 and the Issue tab's #669) instead
+        // of clipping at a fixed character count — the old behaviour
+        // silently discarded everything past column 180 with no
+        // indication the finding was cut short.
+        let wrap_width = self.last_stage_content_cols.get().max(40);
+        let indent = "   ";
+        let prose_wrap = wrap_width.saturating_sub(indent.len());
         for line in body
             .lines()
             .filter(|l| !l.trim_start().starts_with("<!-- coord:review"))
@@ -3641,8 +3657,9 @@ impl CoordApp {
             if line.is_empty() {
                 rows.push(kv_item("", "", None));
             } else {
-                let trimmed: String = line.chars().take(180).collect();
-                rows.push(kv_item("", &format!("   {trimmed}"), None));
+                for wrapped in word_wrap(line, prose_wrap) {
+                    rows.push(kv_item("", &format!("{indent}{wrapped}"), None));
+                }
             }
         }
         rows
@@ -3770,10 +3787,21 @@ impl CoordApp {
                     rows.push(kv_item("", &format!("   {display}"), Some(status_color)));
 
                     // Display captured output lines below the step row.
+                    // #55: word-wrap rather than clip at a fixed column —
+                    // same treatment as the review findings body and the
+                    // build-log tail below.
                     if let Some(output) = self.test_step_output.get(&key) {
+                        let wrap_width = self.last_stage_content_cols.get().max(40);
+                        let indent = "     ";
+                        let prose_wrap = wrap_width.saturating_sub(indent.len());
                         for line in output.lines().take(50) {
-                            let trimmed: String = line.chars().take(160).collect();
-                            rows.push(kv_item("", &format!("     {trimmed}"), Some(dim_color)));
+                            for wrapped in word_wrap(line, prose_wrap) {
+                                rows.push(kv_item(
+                                    "",
+                                    &format!("{indent}{wrapped}"),
+                                    Some(dim_color),
+                                ));
+                            }
                         }
                     }
                 }
@@ -3859,9 +3887,15 @@ impl CoordApp {
                 Some(Color::rgb(160, 160, 180)),
             ));
         } else {
+            // #55: word-wrap the build-log tail to the pane width instead of
+            // clipping each line at a fixed column.
+            let wrap_width = self.last_stage_content_cols.get().max(40);
+            let indent = "   ";
+            let prose_wrap = wrap_width.saturating_sub(indent.len());
             for line in content.lines().take(200) {
-                let trimmed: String = line.chars().take(180).collect();
-                rows.push(kv_item("", &format!("   {trimmed}"), None));
+                for wrapped in word_wrap(line, prose_wrap) {
+                    rows.push(kv_item("", &format!("{indent}{wrapped}"), None));
+                }
             }
         }
         rows

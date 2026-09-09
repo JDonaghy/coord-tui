@@ -11478,7 +11478,19 @@
         // 50 synthetic assistant turns — comfortably more than a ~20-row
         // Log body can show at once, so the pane is guaranteed to overflow.
         let now = Instant::now();
-        let (_, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
+        // Bind the `Sender` to a NAMED local (`_tx`, not `_`) so it lives to
+        // the end of the test and the channel stays CONNECTED. Dropping it
+        // here — as `let (_, rx) = …` does, immediately — makes every
+        // `try_recv` in `drain_watch_pool` return `Disconnected`, which bumps
+        // `fail_count` and takes the `needs_reconnect` arm: that calls the
+        // real `spawn_sse_watch("m1", …)`, whose failure pushes `[sse error]`
+        // lines straight into `sse.lines`. Those extra items land between the
+        // paint that cached the scrollbar geometry and the drag that reads it,
+        // so the drag resolves against a stale `max` and stops short of the
+        // last line — a genuine flake that only shows up under the timing of
+        // a full-parallel `cargo test` (#1260's neighbourhood). An
+        // always-empty live channel keeps the item count fixed at 50.
+        let (_tx, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
         let lines: Vec<String> = (0..50)
             .map(|i| {
                 format!(
@@ -11576,7 +11588,11 @@
         app.active_view = SidebarView::Pipeline;
 
         let now = Instant::now();
-        let (_, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
+        // Named `_tx` for the same reason as the drag test above: a dropped
+        // `Sender` makes `drain_watch_pool` reconnect for real and append
+        // `[sse error]` lines, which here could push a one-line log over the
+        // viewport and paint the very scrollbar this test asserts is absent.
+        let (_tx, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
         let log_line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"short log body"}}]}}}}"#
         );

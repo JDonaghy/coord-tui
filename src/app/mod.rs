@@ -2682,6 +2682,22 @@ pub struct CoordApp {
     /// `render_queue_panel`, so a click can never route against a table
     /// that isn't on screen.
     queue_table_layout: std::cell::RefCell<Option<(Rect, DataTableLayout)>>,
+    /// #68: per-column width overrides from a user's header-divider drag on
+    /// the Queue `DataTable`. Always length-`QUEUE_COLUMNS.len()` (11),
+    /// mirroring `audit_column_overrides`'s flat-`Vec` shape rather than
+    /// Reports' keyed one — the Queue grid's columns are a fixed const set
+    /// (`QUEUE_COLUMNS`), so a bare `Vec<Option<f32>>` can never mean the
+    /// wrong thing the way an unkeyed override could for Reports' per-report
+    /// columns. Session-only persistence — matches how filters/scroll
+    /// position already work (no cross-restart UI-state store exists in
+    /// this codebase yet).
+    queue_column_overrides: Vec<Option<f32>>,
+    /// #68: index of the Queue-grid column being resized (the column to the
+    /// LEFT of the divider being dragged), set by a `MouseDown` on a
+    /// `DataTableHit::HeaderDivider` and cleared on `MouseUp`. `None` when no
+    /// resize drag is in progress. Mirrors `audit_resize_col` /
+    /// `reports_resize_col`.
+    queue_resize_col: Option<usize>,
     /// #1867 (Q-2): vertical scroll offset into the selected row's issue
     /// body, rendered in the bottom ~40% of the Queue panel. Stepped by
     /// `scroll_focused_content` (keyboard, once focus has moved off the grid
@@ -4188,6 +4204,8 @@ impl CoordApp {
             queue_scroll: 0,
             queue_sort: None,
             queue_table_layout: std::cell::RefCell::new(None),
+            queue_column_overrides: vec![None; Self::QUEUE_COLUMNS.len()],
+            queue_resize_col: None,
             queue_detail_scroll: 0,
             last_queue_detail_cols: std::cell::Cell::new(120),
             last_queue_detail_visible_rows: std::cell::Cell::new(10),

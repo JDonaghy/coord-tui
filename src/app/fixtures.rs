@@ -174,6 +174,8 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         queue_scroll: 0,
         queue_sort: None,
         queue_table_layout: std::cell::RefCell::new(None),
+        queue_column_overrides: vec![None; CoordApp::QUEUE_COLUMNS.len()],
+        queue_resize_col: None,
         queue_detail_scroll: 0,
         last_queue_detail_cols: std::cell::Cell::new(120),
         last_queue_detail_visible_rows: std::cell::Cell::new(10),

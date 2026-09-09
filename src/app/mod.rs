@@ -2779,6 +2779,30 @@ pub struct CoordApp {
     /// vertical-scrollbar thumb. Same shape as `queue_vscroll_drag`, for
     /// the other pane.
     queue_detail_vscroll_drag: bool,
+    /// #64: the Pipeline Log tab's most recently painted vertical scrollbar
+    /// geometry — the hand-rolled `Scrollbar` `render.rs` constructs for
+    /// `log_rect` (not `Backend::list_vscrollbar`: GTK's `ListView`
+    /// rasteriser doesn't paint a vertical scrollbar at all, so that path
+    /// is a no-op there — see the #64 issue writeup). Cached so `events.rs`
+    /// can hit-test/drag it without a `Backend` handle at click time.
+    /// `None` whenever the log fits (no track painted) or nothing is on
+    /// screen. Mirrors `queue_detail_scrollbar`.
+    pipeline_log_scrollbar: std::cell::RefCell<Option<Scrollbar>>,
+    /// #64: `true` while the operator is dragging the Pipeline Log tab's
+    /// vertical-scrollbar thumb. Same shape as `queue_detail_vscroll_drag`.
+    pipeline_log_scrollbar_drag: bool,
+    /// #64: the Log tab's own visible-row count (`log_rect.height`, i.e.
+    /// below the pinned stage strip), stashed at render time so
+    /// `pipeline_log_apply_vscroll` computes the click-to-scroll fraction
+    /// against the SAME `visible` the painted thumb used — reading
+    /// `last_main_visible_rows` (the whole main panel, strip included)
+    /// here would let a track click disagree with where the thumb was
+    /// actually drawn, the #1867/#1910 lesson.
+    last_log_panel_visible_rows: std::cell::Cell<usize>,
+    /// #64: the Log tab's item count, stashed alongside
+    /// `last_log_panel_visible_rows` at the same render call so the two
+    /// always describe the same frame.
+    last_log_panel_item_count: std::cell::Cell<usize>,
     /// Cached `DialogLayout` from the last prompt-dialog render — used for
     /// click hit-testing on dialog buttons.  Populated while any
     /// `pending_*` prompt dialog is visible; cleared when it dismisses.
@@ -4180,6 +4204,10 @@ impl CoordApp {
             queue_hscroll_drag: false,
             queue_detail_scrollbar: std::cell::RefCell::new(None),
             queue_detail_vscroll_drag: false,
+            pipeline_log_scrollbar: std::cell::RefCell::new(None),
+            pipeline_log_scrollbar_drag: false,
+            last_log_panel_visible_rows: std::cell::Cell::new(40),
+            last_log_panel_item_count: std::cell::Cell::new(0),
             dialog_layout: std::cell::RefCell::new(None),
             pending_restart: None,
             machine_last_contact: std::collections::HashMap::new(),

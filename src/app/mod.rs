@@ -3701,21 +3701,29 @@ pub struct CoordApp {
     /// Escape-while-focused semantics — see `events.rs`).
     audit_type_filter: SidebarFilter,
     /// #1094: per-column width overrides from a user's header-divider drag on
-    /// the Audit `DataTable`. Always length-5 (matching `audit_columns()`'s
-    /// column count) or empty; a `Some(w)` entry replaces that column's
+    /// the Audit `DataTable`. Always length-matched to `audit_columns()`'s
+    /// column count (#70: derived from that list's length, not a hardcoded
+    /// literal) or empty; a `Some(w)` entry replaces that column's
     /// `ColumnWidth` strategy with `Fixed(w)` for the rest of the session.
     /// Session-only persistence — matches how filters/scroll position
     /// already work (no cross-restart UI-state store exists in this
     /// codebase yet).
     audit_column_overrides: Vec<Option<f32>>,
     /// #1094: the most recently rendered Audit `DataTable`'s resolved
-    /// layout, cached by `render_audit_panel` so mouse hit-testing
+    /// layout **and the rect it was painted into** (#70: paired with the
+    /// rect the same way `reports_table_layout` always has been — Audit
+    /// used to get away with taking `main_b` as a parameter on every
+    /// hit-test/scroll/resize-drag call instead, but `drag_divider` needs
+    /// viewport-space input converted through the layout's own `content_x`,
+    /// which needs the rect the layout was painted into, not whatever rect
+    /// the caller happens to be holding at click time), cached by
+    /// `render_audit_panel` so mouse hit-testing
     /// (`audit_table_hit`/`audit_update_resize_drag`) can reuse the exact
-    /// column geometry that was painted, without a `Backend` handle at
-    /// click time. Mirrors the `kanban_layout` render-then-hit-test pattern
-    /// (`RefCell` because `render_audit_panel` takes `&self`). `None` until
-    /// the panel has rendered at least once with rows present.
-    audit_table_layout: std::cell::RefCell<Option<DataTableLayout>>,
+    /// geometry that was painted, without a `Backend` handle at click time.
+    /// Mirrors the `kanban_layout` render-then-hit-test pattern (`RefCell`
+    /// because `render_audit_panel` takes `&self`). `None` until the panel
+    /// has rendered at least once with rows present.
+    audit_table_layout: std::cell::RefCell<Option<(Rect, DataTableLayout)>>,
     /// #1094: index of the column being resized (the column to the LEFT of
     /// the divider being dragged), set by a `MouseDown` on a
     /// `DataTableHit::HeaderDivider` and cleared on `MouseUp`. `None` when no
@@ -4457,8 +4465,9 @@ impl CoordApp {
             audit_type_filter: SidebarFilter::default(),
             // #1094: no column-width overrides / active resize drag / cached
             // layout on startup — all populated by the first render + user
-            // drag, same lifecycle as the fields above.
-            audit_column_overrides: vec![None; 5],
+            // drag, same lifecycle as the fields above. #70: length derived
+            // from `audit_columns()` rather than a hardcoded `5`.
+            audit_column_overrides: vec![None; Self::audit_columns().len()],
             audit_table_layout: std::cell::RefCell::new(None),
             audit_resize_col: None,
             audit_scroll: 0,

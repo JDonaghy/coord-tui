@@ -404,8 +404,9 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         audit_tier: AuditTier::default(),
         audit_type_filter: SidebarFilter::default(),
         // #1094: no column-width overrides / active resize drag / cached
-        // layout in test helpers by default.
-        audit_column_overrides: vec![None; 5],
+        // layout in test helpers by default. #70: length derived from
+        // `audit_columns()` rather than a hardcoded `5`.
+        audit_column_overrides: vec![None; CoordApp::audit_columns().len()],
         audit_table_layout: std::cell::RefCell::new(None),
         audit_resize_col: None,
         audit_scroll: 0,

@@ -181,7 +181,7 @@ impl CoordApp {
     /// `Flex` (genuinely unbounded width, no small vocabulary) so Summary —
     /// the primary content — gets the lion's share of whatever's left after
     /// the three fixed columns.
-    fn audit_columns() -> Vec<Column> {
+    pub(crate) fn audit_columns() -> Vec<Column> {
         vec![
             Column {
                 title: "Time".to_string(),
@@ -217,7 +217,7 @@ impl CoordApp {
     /// main-panel width at a plain 80-col terminal. Below this floor,
     /// `DataTable`'s built-in horizontal scrollbar takes over instead of the
     /// columns (and their text) being squeezed below legible widths.
-    const AUDIT_TABLE_MIN_WIDTH: f32 = 75.0;
+    pub(crate) const AUDIT_TABLE_MIN_WIDTH: f32 = 75.0;
 
     /// `repo#issue` cell text — unchanged from the pre-#1094 joined-string
     /// format (contract §4a); still a single combined cell, not split into
@@ -359,7 +359,11 @@ impl CoordApp {
             footer: None,
         };
         let layout = backend.draw_data_table(list_rect, &table, None);
-        *self.audit_table_layout.borrow_mut() = Some(layout);
+        // #70: cache the rect alongside the layout (mirrors
+        // `reports_table_layout`) so hit-testing/scrolling/resize-drag no
+        // longer need a `main_b` passed back in at click time — see the
+        // field doc on `audit_table_layout`.
+        *self.audit_table_layout.borrow_mut() = Some((list_rect, layout));
 
         if let Some(detail_rect) = detail_rect {
             if let Some(entry) = self.audit_selected() {
@@ -393,15 +397,20 @@ impl CoordApp {
     /// The caller only invokes this in list-only mode — the table isn't
     /// rendered at all while `audit_detail_open` (see `render_audit_panel`),
     /// so there is no layout to hit-test against in that state either way.
-    pub(crate) fn audit_table_hit(&self, pos: Point, main_b: Rect) -> Option<DataTableHit> {
+    ///
+    /// #70: no longer takes `main_b` — the cache now carries the rect it was
+    /// painted into (same shape `reports_table_layout` always used), so a
+    /// caller can no longer accidentally pass a different rect than the one
+    /// the layout was actually painted against.
+    pub(crate) fn audit_table_hit(&self, pos: Point) -> Option<DataTableHit> {
         let n = self.audit_entries().len();
         if n == 0 {
             return None;
         }
         let layout_ref = self.audit_table_layout.borrow();
-        let layout = layout_ref.as_ref()?;
-        let x = pos.x - main_b.x;
-        let y = pos.y - main_b.y;
+        let (rect, layout) = layout_ref.as_ref()?;
+        let x = pos.x - rect.x;
+        let y = pos.y - rect.y;
         // `audit_scroll` matches what `render_audit_panel` builds the table
         // with — must be passed here too (#1094 fix) so a click while
         // scrolled resolves to the right absolute row index rather than
@@ -422,11 +431,11 @@ impl CoordApp {
     /// finding: "hit-testing appears to route straight to
     /// `DataTableHit::Row`"). Callers must check this *before*
     /// `audit_table_hit` so a scrollbar click never reaches row selection.
-    pub(crate) fn audit_scrollbar_hit(&self, pos: Point, main_b: Rect) -> Option<AuditScrollAxis> {
+    pub(crate) fn audit_scrollbar_hit(&self, pos: Point) -> Option<AuditScrollAxis> {
         let layout_ref = self.audit_table_layout.borrow();
-        let layout = layout_ref.as_ref()?;
-        let x = pos.x - main_b.x;
-        let y = pos.y - main_b.y;
+        let (rect, layout) = layout_ref.as_ref()?;
+        let x = pos.x - rect.x;
+        let y = pos.y - rect.y;
         if x < 0.0 || y < 0.0 || x >= layout.viewport_width || y >= layout.viewport_height {
             return None;
         }
@@ -452,17 +461,17 @@ impl CoordApp {
     /// click/drag-to-position scrollbar behaviour (not thumb-relative
     /// dragging). No-op when there's nothing to scroll (empty list, or the
     /// cached layout is stale/missing).
-    pub(crate) fn audit_apply_vscroll(&mut self, pos: Point, main_b: Rect) -> bool {
+    pub(crate) fn audit_apply_vscroll(&mut self, pos: Point) -> bool {
         let n = self.audit_entries().len();
         if n == 0 {
             return false;
         }
         let (track_y0, track_h, visible_rows) = {
             let layout_ref = self.audit_table_layout.borrow();
-            let Some(layout) = layout_ref.as_ref() else {
+            let Some((rect, layout)) = layout_ref.as_ref() else {
                 return false;
             };
-            let track_y0 = main_b.y + layout.header_height;
+            let track_y0 = rect.y + layout.header_height;
             let track_h = (layout.viewport_height
                 - layout.header_height
                 - layout.h_scrollbar_height)
@@ -482,14 +491,14 @@ impl CoordApp {
     /// #1094 fix: same as `audit_apply_vscroll` but for the horizontal
     /// scrollbar — jumps `audit_h_scroll` to the column offset implied by
     /// the click/drag position along the horizontal track.
-    pub(crate) fn audit_apply_hscroll(&mut self, pos: Point, main_b: Rect) -> bool {
+    pub(crate) fn audit_apply_hscroll(&mut self, pos: Point) -> bool {
         let (track_x0, track_w, content_w, visible_w) = {
             let layout_ref = self.audit_table_layout.borrow();
-            let Some(layout) = layout_ref.as_ref() else {
+            let Some((rect, layout)) = layout_ref.as_ref() else {
                 return false;
             };
             let visible_w = (layout.viewport_width - layout.scrollbar_width).max(1.0);
-            (main_b.x, visible_w, layout.content_width, visible_w)
+            (rect.x, visible_w, layout.content_width, visible_w)
         };
         let max_scroll = (content_w - visible_w).max(0.0);
         self.audit_h_scroll = if max_scroll <= 0.0 {
@@ -516,35 +525,77 @@ impl CoordApp {
 
     /// Minimum width (cells) a column may be dragged down to — keeps a
     /// resize drag from collapsing a column to zero/negative width.
-    const AUDIT_MIN_COLUMN_WIDTH: f32 = 4.0;
+    pub(crate) const AUDIT_MIN_COLUMN_WIDTH: f32 = 4.0;
 
     /// #1094 deliverable 4: continue an in-progress column-resize drag on
     /// the Audit `DataTable`, started by a `MouseDown` on a
     /// `DataTableHit::HeaderDivider` (`audit_resize_col` set by the caller —
-    /// see `mouse_main_click` in `events.rs`). Computes the new width for
-    /// the dragged column from the cursor's current x position relative to
-    /// that column's left edge (per the last-cached `audit_table_layout`)
-    /// and stores it in `audit_column_overrides` — session-only
-    /// persistence, matching how the panel's filters and scroll position
-    /// already work (no cross-restart UI-state store exists in this
-    /// codebase yet). Returns `true` (redraw needed) only while a drag is
-    /// actually in progress and the cached layout still has that column.
-    pub(crate) fn audit_update_resize_drag(&mut self, pos: Point, main_b: Rect) -> bool {
+    /// see `mouse_main_click` in `events.rs`), and stores the result in
+    /// `audit_column_overrides` — session-only persistence, matching how the
+    /// panel's filters and scroll position already work (no cross-restart
+    /// UI-state store exists in this codebase yet).
+    ///
+    /// #70 fix: this used to compute `(pos.x - main_b.x) - column.x`
+    /// directly — mixing viewport-space `pos.x - main_b.x` with
+    /// `column.x`'s *content* space (quadraui's `ResolvedColumn::x` is
+    /// measured from the first column's left edge, not the viewport's, and
+    /// the two only agree when `h_scroll == 0.0`). At any other scroll
+    /// offset the divider drifted from the cursor by exactly
+    /// `audit_h_scroll`, only the dragged column's width changed (every
+    /// other un-overridden `Flex` column got reshuffled by pass 2's
+    /// redistribution once the dragged column's weight left `total_flex` —
+    /// quadraui#521), the table's total content width was not invariant
+    /// under a resize, and there was no `col + 1` guard for the last
+    /// divider.
+    ///
+    /// `DataTableLayout::drag_divider` (quadraui) replaces all of that: it
+    /// converts the incoming viewport-space `pos.x` to content space
+    /// internally (`content_x`, quadraui#550), pins every column at its
+    /// currently-resolved width before adjusting, holds the dragged pair's
+    /// combined width constant (so it moves width **only** between the
+    /// divider's two columns — a visible behaviour change from before, see
+    /// the #70 PR description), clamps both halves against
+    /// `AUDIT_MIN_COLUMN_WIDTH`, and returns the input unchanged when
+    /// `col + 1 >= columns.len()` (no column to hand width back to on the
+    /// last divider). Same call shape `reports_update_resize_drag` already
+    /// uses.
+    ///
+    /// Returns `true` (redraw needed) only while a drag is actually in
+    /// progress against a table that is still on screen.
+    pub(crate) fn audit_update_resize_drag(&mut self, pos: Point) -> bool {
         let Some(col) = self.audit_resize_col else {
             return false;
         };
-        let col_x = {
+        let next = {
             let layout_ref = self.audit_table_layout.borrow();
-            match layout_ref.as_ref().and_then(|l| l.columns.get(col)) {
-                Some(rc) => rc.x,
-                None => return false,
+            let Some((rect, layout)) = layout_ref.as_ref() else {
+                return false;
+            };
+            // A divider only exists between two columns; `col + 1` past the
+            // end (the last divider, or a stale drag against a layout that
+            // no longer has this column) is a no-op — `drag_divider` itself
+            // also guards this, but checking here lets a stale drag report
+            // "no redraw needed" instead of overwriting the overrides with
+            // an unchanged (but reallocated) vec every mouse-move.
+            if col + 1 >= layout.columns.len() {
+                return false;
             }
+            layout.drag_divider(
+                &self.audit_column_overrides,
+                col,
+                pos.x - rect.x,
+                Self::AUDIT_MIN_COLUMN_WIDTH,
+            )
         };
-        let x = pos.x - main_b.x;
-        let new_w = (x - col_x).max(Self::AUDIT_MIN_COLUMN_WIDTH);
-        if let Some(slot) = self.audit_column_overrides.get_mut(col) {
-            *slot = Some(new_w);
+        // Store only a well-formed override set: `drag_divider` sizes its
+        // result from the *layout*, which must agree with
+        // `audit_column_overrides`'s length (both are always
+        // `audit_columns().len()` long, but fail closed rather than store a
+        // mismatched vec if that ever drifts).
+        if next.len() != self.audit_column_overrides.len() {
+            return false;
         }
+        self.audit_column_overrides = next;
         true
     }
 

@@ -4554,10 +4554,10 @@ impl CoordApp {
                         // column-resize drag just above.
                         if let Some(axis) = self.audit_scrollbar_drag {
                             redraw |= match axis {
-                                AuditScrollAxis::Vertical => {
+                                ScrollAxis::Vertical => {
                                     self.audit_apply_vscroll(pos)
                                 }
-                                AuditScrollAxis::Horizontal => {
+                                ScrollAxis::Horizontal => {
                                     self.audit_apply_hscroll(pos)
                                 }
                             };
@@ -5967,10 +5967,10 @@ impl CoordApp {
             if let Some(axis) = self.audit_scrollbar_hit(pos) {
                 self.audit_scrollbar_drag = Some(axis);
                 match axis {
-                    AuditScrollAxis::Vertical => {
+                    ScrollAxis::Vertical => {
                         self.audit_apply_vscroll(pos);
                     }
-                    AuditScrollAxis::Horizontal => {
+                    ScrollAxis::Horizontal => {
                         self.audit_apply_hscroll(pos);
                     }
                 }
@@ -6013,11 +6013,11 @@ impl CoordApp {
         if self.active_view == SidebarView::Queue {
             if let Some(axis) = self.queue_scrollbar_hit(pos) {
                 return match axis {
-                    QueueScrollAxis::Vertical => {
+                    ScrollAxis::Vertical => {
                         self.queue_vscroll_drag = true;
                         self.queue_apply_vscroll(pos)
                     }
-                    QueueScrollAxis::Horizontal => {
+                    ScrollAxis::Horizontal => {
                         self.queue_hscroll_drag = true;
                         self.queue_apply_hscroll(pos)
                     }

@@ -3750,7 +3750,7 @@ pub struct CoordApp {
     /// `MouseDown` that lands in a scrollbar track (`audit_scrollbar_hit`)
     /// and cleared on `MouseUp`. Mutually exclusive with `audit_resize_col`
     /// — a single click starts at most one kind of drag.
-    audit_scrollbar_drag: Option<AuditScrollAxis>,
+    audit_scrollbar_drag: Option<ScrollAxis>,
 
     // ── #1741: Reports ActivityBar panel ─────────────────────────────────────
     //
@@ -3964,26 +3964,18 @@ pub struct CoordApp {
     decompose_chat_error_dialog: Option<String>,
 }
 
-/// #1094 fix: which axis of the Audit `DataTable`'s scrollbars a
+/// #1094 fix, generalized #2043: which axis of a `DataTable`'s scrollbars a
 /// `MouseDown`/drag is currently operating on. `quadraui`'s
 /// `DataTableLayout::hit_test` has no concept of the scrollbar strips it
 /// reserves space for (see the #1094 fix-iteration-1 durable finding), so
-/// coord-tui hit-tests them itself (`audit_scrollbar_hit`) and tracks the
-/// in-progress drag here.
+/// coord-tui hit-tests them itself (`audit_scrollbar_hit`,
+/// `queue_scrollbar_hit`) and tracks the in-progress drag here.
+///
+/// #71: was two byte-for-byte-identical enums (`AuditScrollAxis` and
+/// `QueueScrollAxis`, one per table that needed to report an axis) — merged
+/// into one, since neither name carried any panel-specific meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuditScrollAxis {
-    Vertical,
-    Horizontal,
-}
-
-/// #2043: which axis of the Queue grid's scrollbars a `MouseDown`/drag is
-/// currently operating on. Same shape and reason as `AuditScrollAxis` —
-/// `DataTableLayout::hit_test` has no concept of either scrollbar strip, so
-/// `queue_scrollbar_hit` hit-tests them itself and needs to report which one
-/// so the caller (`mouse_main_click`) arms the matching drag flag
-/// (`queue_vscroll_drag` / `queue_hscroll_drag`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum QueueScrollAxis {
+pub(crate) enum ScrollAxis {
     Vertical,
     Horizontal,
 }

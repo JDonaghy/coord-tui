@@ -1561,27 +1561,17 @@ fn extract_tool_calls(json: &str) -> Vec<(String, String)> {
 /// `issue_body_list`. TODO(#217): pass active_theme once this function
 /// accepts a theme parameter; for now the quadraui dark default matches the
 /// other two adapter call sites.
+///
+/// #58: the verdict/body split used to live inline here; it now delegates to
+/// [`parse_review_block`] so [`review_body_duplicates_assistant_text`] can
+/// reuse the exact same extraction (rendered items and the dedup check must
+/// see byte-identical body text, or the "substantially the same" comparison
+/// would silently stop matching).
 fn extract_review_items(line: &str, wrap_width: usize) -> Vec<ListItem> {
     let mut items: Vec<ListItem> = Vec::new();
-    // Find the verdict marker. The result text is itself JSON-encoded inside
-    // the result field, so `\n` appears as the two-char sequence `\\n`.
-    let verdict_marker = "REVIEW_VERDICT:";
-    let body_marker = "REVIEW_BODY:";
-    let end_marker = "END_REVIEW";
-
-    let v_pos = line.find(verdict_marker);
-    let b_pos = line.find(body_marker);
-    let (Some(v_pos), Some(b_pos)) = (v_pos, b_pos) else {
+    let Some((verdict, body)) = parse_review_block(line) else {
         return items;
     };
-
-    // Verdict word: between the verdict marker and the next newline marker.
-    let verdict_after = &line[v_pos + verdict_marker.len()..];
-    let verdict_end = verdict_after
-        .find("\\n")
-        .or_else(|| verdict_after.find('\n'))
-        .unwrap_or(verdict_after.len());
-    let verdict = verdict_after[..verdict_end].trim().trim_matches(',');
 
     // Header line, coloured by outcome.
     let color = if verdict == "approve" {
@@ -1592,6 +1582,52 @@ fn extract_review_items(line: &str, wrap_width: usize) -> Vec<ListItem> {
         Color::rgb(180, 180, 100)
     };
     items.push(activity_item(&format!("[review] {}", verdict), color));
+
+    let indent = "  ";
+    let prose_wrap = wrap_width.saturating_sub(indent.len());
+    let md_theme = quadraui::Theme::default();
+    let rendered = quadraui::render_markdown_to_styled_wrapped(&body, &md_theme, prose_wrap);
+    for md_line in rendered.lines {
+        let mut spans = Vec::with_capacity(md_line.spans.len() + 1);
+        spans.push(StyledSpan::plain(indent));
+        spans.extend(md_line.spans);
+        items.push(ListItem {
+            text: StyledText { spans },
+            icon: None,
+            detail: None,
+            decoration: Decoration::Normal,
+        });
+    }
+    items
+}
+
+/// Parse the `REVIEW_VERDICT` / `REVIEW_BODY` block out of a result event's
+/// `result` string, before any rendering. Returns `(verdict, body)` — `body`
+/// already un-escaped (JSON `\n`/`\t`/`\"`/`\\` sequences turned into real
+/// characters) with its leading newline(s) trimmed, exactly as
+/// [`extract_review_items`] used to compute it inline. Returns `None` when
+/// `line` isn't a structured review (a normal work/plan completion has no
+/// `REVIEW_VERDICT:`/`REVIEW_BODY:` markers at all).
+fn parse_review_block(line: &str) -> Option<(String, String)> {
+    // Find the verdict marker. The result text is itself JSON-encoded inside
+    // the result field, so `\n` appears as the two-char sequence `\\n`.
+    let verdict_marker = "REVIEW_VERDICT:";
+    let body_marker = "REVIEW_BODY:";
+    let end_marker = "END_REVIEW";
+
+    let v_pos = line.find(verdict_marker)?;
+    let b_pos = line.find(body_marker)?;
+
+    // Verdict word: between the verdict marker and the next newline marker.
+    let verdict_after = &line[v_pos + verdict_marker.len()..];
+    let verdict_end = verdict_after
+        .find("\\n")
+        .or_else(|| verdict_after.find('\n'))
+        .unwrap_or(verdict_after.len());
+    let verdict = verdict_after[..verdict_end]
+        .trim()
+        .trim_matches(',')
+        .to_string();
 
     // Body: between the body marker and END_REVIEW (if present).
     let body_after = &line[b_pos + body_marker.len()..];
@@ -1620,23 +1656,40 @@ fn extract_review_items(line: &str, wrap_width: usize) -> Vec<ListItem> {
     }
     // Skip the leading newline(s) right after `REVIEW_BODY:` so the first
     // rendered line is meaningful content rather than a blank row.
-    let body = unescaped.trim_start_matches('\n');
-    let indent = "  ";
-    let prose_wrap = wrap_width.saturating_sub(indent.len());
-    let md_theme = quadraui::Theme::default();
-    let rendered = quadraui::render_markdown_to_styled_wrapped(body, &md_theme, prose_wrap);
-    for md_line in rendered.lines {
-        let mut spans = Vec::with_capacity(md_line.spans.len() + 1);
-        spans.push(StyledSpan::plain(indent));
-        spans.extend(md_line.spans);
-        items.push(ListItem {
-            text: StyledText { spans },
-            icon: None,
-            detail: None,
-            decoration: Decoration::Normal,
-        });
+    let body = unescaped.trim_start_matches('\n').to_string();
+    Some((verdict, body))
+}
+
+/// #58: true when `assistant_collapsed` — the whitespace-collapsed raw text
+/// of an assistant turn (see [`collapse_ws`]) — substantially repeats the
+/// `REVIEW_BODY` a `result` event's structured block (`result_line`)
+/// carries. `parse_log_content_readable`/`parse_sse_log_more` (chat.rs) call
+/// this to decide whether to retract that turn's already-rendered items
+/// instead of showing the same findings body twice in the Log tab.
+///
+/// Compares whitespace-collapsed text rather than exact bytes: the two
+/// copies go through different unescaping passes (the assistant's own
+/// `message.content[].text` vs. the `result` event's `result` string) and
+/// can differ in incidental whitespace. A `contains` check (rather than
+/// requiring equality) also absorbs the case where the assistant's visible
+/// turn carries the literal `REVIEW_VERDICT:`/`REVIEW_BODY:`/`END_REVIEW`
+/// sentinel text around the same body — i.e. the reviewer's whole visible
+/// answer *is* the structured block — without needing to strip that wrapper
+/// out first. A minimum length guards against a short/trivial body
+/// "matching" and retracting unrelated turn content.
+fn review_body_duplicates_assistant_text(assistant_collapsed: &str, result_line: &str) -> bool {
+    const MIN_MATCH_LEN: usize = 20;
+    if assistant_collapsed.is_empty() {
+        return false;
     }
-    items
+    let Some((_, body)) = parse_review_block(result_line) else {
+        return false;
+    };
+    let body_collapsed = collapse_ws(&body);
+    if body_collapsed.chars().count() < MIN_MATCH_LEN {
+        return false;
+    }
+    assistant_collapsed == body_collapsed || assistant_collapsed.contains(&body_collapsed)
 }
 
 /// Extract the first non-empty text block from an assistant message.

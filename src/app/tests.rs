@@ -6282,6 +6282,74 @@
         );
     }
 
+    // ── #58: review_body_duplicates_assistant_text ────────────────────────────
+
+    #[test]
+    fn review_body_duplicates_assistant_text_matches_plain_prose_copy() {
+        // The common case per the issue: the assistant's final turn is the
+        // review body verbatim (no REVIEW_VERDICT/REVIEW_BODY wrapper in the
+        // visible text), and the result event wraps the same body.
+        let assistant_collapsed =
+            collapse_ws("## Findings\n\nThe cache evicts entries without holding the lock.");
+        let result_line = r#"{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n## Findings\n\nThe cache evicts entries without holding the lock.\nEND_REVIEW"}"#;
+        assert!(review_body_duplicates_assistant_text(
+            &assistant_collapsed,
+            result_line
+        ));
+    }
+
+    #[test]
+    fn review_body_duplicates_assistant_text_matches_wrapper_carrying_copy() {
+        // The other case the doc comment calls out: the assistant's own
+        // visible text *is* the structured block (REVIEW_VERDICT:/
+        // REVIEW_BODY:/END_REVIEW sentinels included) — containment, not
+        // equality, is what catches this.
+        let assistant_collapsed = collapse_ws(
+            "REVIEW_VERDICT: approve\nREVIEW_BODY:\n## Findings\n\nThe cache evicts entries without holding the lock.\nEND_REVIEW",
+        );
+        let result_line = r#"{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n## Findings\n\nThe cache evicts entries without holding the lock.\nEND_REVIEW"}"#;
+        assert!(review_body_duplicates_assistant_text(
+            &assistant_collapsed,
+            result_line
+        ));
+    }
+
+    #[test]
+    fn review_body_duplicates_assistant_text_false_for_unrelated_turn() {
+        // An earlier, unrelated assistant turn (e.g. "I'll check the tests
+        // next.") must never be mistaken for the findings body.
+        let assistant_collapsed = collapse_ws("I'll check the tests next.");
+        let result_line = r#"{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n## Findings\n\nThe cache evicts entries without holding the lock.\nEND_REVIEW"}"#;
+        assert!(!review_body_duplicates_assistant_text(
+            &assistant_collapsed,
+            result_line
+        ));
+    }
+
+    #[test]
+    fn review_body_duplicates_assistant_text_false_for_non_review_result() {
+        // An ordinary work/plan completion has no REVIEW_VERDICT/REVIEW_BODY
+        // block at all — must never "match" and eat real turn content.
+        let assistant_collapsed = collapse_ws("Implemented the fix and ran the tests.");
+        let result_line = r#"{"type":"result","result":"work done"}"#;
+        assert!(!review_body_duplicates_assistant_text(
+            &assistant_collapsed,
+            result_line
+        ));
+    }
+
+    #[test]
+    fn review_body_duplicates_assistant_text_false_for_trivial_body() {
+        // A body shorter than the minimum match length must never trigger a
+        // retraction, even if it happens to appear verbatim in the turn.
+        let assistant_collapsed = collapse_ws("OK, see below.");
+        let result_line = r#"{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\nOK\nEND_REVIEW"}"#;
+        assert!(!review_body_duplicates_assistant_text(
+            &assistant_collapsed,
+            result_line
+        ));
+    }
+
     // ── parse_json_event ──────────────────────────────────────────────────────
 
     #[test]
@@ -27105,6 +27173,117 @@
             driver.screen_contains(LOG_TEXT),
             "Streaming log content must appear on the Pipeline Log tab:\n{}",
             driver.screen()
+        );
+    }
+
+    /// #58: a completed review's log must render its findings body exactly
+    /// once. Before the fix, `parse_sse_log_more` rendered the reviewer's
+    /// final assistant turn as plain prose *and* rendered the same body a
+    /// second time from the terminating `result` event's structured
+    /// `REVIEW_VERDICT`/`REVIEW_BODY` block — the same content, back to
+    /// back, separated only by the coloured `[review] approve` marker.
+    ///
+    /// Fixture: an assistant turn whose visible text *is* the review body
+    /// (no wrapper markers — the "prose" copy from the issue), followed by a
+    /// `result` event whose `result` field carries the same body wrapped in
+    /// `REVIEW_VERDICT:`/`REVIEW_BODY:`/`END_REVIEW` (the "structured" copy).
+    /// Both lines land in `sse.lines` at once (a burst-replayed completed
+    /// review, same as opening the Log tab after the fact), which is the
+    /// scenario the fix targets.
+    #[test]
+    fn tuidriver_completed_review_log_renders_findings_body_once() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        const HEADING: &str = "Guard against reentrant cache eviction";
+        const DETAIL: &str = "The eviction path drops its lock before removing the entry.";
+
+        let asgn = make_assignment_typed("done", 58, "my-repo", Some("review"));
+        let aid = asgn.id.clone();
+
+        let mut app = make_test_app(BoardData {
+            assignments: vec![asgn],
+            ..BoardData::default()
+        });
+
+        app.pipeline_issues = vec![PipelineIssue {
+            number: 58,
+            title: "Review log dedup test issue".to_string(),
+            body: String::new(),
+            repo_slug: "acme/my-repo".to_string(),
+            coord_repo: Some("my-repo".to_string()),
+            matched_labels: vec!["coord".to_string()],
+            all_labels: vec!["coord".to_string(), "status:ready".to_string()],
+            is_closed: false,
+            body_truncated: false,
+            body_len: None,
+        }];
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+        app.active_view = SidebarView::Pipeline;
+
+        // The reviewer's final assistant turn: plain prose, no structured
+        // markers — exactly the "review prose the agent wrote out as its
+        // final turn" the issue describes.
+        // #### note: uses a `###`-delimited raw string — the JSON payload's
+        // `"## {HEADING}` puts a literal `"` directly before the markdown
+        // `##` marker, which would prematurely close a single-`#` raw
+        // string (`"#` is its terminator).
+        let assistant_line = format!(
+            r###"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"## {HEADING}\n\n{DETAIL}"}}]}}}}"###
+        );
+        // The terminating result event: the same body, wrapped in the
+        // structured REVIEW_VERDICT/REVIEW_BODY/END_REVIEW block `coord
+        // notify` parses into `review_findings`.
+        let result_line = format!(
+            r###"{{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n## {HEADING}\n\n{DETAIL}\nEND_REVIEW"}}"###
+        );
+
+        let now = Instant::now();
+        let (_, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
+        app.watch_pool.insert(
+            aid,
+            WatchContext {
+                state: WatchState {
+                    assignment_id: "id-58-done".to_string(),
+                    machine: "testmachine".to_string(),
+                    repo: "my-repo".to_string(),
+                    issue_number: 58,
+                    assignment_type: "review".to_string(),
+                    scroll: usize::MAX,
+                },
+                sse: WatchSseState {
+                    rx,
+                    lines: vec![assistant_line, result_line],
+                    line_times: vec![now, now],
+                    current_turn: 1,
+                    last_event_id: 0,
+                    fail_count: 0,
+                    first_fail_at: None,
+                    done: true,
+                    host: "testmachine".to_string(),
+                    pending_tail: String::new(),
+                },
+                inject_transcript: Vec::new(),
+                inject_sse_offsets: Vec::new(),
+                history_turns: Vec::new(),
+                last_focused_at: now,
+            },
+        );
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        let screen = driver.screen();
+
+        // The coloured verdict header must still be there (#58 "Done when").
+        assert!(
+            screen.contains("[review]") && screen.contains("approve"),
+            "the [review] approve verdict header must survive dedup:\n{screen}"
+        );
+        // The distinctive heading text must appear exactly once, not twice.
+        let heading_count = screen.matches(HEADING).count();
+        assert_eq!(
+            heading_count, 1,
+            "the review's findings body (heading {HEADING:?}) must render \
+             exactly once, not {heading_count} times:\n{screen}"
         );
     }
 

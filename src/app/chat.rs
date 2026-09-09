@@ -48,6 +48,16 @@ pub(crate) fn parse_sse_log_more(
     }
 
     let mut items = Vec::new();
+    // #58: tracks the most recent assistant turn's items/text within *this*
+    // call so a `result` line arriving in the same batch can retract a
+    // duplicate (see `push_readable_line`). A turn whose items were emitted
+    // by an *earlier* call (already committed to the caller's `LogItemsCache`
+    // before the terminating `result` line arrived on a later poll) can't be
+    // retracted this way — that narrow live-streaming race is accepted
+    // (dedup still lands as soon as both lines share a batch, which covers
+    // every non-streaming read and the common case of a burst-replayed
+    // completed review).
+    let mut pending_turn: Option<(usize, String)> = None;
     for (i, line) in new_lines.iter().enumerate() {
         let t = new_times.get(i).copied();
         let elapsed = if json_str(line, "type").as_deref() == Some("assistant") {
@@ -67,18 +77,70 @@ pub(crate) fn parse_sse_log_more(
         } else {
             None
         };
-        items.extend(parse_json_events_readable(
+        push_readable_line(
             line,
             &mut state.turn_n,
             elapsed,
             wrap_width,
-        ));
-        // Surface structured review verdict after result events.
-        if line.contains("\"type\":\"result\"") {
-            items.extend(extract_review_items(line, wrap_width));
-        }
+            &mut items,
+            &mut pending_turn,
+        );
     }
     items
+}
+
+/// Render one stream-json line the #385 "readable" way and append it to
+/// `items`, tracking `pending_turn` so a later `result` line in the same
+/// batch whose structured `REVIEW_BODY` substantially repeats the most
+/// recent assistant turn's prose can retract that turn's items instead of
+/// showing the findings body twice (#58). Shared by `parse_sse_log_more`
+/// (live SSE) and `parse_log_content_readable` (file-based) so the two
+/// paths can't drift apart.
+///
+/// `pending_turn` holds `(start_index_in_items, whitespace_collapsed_text)`
+/// for the assistant turn most recently pushed — cleared whenever a
+/// non-assistant, non-result line intervenes, since dedup only ever applies
+/// to the turn immediately preceding a `result` event (the stream-json shape
+/// is: ..., assistant, result).
+fn push_readable_line(
+    line: &str,
+    turn_n: &mut usize,
+    elapsed: Option<std::time::Duration>,
+    wrap_width: usize,
+    items: &mut Vec<ListItem>,
+    pending_turn: &mut Option<(usize, String)>,
+) {
+    let is_assistant = json_str(line, "type").as_deref() == Some("assistant");
+    let is_result = line.contains("\"type\":\"result\"");
+
+    let start = items.len();
+    items.extend(parse_json_events_readable(line, turn_n, elapsed, wrap_width));
+
+    if is_assistant {
+        let raw = collapse_ws(&extract_text_block_keep_newlines(line));
+        *pending_turn = if raw.is_empty() { None } else { Some((start, raw)) };
+        return;
+    }
+
+    if is_result {
+        // Surface structured review verdict after result events (#57).
+        let review_items = extract_review_items(line, wrap_width);
+        if !review_items.is_empty() {
+            // #58: if the immediately preceding assistant turn already
+            // rendered (substantially) the same body as prose, drop that
+            // copy — the header + body below carries the verdict the prose
+            // turn never had.
+            if let Some((turn_start, turn_text)) = pending_turn.take() {
+                if review_body_duplicates_assistant_text(&turn_text, line) {
+                    items.truncate(turn_start);
+                }
+            }
+        }
+        items.extend(review_items);
+        return;
+    }
+
+    *pending_turn = None;
 }
 
 /// Render SSE log lines using the readable (#385) format: wrapped prose,
@@ -126,6 +188,12 @@ pub(crate) fn parse_log_content_readable(content: &str, wrap_width: usize) -> Ve
     let mut items: Vec<ListItem> = Vec::new();
     let mut turn_n: usize = 0;
     let mut assistant_idx: usize = 0;
+    // #58: see `push_readable_line` — retracts a final assistant turn that
+    // duplicates the structured REVIEW_BODY a following `result` line
+    // carries. This function always re-parses the whole file content in one
+    // pass, so (unlike the live-SSE incremental path) the assistant turn and
+    // its terminating `result` line are always seen in the same call.
+    let mut pending_turn: Option<(usize, String)> = None;
 
     for line in content.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -139,15 +207,14 @@ pub(crate) fn parse_log_content_readable(content: &str, wrap_width: usize) -> Ve
             } else {
                 None
             };
-            items.extend(parse_json_events_readable(
+            push_readable_line(
                 line,
                 &mut turn_n,
                 elapsed,
                 wrap_width,
-            ));
-            if line.contains("\"type\":\"result\"") {
-                items.extend(extract_review_items(line, wrap_width));
-            }
+                &mut items,
+                &mut pending_turn,
+            );
         } else {
             // Plain-text log: surface STATUS: / STUCK: lines.
             if line.contains("STATUS:") {

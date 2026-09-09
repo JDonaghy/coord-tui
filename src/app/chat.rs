@@ -75,7 +75,7 @@ pub(crate) fn parse_sse_log_more(
         ));
         // Surface structured review verdict after result events.
         if line.contains("\"type\":\"result\"") {
-            items.extend(extract_review_items(line));
+            items.extend(extract_review_items(line, wrap_width));
         }
     }
     items
@@ -146,7 +146,7 @@ pub(crate) fn parse_log_content_readable(content: &str, wrap_width: usize) -> Ve
                 wrap_width,
             ));
             if line.contains("\"type\":\"result\"") {
-                items.extend(extract_review_items(line));
+                items.extend(extract_review_items(line, wrap_width));
             }
         } else {
             // Plain-text log: surface STATUS: / STUCK: lines.
@@ -200,7 +200,13 @@ pub(crate) fn extract_assistant_text_after(ctx: &WatchContext, floor: usize) -> 
 }
 
 
-pub(crate) fn chat_transcript_from_pool(ctx: &WatchContext) -> Vec<ChatTurn> {
+/// `wrap_width` is the live chat-overlay transcript width in backend units
+/// (character columns for TUI, pixels for GTK), used only to pick the wrap
+/// point for the markdown adapter below — `quadraui::ChatController` itself
+/// re-wraps every row to its exact paint-time rect regardless, so this only
+/// needs to be in the right ballpark (see `CoordApp::last_chat_panel_cols`'s
+/// doc comment). `wrap_width == 0` falls back to the unwrapped adapter path.
+pub(crate) fn chat_transcript_from_pool(ctx: &WatchContext, wrap_width: usize) -> Vec<ChatTurn> {
     let mut turns: Vec<ChatTurn> = Vec::new();
     // #315: if this context inherited frozen turns from a prior worker in
     // the same chat session (via `maybe_bind_pending_resume`), render them
@@ -244,11 +250,16 @@ pub(crate) fn chat_transcript_from_pool(ctx: &WatchContext) -> Vec<ChatTurn> {
         // Render the whole assistant body through quadraui's markdown adapter
         // so headings, bold, italic, inline code, lists, blockquotes, and
         // fenced code blocks are styled.
+        // #57: use the *_wrapped variant — the plain (unwrapped) adapter left
+        // long lines to run past the overlay edge before ChatController's own
+        // generic re-wrap ever saw them (and that re-wrap doesn't know about
+        // fenced code blocks, so wrapping here first — where the adapter can
+        // still see the block boundaries — keeps fenced content intact).
         // TODO(#217): thread the active_theme through to here once
         // chat_transcript_from_pool accepts a theme parameter; for now the
         // quadraui dark default is close enough for the Dark palette.
         let md_theme = quadraui::Theme::default();
-        let rendered = quadraui::render_markdown_to_styled(body, &md_theme);
+        let rendered = quadraui::render_markdown_to_styled_wrapped(body, &md_theme, wrap_width);
         let mut md_spans: Vec<StyledSpan> = Vec::new();
         for (i, md_line) in rendered.lines.into_iter().enumerate() {
             if i > 0 {

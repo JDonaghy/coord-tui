@@ -23212,6 +23212,98 @@
         assert_digit_cycle_unbroken(&digits, cycle);
     }
 
+    /// #67: GTK's `draw_list` used to paint every row in the **UI** font
+    /// (`chrome_font_description(&self.ui_font)`, default `"Sans 11"`) while
+    /// `char_width()` — the metric `last_log_panel_cols` divides the pane's
+    /// pixel width by to get the wrap budget word_wrap hard-splits against —
+    /// measured the **editor** font (default `"Monospace 11"`). Sans and
+    /// Monospace agree on digit width (tabular figures — why quadraui#910's
+    /// digit-only measurement pass found nothing), so this uses *lettered*
+    /// prose, not the digit cycle the sibling clip tests above use, to catch
+    /// the drift: a hard-split row of `N` characters should paint to within
+    /// one `char_width()` of `N * char_width()` pixels wide, on whichever
+    /// font actually got painted.
+    ///
+    /// Deliberately measures the painted run's own width against its own
+    /// char count — not against a hardcoded expected budget or the pane's
+    /// absolute pixel position — so it's unaffected by `draw_list`'s left
+    /// padding/indent (which shifts `bounds.x`, not `bounds.width`) and by
+    /// exactly how many characters `word_wrap` happened to pack into this
+    /// particular row. Before the `set_ui_font` fix in `render.rs`'s
+    /// `ShellApp::setup`, Sans painted a `char_width()`-budgeted row of
+    /// letters ~23% narrower than that (issue #67's measured ratio),
+    /// failing this assertion by a wide margin; this passes once the UI
+    /// font and the editor font agree.
+    #[cfg(feature = "gtk")]
+    #[test]
+    fn pipeline_log_list_gtk_prose_paints_flush_to_the_wrap_budget() {
+        use quadraui::gtk::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+
+        let mut work = _stage_assignment("gtk-wrap", "work", 200.0, "in_progress");
+        work.issue_number = 42;
+        app.data.assignments.push(work);
+
+        // Letters, not digits (see doc comment): one unbroken ~3000-char
+        // "word" (no spaces) so `word_wrap`'s hard-split path produces full
+        // wrap-budget rows, the first of which starts with STARTMARK.
+        let cycle = "TheQuickBrownFoxJumpsOverTheLazyDogWhileBirdsSing";
+        let long_token: String = cycle.chars().cycle().take(3000).collect();
+        let text = format!("STARTMARK{long_token}");
+        let assistant_line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        );
+        let (mut sse, _tx) = make_sse_state_pair();
+        sse.lines.push(assistant_line);
+        sse.line_times.push(std::time::Instant::now());
+        sse.done = false;
+        let ctx = WatchContext {
+            state: WatchState {
+                assignment_id: "gtk-wrap".to_string(),
+                machine: "m1".to_string(),
+                repo: "api".to_string(),
+                issue_number: 42,
+                assignment_type: "work".to_string(),
+                scroll: usize::MAX,
+            },
+            sse,
+            inject_transcript: Vec::new(),
+            inject_sse_offsets: Vec::new(),
+            history_turns: Vec::new(),
+            last_focused_at: Instant::now(),
+        };
+        app.watch_pool.insert("gtk-wrap".to_string(), ctx);
+
+        // Same nominal 8px/16px cell as this file's other GTK driver test
+        // (`panel_toolbar_add_click_dispatches_under_gtk_backend`).
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140 * 8, 40 * 16);
+
+        let row_text = driver
+            .painted_texts()
+            .into_iter()
+            .find(|t| t.contains("STARTMARK"))
+            .unwrap_or_else(|| panic!("STARTMARK must paint in the Log tab"))
+            .to_string();
+        let row_bounds = driver
+            .find_bounds("STARTMARK")
+            .expect("STARTMARK's bounds must be recorded alongside its text");
+
+        let char_w = driver.backend().char_width();
+        let n_chars = row_text.chars().count() as f32;
+        let expected_width = n_chars * char_w;
+        assert!(
+            (row_bounds.width - expected_width).abs() <= char_w,
+            "#67: a hard-split row of {n_chars} chars painted {:.1}px wide, \
+             but the wrap budget assumed {expected_width:.1}px ({n_chars} \
+             chars * {char_w:.2}px char_width()) — draw_list is painting in \
+             a font char_width() didn't measure from (row: {row_text:?})",
+            row_bounds.width,
+        );
+    }
+
     #[test]
     fn stage_content_test_captured_output_does_not_clip_a_full_width_wrapped_row() {
         // stage_content_test's per-step captured-output wrap (render.rs) — one

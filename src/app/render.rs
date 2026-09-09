@@ -10,6 +10,24 @@ use super::*;
 // implementation — see format.rs's module doc comment.
 use quadraui::text_util::word_wrap;
 
+/// #67: the one font coord-tui ever measures wrap budgets from —
+/// `Backend::char_width()` on GTK reads back whatever `set_editor_font`
+/// last set (default `"Monospace"` / `11.0`, unchanged, so this pair just
+/// makes the default explicit rather than implicit).
+///
+/// Before this existed, `GtkBackend::draw_list` painted every row in its
+/// own `ui_font` (default `"Sans 11"`, a proportional face swapped in by
+/// quadraui#416 so Nerd-Font icon glyphs resolve), while every
+/// `last_*_cols` wrap budget in this file divided a pixel width by
+/// `char_width()` — the *editor* font's metric. Sans and Monospace agree
+/// on digit width (tabular figures) but diverge on letters, so real prose
+/// wrapped ~23% short of the pane's right edge: the budget was computed in
+/// one font and painted in a narrower one. See `ShellApp::setup` below,
+/// where both constants are pushed to the backend so the metric and the
+/// paint agree.
+const EDITOR_FONT_FAMILY: &str = "Monospace";
+const EDITOR_FONT_SIZE_PT: f32 = 11.0;
+
 // ─── ShellApp implementation ──────────────────────────────────────────────────
 
 impl ShellApp for CoordApp {
@@ -23,8 +41,17 @@ impl ShellApp for CoordApp {
     /// Push `active_theme` to the backend on first startup so the shell
     /// chrome (activity bar, sidebar) uses the user's saved theme from
     /// frame 0 rather than quadraui's built-in dark defaults.
+    ///
+    /// #67: also push the UI (chrome/`draw_list`) font to the same family +
+    /// size as the editor font `char_width()` measures from, from the one
+    /// `EDITOR_FONT_FAMILY`/`EDITOR_FONT_SIZE_PT` pair above, so the two
+    /// can't drift apart again. No-op on the TUI backend — its
+    /// `set_editor_font`/`set_ui_font` are both fixed-cell no-ops (every
+    /// glyph already occupies exactly one terminal cell there).
     fn setup(&mut self, backend: &mut dyn Backend) {
         backend.set_theme(self.active_theme.clone());
+        backend.set_editor_font(EDITOR_FONT_FAMILY, EDITOR_FONT_SIZE_PT);
+        backend.set_ui_font(&format!("{EDITOR_FONT_FAMILY} {EDITOR_FONT_SIZE_PT}"));
     }
 
     fn render_content(&self, backend: &mut dyn Backend, layout: &AppShellLayout) {

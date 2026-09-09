@@ -4611,6 +4611,17 @@ impl CoordApp {
                             redraw |= self.queue_apply_detail_vscroll(pos);
                         }
                     }
+                    // #64: continue an in-progress Pipeline Log tab
+                    // vertical-scrollbar-track drag, started by a
+                    // `MouseDown` inside `pipeline_log_scrollbar_hit`'s
+                    // region (`mouse_main_click` above) — same precedence
+                    // and shape as the Queue/Reports/Audit blocks above.
+                    if self.active_view == SidebarView::Pipeline
+                        && buttons.left
+                        && self.pipeline_log_scrollbar_drag
+                    {
+                        redraw |= self.pipeline_log_apply_vscroll(pos);
+                    }
                     // #2017: resize-cursor hover affordance over the
                     // separator — "should show a resize affordance on hover
                     // if the backend supports it". `set_cursor` no-ops on
@@ -4783,6 +4794,8 @@ impl CoordApp {
                     released |= std::mem::take(&mut self.queue_vscroll_drag);
                     released |= std::mem::take(&mut self.queue_hscroll_drag);
                     released |= std::mem::take(&mut self.queue_detail_vscroll_drag);
+                    // #64: end a Pipeline Log tab vertical-scrollbar-track drag.
+                    released |= std::mem::take(&mut self.pipeline_log_scrollbar_drag);
                     // #2288 (ms-65 §9): end a Board pane divider drag.
                     released |= std::mem::take(&mut self.board_split_drag);
                     if released {
@@ -5763,6 +5776,22 @@ impl CoordApp {
             // is rendered into the content area (main_b minus tab row), so
             // we must hit-test against that rect — not main_b directly, or
             // the y-coordinates are off by tab_h.
+            //
+            // #64: the Log tab's vertical-scrollbar track is checked FIRST,
+            // before anything else below — same #1094-precedent reason
+            // Audit/Queue/Reports check theirs before a row/table hit: the
+            // track has no widget of its own to fall through to (the #312
+            // `TextRegion` render.rs registers for the log body deliberately
+            // excludes this strip — its `bounds` is `list_rect`, whose width
+            // already had the reserved scrollbar column subtracted), so
+            // without an explicit check here a click on the track would
+            // simply do nothing.
+            if self.pipeline_detail_tab == PipelineDetailTab::Log
+                && self.pipeline_log_scrollbar_hit(pos)
+            {
+                self.pipeline_log_scrollbar_drag = true;
+                return self.pipeline_log_apply_vscroll(pos);
+            }
             if self.pipeline_detail_tab == PipelineDetailTab::Completed {
                 let content_rect = Rect::new(
                     main_b.x,

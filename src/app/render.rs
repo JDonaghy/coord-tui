@@ -371,17 +371,17 @@ impl ShellApp for CoordApp {
                         PipelineDetailTab::Log => {
                             // #818: pinned stage strip above the log.
                             let log_rect = content_below_strip(self, backend, content_rect);
-                            // #399: reserve 1 column on the right for the
-                            // vertical scrollbar.  This keeps the list content
-                            // out from under the thumb glyph.  For GTK/macOS
-                            // backends, `width` is in pixels and 1 px is below
-                            // the thumb minimum so the scrollbar is a no-op —
-                            // those backends use native scrolling.
-                            let sb_col_w = if log_rect.width >= 2.0 {
-                                1.0_f32
-                            } else {
-                                0.0_f32
-                            };
+                            // #399/#64: reserve one column's worth of width on
+                            // the right for the vertical scrollbar, in the
+                            // backend's OWN unit. `char_width()` is 1.0 on TUI
+                            // (a real column) and the pixel width of one
+                            // monospace character on GTK/macOS — using it
+                            // here instead of a bare `1.0` fixes #64: the old
+                            // reservation was 1 *pixel* on GTK, below the
+                            // thumb's minimum, so nothing ever painted there.
+                            // This keeps the list content out from under the
+                            // thumb glyph on every backend.
+                            let sb_col_w = backend.char_width().max(1.0);
                             let list_rect = Rect::new(
                                 log_rect.x,
                                 log_rect.y,
@@ -396,28 +396,45 @@ impl ShellApp for CoordApp {
                                 .set((list_rect.width / backend.char_width().max(1.0)) as usize);
                             let log_list = self.pipeline_log_list();
 
-                            // #399: draw the vertical scrollbar at the right edge.
-                            if sb_col_w > 0.0 {
-                                let total = log_list.items.len();
-                                let visible = (log_rect.height as usize).max(1);
-                                if total > visible {
-                                    let sb_track = Rect::new(
-                                        log_rect.x + list_rect.width,
-                                        log_rect.y,
-                                        sb_col_w,
-                                        log_rect.height,
-                                    );
-                                    let vsb = Scrollbar::vertical(
-                                        "pipeline-log-vsb",
-                                        sb_track,
-                                        log_list.scroll_offset as f32,
-                                        total as f32,
-                                        visible as f32,
-                                        1.0,
-                                    );
-                                    backend.draw_scrollbar(sb_track, &vsb);
-                                }
-                            }
+                            // #64: stash total/visible for THIS pane (not the
+                            // whole main rect `last_main_visible_rows` covers)
+                            // so `pipeline_log_apply_vscroll` (events.rs)
+                            // computes a click-to-scroll fraction against
+                            // exactly what the thumb below was fit to — the
+                            // #1867/#1910 lesson that a value re-derived at
+                            // click time can silently disagree with the paint.
+                            let total = log_list.items.len();
+                            let visible = (log_rect.height as usize).max(1);
+                            self.last_log_panel_item_count.set(total);
+                            self.last_log_panel_visible_rows.set(visible);
+
+                            // #399: draw the vertical scrollbar at the right
+                            // edge, caching its painted geometry (`None` when
+                            // the log fits, same as `queue_detail_scrollbar`)
+                            // so a click can hit-test/drag it — #64 fixed the
+                            // second half of the bug: the track used to be
+                            // drawn but never registered anywhere a click
+                            // could reach.
+                            *self.pipeline_log_scrollbar.borrow_mut() = if total > visible {
+                                let sb_track = Rect::new(
+                                    log_rect.x + list_rect.width,
+                                    log_rect.y,
+                                    sb_col_w,
+                                    log_rect.height,
+                                );
+                                let vsb = Scrollbar::vertical(
+                                    "pipeline-log-vsb",
+                                    sb_track,
+                                    log_list.scroll_offset as f32,
+                                    total as f32,
+                                    visible as f32,
+                                    1.0,
+                                );
+                                backend.draw_scrollbar(sb_track, &vsb);
+                                Some(vsb)
+                            } else {
+                                None
+                            };
 
                             // Collect the visible text for pixel-based backends
                             // (GTK/macOS).  The TUI backend ignores `lines` and
@@ -4551,6 +4568,60 @@ impl CoordApp {
             max_content_width,
             show_v_scrollbar: false,
         }
+    }
+
+    /// #64: did a click land on the Log tab's vertical scrollbar track?
+    /// Same #1094-precedent shape as `queue_detail_scrollbar_hit`: the
+    /// `Scrollbar` this checks against is cached by the
+    /// `PipelineDetailTab::Log` render arm from the SAME paint that drew the
+    /// track, so a click can never hit-test against geometry the paint
+    /// disagrees with. `false` whenever the log fits (no track cached).
+    pub(crate) fn pipeline_log_scrollbar_hit(&self, pos: Point) -> bool {
+        let cache = self.pipeline_log_scrollbar.borrow();
+        let Some(sb) = cache.as_ref() else {
+            return false;
+        };
+        let t = sb.track;
+        pos.x >= t.x && pos.x < t.x + t.width && pos.y >= t.y && pos.y < t.y + t.height
+    }
+
+    /// #64: jump `pipeline_detail_scroll` to the position implied by a
+    /// click/drag along the Log tab's vertical scrollbar track. Mirrors
+    /// `queue_apply_detail_vscroll`, over `last_log_panel_item_count` /
+    /// `last_log_panel_visible_rows` (this pane's own counts, stashed by the
+    /// same render arm that fit the thumb) rather than `last_main_visible_
+    /// rows` (the whole main panel, tab bar and pinned stage strip
+    /// included — see those cells' doc comments): using the wrong one here
+    /// would fit the thumb against one "visible" and resolve a click
+    /// against a different, larger one, landing short of the track's true
+    /// ends.
+    ///
+    /// Deliberately never writes the `usize::MAX` sticky-to-bottom sentinel
+    /// (the wheel/PageDown/keybind convention elsewhere in this file) —
+    /// `pipeline_log_list` resolves that sentinel via `last_main_visible_
+    /// rows` too, so a drag that landed at the track's bottom edge and
+    /// wrote `MAX` would immediately be re-resolved against the WRONG
+    /// visible-rows count and jump short of the last line, right back into
+    /// the same mismatch this function exists to avoid. A concrete numeric
+    /// offset is exact and needs no resolution step.
+    pub(crate) fn pipeline_log_apply_vscroll(&mut self, pos: Point) -> bool {
+        let items = self.last_log_panel_item_count.get();
+        let visible = self.last_log_panel_visible_rows.get().max(1);
+        let max = items.saturating_sub(visible);
+        let track = {
+            let cache = self.pipeline_log_scrollbar.borrow();
+            match cache.as_ref() {
+                Some(sb) => sb.track,
+                None => return false,
+            }
+        };
+        if max == 0 || track.height <= 0.0 {
+            self.pipeline_detail_scroll = 0;
+            return true;
+        }
+        let frac = ((pos.y - track.y) / track.height).clamp(0.0, 1.0);
+        self.pipeline_detail_scroll = (frac * max as f32).round() as usize;
+        true
     }
 
     /// Count `[assistant]` turns in the local log for an assignment.

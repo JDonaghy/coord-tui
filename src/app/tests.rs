@@ -11448,6 +11448,177 @@
         );
     }
 
+    /// #64: the Log tab must paint a real vertical scrollbar once its
+    /// content overflows the viewport, and dragging its thumb must scroll
+    /// the pane — the two symptoms the issue reported (invisible on GTK
+    /// because the reserved strip was 1 *pixel*; inert on both backends
+    /// because nothing hit-tested the painted track). This exercises the
+    /// TUI backend, where `char_width() == 1.0` so the reservation was
+    /// already wide enough to paint — the drag/hit-test half of the fix is
+    /// what this guards; the GTK pixel-unit half needs a live smoke (see
+    /// the PR's SMOKE_TESTS).
+    #[test]
+    fn tuidriver_log_tab_scrollbar_drag_scrolls_to_the_bottom() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        let work = _stage_assignment("work-1", "work", 100.0, "running");
+        let aid = work.id.clone();
+        app.data.assignments.push(work);
+
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+        app.active_view = SidebarView::Pipeline;
+        // Deliberately NOT `usize::MAX` (the tab-switch/pin sticky-to-bottom
+        // default — see `mouse_main_click`) — starting at the top makes the
+        // starting position explicit rather than relying on that separate
+        // piece of behaviour, so this test is only about the scrollbar.
+        app.pipeline_detail_scroll = 0;
+
+        // 50 synthetic assistant turns — comfortably more than a ~20-row
+        // Log body can show at once, so the pane is guaranteed to overflow.
+        let now = Instant::now();
+        let (_, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
+        let lines: Vec<String> = (0..50)
+            .map(|i| {
+                format!(
+                    r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"LINE-{i:02}"}}]}}}}"#
+                )
+            })
+            .collect();
+        let line_times = vec![now; lines.len()];
+        app.watch_pool.insert(
+            aid,
+            WatchContext {
+                state: WatchState {
+                    assignment_id: "work-1".to_string(),
+                    machine: "m1".to_string(),
+                    repo: "api".to_string(),
+                    issue_number: 42,
+                    assignment_type: "work".to_string(),
+                    scroll: usize::MAX,
+                },
+                sse: WatchSseState {
+                    rx,
+                    lines,
+                    line_times,
+                    current_turn: 1,
+                    last_event_id: 0,
+                    fail_count: 0,
+                    first_fail_at: None,
+                    done: false,
+                    host: "m1".to_string(),
+                    pending_tail: String::new(),
+                },
+                inject_transcript: Vec::new(),
+                inject_sse_offsets: Vec::new(),
+                history_turns: Vec::new(),
+                last_focused_at: now,
+            },
+        );
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 100, 24);
+        driver.render();
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains("LINE-00"),
+            "sanity: scroll=0 must show the first line on open:\n{screen}"
+        );
+        assert!(
+            !screen.contains("LINE-49"),
+            "sanity: the last line must be scrolled off screen initially:\n{screen}"
+        );
+
+        let total_rows = screen.lines().count();
+        let (sb_x, track_y0, track_y1) = scrollbar_track_in_rows(&screen, 0, total_rows)
+            .unwrap_or_else(|| {
+                panic!("#64: Log tab must paint a vertical scrollbar once its content overflows:\n{screen}")
+            });
+
+        // `+ 0.49`: `track_y1` is the center of the LAST row a scrollbar
+        // glyph painted at, so landing exactly on it can still resolve a
+        // hair short of `frac == 1.0` — nudge past it, same as the Queue
+        // detail-pane drag test (`tuidriver_queue_detail_scrollbar_thumb_
+        // drag_scrolls_the_detail_pane`) does for the identical reason.
+        driver.mouse_down(sb_x, track_y0);
+        driver.mouse_move(sb_x, track_y1 + 0.49);
+        driver.mouse_up(sb_x, track_y1 + 0.49);
+        driver.render();
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains("LINE-49"),
+            "#64: dragging the Log tab's scrollbar thumb to the bottom of \
+             the track must scroll to the last line:\n{screen}"
+        );
+        assert!(
+            !screen.contains("LINE-00"),
+            "#64: …and scroll the first line off screen:\n{screen}"
+        );
+    }
+
+    /// #64 (unit-fix regression guard): a Log tab whose content fits inside
+    /// the viewport must not paint a scrollbar track at all — the fix must
+    /// not turn the reservation into a permanent strip regardless of
+    /// overflow.
+    #[test]
+    fn tuidriver_log_tab_paints_no_scrollbar_when_content_fits() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        let work = _stage_assignment("work-1", "work", 100.0, "running");
+        let aid = work.id.clone();
+        app.data.assignments.push(work);
+
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+        app.active_view = SidebarView::Pipeline;
+
+        let now = Instant::now();
+        let (_, rx) = std::sync::mpsc::channel::<SseWatchMsg>();
+        let log_line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"short log body"}}]}}}}"#
+        );
+        app.watch_pool.insert(
+            aid,
+            WatchContext {
+                state: WatchState {
+                    assignment_id: "work-1".to_string(),
+                    machine: "m1".to_string(),
+                    repo: "api".to_string(),
+                    issue_number: 42,
+                    assignment_type: "work".to_string(),
+                    scroll: usize::MAX,
+                },
+                sse: WatchSseState {
+                    rx,
+                    lines: vec![log_line],
+                    line_times: vec![now],
+                    current_turn: 1,
+                    last_event_id: 0,
+                    fail_count: 0,
+                    first_fail_at: None,
+                    done: false,
+                    host: "m1".to_string(),
+                    pending_tail: String::new(),
+                },
+                inject_transcript: Vec::new(),
+                inject_sse_offsets: Vec::new(),
+                history_turns: Vec::new(),
+                last_focused_at: now,
+            },
+        );
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 100, 24);
+        let screen = driver.screen();
+        assert!(
+            !screen.contains('█') && !screen.contains('░'),
+            "#64: the log's content fits its viewport — no scrollbar track \
+             may paint:\n{screen}"
+        );
+    }
+
     /// `[`/`]` are the keyboard half of the same rail — #818's "Overview tab
     /// only" restriction predates the pinned strip existing on every other
     /// tab, so it must follow the strip: cycling the focused stage from the

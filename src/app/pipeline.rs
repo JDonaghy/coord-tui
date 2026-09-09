@@ -6619,13 +6619,20 @@ impl CoordApp {
     /// `assignment_type` `None` or `"work"`.  Other stage names match
     /// assignments by exact `assignment_type`.  The "merge" stage is
     /// special-cased to read from the `merge_queue` table instead, since
-    /// merges are not modelled as assignments.
+    /// merges are not modelled as assignments.  "test" and "uat" are also
+    /// special-cased (#73): both verdicts are stamped directly onto the
+    /// Work assignment row (`test_state`/`uat_state`) rather than living on
+    /// a dedicated `type="test"`/`type="uat"` assignment, so the generic
+    /// assignment-type lookup below would never find them.
     pub(crate) fn stage_status_for(&self, issue: &PipelineIssue, stage: &str) -> StageStatus {
         if stage == "merge" {
             return self.merge_stage_status_for(issue);
         }
         if stage == "test" {
             return self.test_stage_status_for(issue);
+        }
+        if stage == "uat" {
+            return self.uat_stage_status_for(issue);
         }
         // #550: prefer the server-computed projection when present — falls
         // back to the local computation below on the local-SQLite read path
@@ -6679,7 +6686,17 @@ impl CoordApp {
                     Some("request-changes") | Some("fail") => Some(StageStatus::Failed),
                     _ => Some(StageStatus::Failed),
                 },
-                "done" => Some(StageStatus::Done),
+                // #73: the daemon's merge-reconcile tick flips a merged Work
+                // assignment's own `status` straight to "merged" (never back
+                // through "done") once the PR lands — see
+                // `merge_stage_status_for_local`'s own `a.status == "merged"`
+                // check and `prereq_pipeline_status_from`'s `"done" |
+                // "merged"` arm for the same fold elsewhere. Without this
+                // arm, a merged issue's Work stage fell through to `None`
+                // below and then to Skipped (`issue.is_closed` is true by
+                // then) — a completed, passing Work stage rendered as
+                // "intentionally bypassed" instead of Done.
+                "done" | "merged" => Some(StageStatus::Done),
                 "failed" => Some(StageStatus::Failed),
                 _ => None,
             };
@@ -7147,6 +7164,61 @@ impl CoordApp {
         }
     }
 
+    /// #73: Resolve the Uat gate status from `uat_state` on the latest Work
+    /// assignment for `issue` — mirrors [`Self::test_stage_status_for`]'s
+    /// shape, since `coord uat <id> --passed|--failed` stamps the verdict
+    /// directly onto the same Work row rather than a dedicated `type="uat"`
+    /// assignment (see `uat_block_info_for`'s doc comment). Before this,
+    /// `stage_status_for`'s generic assignment-type lookup
+    /// (`assignments_for_stage(issue, "uat")`) could never find a matching
+    /// row — no such `assignment_type` is ever written — so a recorded
+    /// `uat_state` verdict was invisible and the box fell straight to
+    /// Skipped (closed issue) or Pending (open issue) regardless of what a
+    /// human recorded.
+    ///
+    /// `passed` → Done; `failed` → Failed; otherwise Pending while Work is
+    /// settled (Skipped if the issue is already closed with no verdict —
+    /// mirrors the "genuinely never ran" posture the generic
+    /// `stage_status_for_local` uses for other closed-issue stages).
+    pub(crate) fn uat_stage_status_for(&self, issue: &PipelineIssue) -> StageStatus {
+        // Uat is gated on Work, exactly like Test.
+        let work_status = self.stage_status_for_internal_work(issue);
+        if work_status != StageStatus::Done {
+            return if issue.is_closed {
+                StageStatus::Skipped
+            } else {
+                StageStatus::Pending
+            };
+        }
+        // #550: prefer the server-computed projection when present — falls
+        // back to the local computation below on the local-SQLite read path
+        // (no daemon) or against a daemon older than #550.
+        if let Some(s) = self.server_stage_status(issue, "uat") {
+            return s;
+        }
+        let work = self.assignments_for_stage(issue, "work");
+        let verdict = work
+            .iter()
+            .filter(|a| a.uat_state.as_deref().map(|s| !s.is_empty()).unwrap_or(false))
+            .max_by(|a, b| {
+                a.dispatched_at
+                    .partial_cmp(&b.dispatched_at)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .and_then(|a| a.uat_state.as_deref());
+        match verdict {
+            Some("passed") => StageStatus::Done,
+            Some("failed") => StageStatus::Failed,
+            _ => {
+                if issue.is_closed {
+                    StageStatus::Skipped
+                } else {
+                    StageStatus::Pending
+                }
+            }
+        }
+    }
+
     /// #932/#944: the Acceptance box's status — reported and gated
     /// SEPARATELY from Test (docs/ORACLE_LOOP.md), so this reads
     /// `Assignment.acceptance_state` off the work assignment row directly
@@ -7493,7 +7565,12 @@ impl CoordApp {
         });
         if let Some(latest) = latest {
             match latest.status.as_str() {
-                "done" => return StageStatus::Done,
+                // #73: mirrors the "merged" arm added to `stage_status_for_local`
+                // — a merged Work assignment is done, not absent. Without this,
+                // `test_stage_status_for`'s work-gate below never saw Work as
+                // Done on a merged issue, so it inherited Skipped/Pending and
+                // masked a genuinely recorded `test_state` verdict.
+                "done" | "merged" => return StageStatus::Done,
                 "failed" => return StageStatus::Failed,
                 _ => {}
             }

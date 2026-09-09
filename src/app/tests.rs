@@ -16327,6 +16327,132 @@
         assert_eq!(app.uat_block_info_for(&issue), None);
     }
 
+    /// #73: a merged issue whose Work/Test/Review/Uat gates all genuinely
+    /// ran and passed must report every stage `Done` on the pipeline rail —
+    /// not `Skipped` ("intentionally bypassed", quadraui's `StageStatus`
+    /// doc). Before the fix, `stage_status_for_local`'s generic
+    /// assignment-status match only recognised `"done"`/`"failed"`, so a
+    /// Work assignment the merge-reconcile tick flipped straight to
+    /// `status="merged"` (never back through `"done"`) fell through to
+    /// `None` and then to Skipped once the issue closed — and Test/Uat,
+    /// gated on Work being resolved `Done`, inherited the same wrong
+    /// Skipped reading even though `test_state`/`uat_state` both recorded a
+    /// pass. Only Review (its own `type="review"` assignment) and Merge
+    /// (its own `merge_queue` row) were painted correctly before this fix.
+    #[test]
+    fn pipeline_rail_marks_merged_issue_gates_done_not_skipped() {
+        let mut app = make_pipeline_app();
+        app.data.pipeline_default_gates = vec![
+            "test".to_string(),
+            "review".to_string(),
+            "uat".to_string(),
+            "merge".to_string(),
+        ];
+        app.pipeline_issues[0].is_closed = true;
+        let mut work = _stage_assignment("w1", "work", 100.0, "merged");
+        work.test_state = Some("passed".to_string());
+        work.uat_state = Some("passed".to_string());
+        app.data.assignments.push(work);
+        app.data
+            .assignments
+            .push(_stage_assignment("r1", "review", 150.0, "done"));
+        app.data.merge_queue.push(MergeQueueEntry {
+            assignment_id: "w1".to_string(),
+            issue_number: Some(42),
+            state: "merged".to_string(),
+            pr_number: Some(1),
+            pr_url: None,
+            repo_github: "acme/api".to_string(),
+            target_branch: None,
+            error: None,
+            branch: None,
+            milestone_title: None,
+            last_attempt: None,
+            id: None,
+            repo_name: String::new(),
+            issue_title: String::new(),
+            size: None,
+            enqueued_at: None,
+            assignment_type: None,
+            required_gates: None,
+            ci_infra_reruns: 0,
+            ci_stale_reruns: 0,
+            ci_flaky_reruns: 0,
+            ci_flaky_pending: String::new(),
+            ci_unreadable_reruns: 0,
+            ci_fix_dispatches: 0,
+        });
+
+        let issue = &app.pipeline_issues[0];
+        assert_eq!(app.stage_status_for(issue, "work"), StageStatus::Done);
+        assert_eq!(app.stage_status_for(issue, "test"), StageStatus::Done);
+        assert_eq!(app.stage_status_for(issue, "review"), StageStatus::Done);
+        assert_eq!(app.stage_status_for(issue, "uat"), StageStatus::Done);
+        assert_eq!(app.stage_status_for(issue, "merge"), StageStatus::Done);
+    }
+
+    /// #73: the mixed case — a stage that genuinely never ran on a merged
+    /// issue (no Review assignment, no recorded Uat verdict) must still
+    /// render `Skipped`, so the #73 fix doesn't just trade one wrong answer
+    /// (everything Skipped) for another (everything Done).
+    #[test]
+    fn pipeline_rail_genuinely_unrun_stage_still_reports_skipped() {
+        let mut app = make_pipeline_app();
+        app.data.pipeline_default_gates = vec![
+            "test".to_string(),
+            "review".to_string(),
+            "uat".to_string(),
+            "merge".to_string(),
+        ];
+        app.pipeline_issues[0].is_closed = true;
+        let mut work = _stage_assignment("w1", "work", 100.0, "merged");
+        work.test_state = Some("passed".to_string());
+        // No uat_state recorded — Uat never ran.
+        app.data.assignments.push(work);
+        // No review assignment at all — Review never ran.
+        app.data.merge_queue.push(MergeQueueEntry {
+            assignment_id: "w1".to_string(),
+            issue_number: Some(42),
+            state: "merged".to_string(),
+            pr_number: Some(1),
+            pr_url: None,
+            repo_github: "acme/api".to_string(),
+            target_branch: None,
+            error: None,
+            branch: None,
+            milestone_title: None,
+            last_attempt: None,
+            id: None,
+            repo_name: String::new(),
+            issue_title: String::new(),
+            size: None,
+            enqueued_at: None,
+            assignment_type: None,
+            required_gates: None,
+            ci_infra_reruns: 0,
+            ci_stale_reruns: 0,
+            ci_flaky_reruns: 0,
+            ci_flaky_pending: String::new(),
+            ci_unreadable_reruns: 0,
+            ci_fix_dispatches: 0,
+        });
+
+        let issue = &app.pipeline_issues[0];
+        assert_eq!(app.stage_status_for(issue, "work"), StageStatus::Done);
+        assert_eq!(app.stage_status_for(issue, "test"), StageStatus::Done);
+        assert_eq!(
+            app.stage_status_for(issue, "review"),
+            StageStatus::Skipped,
+            "review never ran — must stay Skipped, not flip to Done"
+        );
+        assert_eq!(
+            app.stage_status_for(issue, "uat"),
+            StageStatus::Skipped,
+            "uat never recorded a verdict — must stay Skipped, not flip to Done"
+        );
+        assert_eq!(app.stage_status_for(issue, "merge"), StageStatus::Done);
+    }
+
     /// #52: the Stage-content detail (Stages tab / Overview strip) for the
     /// Uat stage must render the assignment id, the exact `coord uat`
     /// command, and the preview URL as plain readable/copyable rows — the

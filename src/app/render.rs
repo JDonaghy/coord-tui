@@ -4603,13 +4603,15 @@ impl CoordApp {
     /// `PipelineDetailTab::Log` render arm from the SAME paint that drew the
     /// track, so a click can never hit-test against geometry the paint
     /// disagrees with. `false` whenever the log fits (no track cached).
+    ///
+    /// #71: the track is already a `Rect`, so this is exactly
+    /// `Rect::contains` — no local wrapper needed.
     pub(crate) fn pipeline_log_scrollbar_hit(&self, pos: Point) -> bool {
         let cache = self.pipeline_log_scrollbar.borrow();
         let Some(sb) = cache.as_ref() else {
             return false;
         };
-        let t = sb.track;
-        pos.x >= t.x && pos.x < t.x + t.width && pos.y >= t.y && pos.y < t.y + t.height
+        sb.track.contains(pos)
     }
 
     /// #64: jump `pipeline_detail_scroll` to the position implied by a
@@ -4631,10 +4633,12 @@ impl CoordApp {
     /// visible-rows count and jump short of the last line, right back into
     /// the same mismatch this function exists to avoid. A concrete numeric
     /// offset is exact and needs no resolution step.
+    ///
+    /// #71: track math shared with `queue_apply_detail_vscroll` via
+    /// `table_nav::track_vscroll_offset`.
     pub(crate) fn pipeline_log_apply_vscroll(&mut self, pos: Point) -> bool {
         let items = self.last_log_panel_item_count.get();
         let visible = self.last_log_panel_visible_rows.get().max(1);
-        let max = items.saturating_sub(visible);
         let track = {
             let cache = self.pipeline_log_scrollbar.borrow();
             match cache.as_ref() {
@@ -4642,12 +4646,7 @@ impl CoordApp {
                 None => return false,
             }
         };
-        if max == 0 || track.height <= 0.0 {
-            self.pipeline_detail_scroll = 0;
-            return true;
-        }
-        let frac = ((pos.y - track.y) / track.height).clamp(0.0, 1.0);
-        self.pipeline_detail_scroll = (frac * max as f32).round() as usize;
+        self.pipeline_detail_scroll = table_nav::track_vscroll_offset(pos.y, track, items, visible);
         true
     }
 

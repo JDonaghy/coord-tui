@@ -1934,50 +1934,41 @@ impl CoordApp {
     /// reserves space for — same gap #1094 found and fixed for Audit — so a
     /// click there must be caught here, before `reports_table_hit`, or it
     /// mis-resolves to a row/header hit under the thumb.
+    ///
+    /// #71: delegates to `table_nav::scrollbar_axis_hit` and keeps only
+    /// `Vertical` — safe because the table's `h_scroll` is pinned at `0.0`
+    /// (see `render_reports_result`), so `layout.h_scrollbar_height` is
+    /// always `0.0` here and `Horizontal` can never come back.
     pub(crate) fn reports_scrollbar_hit(&self, pos: Point) -> bool {
         let cache = self.reports_table_layout.borrow();
         let Some((rect, layout)) = cache.as_ref() else {
             return false;
         };
-        let x = pos.x - rect.x;
-        let y = pos.y - rect.y;
-        if x < 0.0 || y < 0.0 || x >= layout.viewport_width || y >= layout.viewport_height {
-            return false;
-        }
-        layout.scrollbar_width > 0.0
-            && x >= layout.viewport_width - layout.scrollbar_width
-            && y >= layout.header_height
+        matches!(
+            table_nav::scrollbar_axis_hit(pos, *rect, layout),
+            Some(ScrollAxis::Vertical)
+        )
     }
 
     /// #1910: jump `reports_result_scroll` to the row implied by a
     /// click/drag position along the vertical scrollbar's track — same
     /// click/drag-to-position behaviour as `audit_apply_vscroll`. No-op
     /// (returns `false`) when there's nothing to scroll (no result, empty
-    /// result, or the cached layout is stale/missing).
+    /// result, or the cached layout is stale/missing). Track math lives in
+    /// `table_nav::vscroll_offset` (#71).
     pub(crate) fn reports_apply_vscroll(&mut self, pos: Point) -> bool {
         let n = match self.reports_result.as_ref() {
             Some(r) if !r.rows.is_empty() => r.rows.len(),
             _ => return false,
         };
-        let (track_y0, track_h, visible_rows) = {
+        let offset = {
             let cache = self.reports_table_layout.borrow();
             let Some((rect, layout)) = cache.as_ref() else {
                 return false;
             };
-            let track_y0 = rect.y + layout.header_height;
-            let track_h = (layout.viewport_height
-                - layout.header_height
-                - layout.h_scrollbar_height)
-                .max(1.0);
-            (track_y0, track_h, layout.visible_rows.max(1))
+            table_nav::vscroll_offset(pos.y, *rect, layout, n)
         };
-        let max_scroll = n.saturating_sub(visible_rows);
-        self.reports_result_scroll = if max_scroll == 0 {
-            0
-        } else {
-            let frac = ((pos.y - track_y0) / track_h).clamp(0.0, 1.0);
-            (frac * max_scroll as f32).round() as usize
-        };
+        self.reports_result_scroll = offset;
         true
     }
 

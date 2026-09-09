@@ -36851,7 +36851,7 @@
         let mut app = make_completed_app();
         // Column 0 = ISSUE.
         assert!(app.completed_sort_by_column(0));
-        assert_eq!(app.completed_grid.sort, Some((0, false)));
+        assert_eq!(app.completed_grid.table.sort, Some((0, SortDirection::Descending)));
         let desc: Vec<String> = app
             .completed_rows()
             .unwrap()
@@ -36860,7 +36860,7 @@
             .collect();
         assert_eq!(desc, vec!["W#204", "A#202", "A#201"]);
         assert!(app.completed_sort_by_column(0));
-        assert_eq!(app.completed_grid.sort, Some((0, true)));
+        assert_eq!(app.completed_grid.table.sort, Some((0, SortDirection::Ascending)));
         let asc: Vec<String> = app
             .completed_rows()
             .unwrap()
@@ -36870,7 +36870,7 @@
         assert_eq!(asc, vec!["A#201", "A#202", "W#204"]);
         // Third click clears back to the default newest-finished-first order.
         assert!(app.completed_sort_by_column(0));
-        assert_eq!(app.completed_grid.sort, None);
+        assert_eq!(app.completed_grid.table.sort, None);
         let default: Vec<String> = app
             .completed_rows()
             .unwrap()
@@ -36886,19 +36886,19 @@
     #[test]
     fn completed_control_change_resets_scroll_and_detail() {
         let mut app = make_completed_app();
-        app.completed_grid.scroll = 4;
+        app.completed_grid.table.scroll = 4;
         assert!(app.completed_open_row(0));
         assert!(app.completed_grid.detail.is_some());
         app.completed_set_field(0, "7d".to_string());
-        assert_eq!(app.completed_grid.scroll, 0);
+        assert_eq!(app.completed_grid.table.scroll, 0);
         assert!(
             app.completed_grid.detail.is_none(),
             "#2405: a stale detail must not survive a control change"
         );
         app.completed_sort_by_column(1);
-        let before = app.completed_grid.sort;
+        let before = app.completed_grid.table.sort;
         app.completed_set_field(2, "api".to_string());
-        assert_eq!(app.completed_grid.sort, before);
+        assert_eq!(app.completed_grid.table.sort, before);
     }
 
     /// The grid renders its controls and every in-window row, with the
@@ -36921,6 +36921,62 @@
         assert!(
             !screen.contains("A#203"),
             "#2405: the 5-day-old issue is outside the default 24h range:\n{screen}"
+        );
+    }
+
+    /// #72: the Completed grid is the proof the `TableState` extraction
+    /// actually works — before this issue it was the one `DataTable` in the
+    /// crate with no column resize at all. Same drag-only-moves-its-own-pair
+    /// invariant `tuidriver_queue_divider_drag_resizes_only_its_own_pair` /
+    /// `reports_divider_drag_resizes_only_its_own_pair` assert, reusing
+    /// their exact helpers — the whole point of sharing `TableState` is that
+    /// a fourth table's resize needs no fourth copy of this test's logic
+    /// either, just a fourth fixture.
+    #[test]
+    fn tuidriver_completed_divider_drag_resizes_only_its_own_pair() {
+        use quadraui::tui::testing::driver_with_shell;
+        let mut driver = driver_with_shell(
+            make_completed_app(),
+            CoordApp::shell_config(),
+            REPORTS_RESIZE_COLS,
+            REPORTS_RESIZE_ROWS,
+        );
+        let before = reports_header_xs(&driver, &["ISSUE", "TITLE", "STARTED", "ENDED"]);
+
+        // The divider between ISSUE and TITLE, dragged 3 cells right.
+        reports_drag_divider(&mut driver, "TITLE", 3.0);
+        let after = reports_header_xs(&driver, &["ISSUE", "TITLE", "STARTED", "ENDED"]);
+
+        assert_eq!(
+            before[0], after[0],
+            "#72: dragging a divider must not move the left column's own \
+             left edge:\n{}",
+            driver.screen()
+        );
+        assert!(
+            (after[1] - (before[1] + 3.0)).abs() <= 1.0,
+            "#72: dragging the ISSUE|TITLE divider 3 cells right must widen \
+             ISSUE by ~3 — TITLE moved from {} to {}:\n{}",
+            before[1],
+            after[1],
+            driver.screen()
+        );
+        // The pair-only invariant: everything after the dragged pair is
+        // untouched.
+        assert_eq!(
+            before[2], after[2],
+            "#72: a divider drag must move width between its own two \
+             columns only — STARTED (one column right of the drag) moved \
+             from {} to {}:\n{}",
+            before[2],
+            after[2],
+            driver.screen()
+        );
+        assert_eq!(
+            before[3], after[3],
+            "#72: ENDED (two columns right of the drag) must also be \
+             untouched:\n{}",
+            driver.screen()
         );
     }
 

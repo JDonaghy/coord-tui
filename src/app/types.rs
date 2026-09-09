@@ -1,8 +1,13 @@
 //! App data-model types extracted from `app/mod.rs` (#743).
 //!
 //! DTO/enum structs and their pure impls — no I/O, no quadraui rendering.
+//! [`TableState`] (#72) is the one exception to "no quadraui" in name only:
+//! it holds a `DataTable` layout *cache* and geometry state, not a render
+//! call — the actual `draw_data_table` invocation stays in the owning panel
+//! module.
+use std::cell::{Cell, RefCell};
 use std::time::{SystemTime, UNIX_EPOCH};
-use quadraui::{Color, WidgetId};
+use quadraui::{Color, DataTableHit, DataTableLayout, Point, Rect, SortDirection, WidgetId};
 use super::format::fmt_dur;
 
 
@@ -73,6 +78,137 @@ pub(crate) enum PipelineDetailTab {
     Completed,
 }
 
+/// #72: shared geometry/interaction state for a `DataTable`-backed panel —
+/// layout cache, column-resize state, scroll, selection, sort. Extracted
+/// from `CompletedGrid`'s own ad hoc shape (`completed_table_layout` lived
+/// directly on `CoordApp`; `sort`/`scroll` lived directly on `CompletedGrid`
+/// with no resize at all) once #68/#70/#71 brought Audit/Reports/Queue's
+/// resize and scroll-drag handling into agreement — see issue #72's table
+/// for the four tables' prior per-field shapes.
+///
+/// `h_scroll` stays a `Cell` for the reason `queue_h_scroll` already needed
+/// one: a render path (`render_queue_panel`) clamps it against
+/// freshly-measured content width from a `&self` method, mid-paint, which
+/// is what keeps a stale offset from shipping one mis-rendered frame per
+/// resize (`drive_queue.rs:1575`). A `RefCell<..>` for the same reason
+/// applies to `layout`: it is written from `&self` render methods too.
+///
+/// Migrated one table per PR (#72's own sequencing note): Completed first,
+/// Audit last. A table not yet migrated keeps its own flat field family on
+/// `CoordApp` — see e.g. `queue_sel` / `reports_table_layout`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct TableState {
+    /// Cache from the last paint: `(rect, layout)`. Read by [`Self::hit`]
+    /// and by callers computing a visible-row count; overwritten (or
+    /// cleared to `None`) at the top of every render, mirroring
+    /// `render_reports_result`'s "drop last frame's geometry up front"
+    /// contract.
+    pub(crate) layout: RefCell<Option<(Rect, DataTableLayout)>>,
+    /// Per-column width override from a resize drag, in the shape
+    /// `DataTableLayout::drag_divider` both reads and returns. Empty means
+    /// every column uses its declared `ColumnWidth`.
+    pub(crate) column_overrides: Vec<Option<f32>>,
+    /// The column to the LEFT of the divider currently being dragged
+    /// (started by a `MouseDown` on a `DataTableHit::HeaderDivider`,
+    /// released on `MouseUp`), or `None` when no resize is in progress.
+    pub(crate) resize_col: Option<usize>,
+    /// First visible row.
+    pub(crate) scroll: usize,
+    /// Horizontal scroll offset, in the same units as
+    /// `DataTableLayout::content_width`. Unused (stays `0.0`) by a table
+    /// that doesn't scroll horizontally — see `queue_h_scroll` for the one
+    /// table that actually drives this.
+    pub(crate) h_scroll: Cell<f32>,
+    /// Selected row index. Unused by a table with no persistent row
+    /// selection (e.g. Completed, whose "selection" is really the
+    /// open/closed `detail` row).
+    pub(crate) sel: usize,
+    /// `(column index, direction)`. `None` = the panel's own default order.
+    pub(crate) sort: Option<(usize, SortDirection)>,
+}
+
+impl TableState {
+    /// Hit-test a click against the last-painted table, or `None` when no
+    /// table is on screen, the cache is stale (nothing painted this frame),
+    /// or `n` (the row count backing the click) is `0`.
+    pub(crate) fn hit(&self, pos: Point, n: usize) -> Option<DataTableHit> {
+        if n == 0 {
+            return None;
+        }
+        let cache = self.layout.borrow();
+        let (rect, layout) = cache.as_ref()?;
+        Some(layout.hit_test(pos.x - rect.x, pos.y - rect.y, self.scroll, n))
+    }
+
+    /// Continue an in-progress column-resize drag (`resize_col` set by the
+    /// caller's `MouseDown` handling), storing the new pair of widths into
+    /// `column_overrides`. Returns whether anything changed — the caller's
+    /// redraw signal. A no-op when no drag is in progress, no table is on
+    /// screen, or the cached layout's column count doesn't match
+    /// `column_overrides`' (a stale cache from a differently-shaped table —
+    /// see `reports_active_overrides` for the one table that can hit this).
+    pub(crate) fn update_resize_drag(&mut self, pos: Point, min_width: f32) -> bool {
+        let Some(col) = self.resize_col else {
+            return false;
+        };
+        let next = {
+            let cache = self.layout.borrow();
+            let Some((rect, layout)) = cache.as_ref() else {
+                return false;
+            };
+            // A divider only exists between two columns; a `col` past the
+            // end means the cached layout is from a differently-shaped
+            // table.
+            if col + 1 >= layout.columns.len() {
+                return false;
+            }
+            layout.drag_divider(&self.column_overrides, col, pos.x - rect.x, min_width)
+        };
+        if next.len() != self.column_overrides.len() {
+            return false;
+        }
+        self.column_overrides = next;
+        true
+    }
+
+    /// Click a column header: `None → first → !first → None` for that
+    /// column, switching straight to `first` when a different column is
+    /// clicked. Resets `scroll` — the row under the viewport means
+    /// something different after a re-sort.
+    ///
+    /// `first` is the direction the CYCLE starts in, not always
+    /// `Ascending`: Reports and Queue start ascending, but Completed starts
+    /// descending (the most useful direction for its two timestamp columns,
+    /// and the order the grid already opens in) — see #72's note that the
+    /// three `*_sort_by_column` bodies share this state machine but not
+    /// its starting direction. `n_cols` guards a stale column index, same
+    /// as every `*_sort_by_column` predecessor.
+    pub(crate) fn sort_by_column(
+        &mut self,
+        col: usize,
+        n_cols: usize,
+        first: SortDirection,
+    ) -> bool {
+        if col >= n_cols {
+            return false;
+        }
+        self.sort = match self.sort {
+            Some((c, dir)) if c == col && dir == first => Some((col, Self::flip(first))),
+            Some((c, _)) if c == col => None,
+            _ => Some((col, first)),
+        };
+        self.scroll = 0;
+        true
+    }
+
+    fn flip(dir: SortDirection) -> SortDirection {
+        match dir {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        }
+    }
+}
+
 /// #2405: state behind the Pipeline panel's completed-issues grid.
 ///
 /// Deliberately mirrors the Reports panel's `issue-activity` controls
@@ -98,11 +234,10 @@ pub(crate) struct CompletedGrid {
     /// Which control has keyboard focus: 0 = time range, 1 = window end,
     /// 2 = repo.
     pub(crate) field_sel: usize,
-    /// `(column index, ascending)`.  `None` = the default newest-finished-
-    /// first order.
-    pub(crate) sort: Option<(usize, bool)>,
-    /// First visible row.
-    pub(crate) scroll: usize,
+    /// #72: geometry/interaction state for the result grid — layout cache,
+    /// column resize, scroll, sort. `sel` is unused (the grid has no
+    /// persistent row selection; `detail` below is what "open" means).
+    pub(crate) table: TableState,
     /// When `Some((repo_slug, issue_number))`, the grid is replaced by that
     /// row's detail view.  Held by identity rather than by row index so a
     /// background refresh (which re-derives the whole row set) can't silently
@@ -117,8 +252,19 @@ impl Default for CompletedGrid {
             until: String::new(),
             repo: String::new(),
             field_sel: 0,
-            sort: None,
-            scroll: 0,
+            table: TableState {
+                // Completed has four columns forever (`COMPLETED_COLUMNS`),
+                // so a bare pre-sized `Vec` can never mean the wrong thing
+                // the way an unkeyed override could for Reports (whose
+                // columns vary per report — see `reports_column_overrides`).
+                // Pre-sizing (rather than starting empty) matters:
+                // `update_resize_drag` compares the drag's output length
+                // against this field's *current* length as a staleness
+                // guard, and an empty starting `Vec` would fail that check
+                // on the very first resize.
+                column_overrides: vec![None; 4],
+                ..Default::default()
+            },
             detail: None,
         }
     }

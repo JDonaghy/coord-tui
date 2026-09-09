@@ -26911,17 +26911,98 @@
     }
 
     #[test]
-    fn readable_tool_use_long_command_truncated_to_width() {
-        let cmd = "a".repeat(200);
+    fn readable_tool_use_short_command_renders_unchanged() {
+        // #63: a tool call that fits on one row must render byte-for-byte as
+        // it did before wrapping existed — no wrapping machinery kicks in
+        // for the common case.
+        let line = r#"{"type":"tool_use","name":"Bash","command":"ls -la"}"#;
+        let mut turn = 0;
+        let items = parse_json_events_readable(line, &mut turn, None, 80);
+        assert_eq!(items.len(), 1);
+        let text = &items[0].text.spans[0].text;
+        assert_eq!(text.as_str(), "  → Bash: ls -la");
+    }
+
+    #[test]
+    fn readable_tool_use_long_command_wraps_to_width() {
+        // #63: a tool-call line longer than the pane must wrap onto
+        // continuation rows instead of losing text to the old
+        // `truncate_arrow_line` ellipsis.
+        // 'z' appears nowhere else in the rendered row (arrow, "Bash: "
+        // header, indent) so counting it is an unambiguous character-loss
+        // check, unlike 'a' which also occurs in "Bash".
+        let cmd = "z".repeat(200);
         let line = format!(r#"{{"type":"tool_use","name":"Bash","command":"{cmd}"}}"#);
         let mut turn = 0;
         let items = parse_json_events_readable(&line, &mut turn, None, 80);
-        assert_eq!(items.len(), 1);
-        let text = &items[0].text.spans[0].text;
         assert!(
-            text.chars().count() <= 80,
-            "tool_use line should be truncated to wrap_width: {} chars",
-            text.chars().count()
+            items.len() > 1,
+            "a 200-char command at wrap_width 80 must wrap onto multiple rows, got {} item(s)",
+            items.len()
+        );
+        let mut z_count = 0usize;
+        for item in &items {
+            let text = &item.text.spans[0].text;
+            assert!(
+                text.chars().count() <= 80,
+                "wrapped row exceeds wrap_width: {} chars ({:?})",
+                text.chars().count(),
+                text
+            );
+            assert!(!text.contains('…'), "no row should be ellipsised: {text:?}");
+            z_count += text.chars().filter(|&c| c == 'z').count();
+        }
+        assert_eq!(z_count, 200, "no characters of the command may be dropped");
+
+        // First row keeps the arrow header; continuation rows must not look
+        // like a new tool call, and must be indented past the header so the
+        // wrapped command still reads as one aligned block.
+        let first = &items[0].text.spans[0].text;
+        assert!(first.starts_with("  → Bash: "), "got: {first:?}");
+        let header_indent = "  → Bash: ".chars().count();
+        for item in &items[1..] {
+            let text = &item.text.spans[0].text;
+            assert!(
+                !text.trim_start().starts_with('→'),
+                "continuation row must not look like a new tool call: {text:?}"
+            );
+            let leading_spaces = text.chars().take_while(|c| *c == ' ').count();
+            assert_eq!(
+                leading_spaces, header_indent,
+                "continuation row should be indented past the header: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn readable_tool_use_long_token_hard_splits_without_losing_chars() {
+        // #63: a single unbroken token too long to fit any row (a SHA, a
+        // URL) must hard-split rather than overflow — the same guarantee
+        // quadraui's `word_wrap` already gives ordinary prose.
+        // 'z' appears nowhere else in "git diff … origin/main" or the arrow
+        // header, so counting it is an unambiguous character-loss check.
+        let sha = "z".repeat(60);
+        let cmd = format!("git diff {sha} origin/main");
+        let line = format!(r#"{{"type":"tool_use","name":"Bash","command":"{cmd}"}}"#);
+        let mut turn = 0;
+        let items = parse_json_events_readable(&line, &mut turn, None, 40);
+        assert!(
+            items.len() > 1,
+            "expected the long token to force wrapping, got {} item(s)",
+            items.len()
+        );
+        let mut z_count = 0usize;
+        for item in &items {
+            let text = &item.text.spans[0].text;
+            assert!(
+                text.chars().count() <= 40,
+                "wrapped row exceeds wrap_width: {text:?}"
+            );
+            z_count += text.chars().filter(|&c| c == 'z').count();
+        }
+        assert_eq!(
+            z_count, 60,
+            "hard-splitting the long token must not drop characters"
         );
     }
 
@@ -27016,22 +27097,33 @@
     }
 
     #[test]
-    fn readable_tool_only_assistant_turn_long_detail_truncated() {
-        // Tool-only turn with a long Bash command — each arrow line must respect
-        // wrap_width via the same truncation logic as the top-level tool_use handler.
+    fn readable_tool_only_assistant_turn_long_detail_wraps() {
+        // #63: tool-only turn with a long Bash command — the arrow line must
+        // wrap onto continuation rows via the same `wrap_arrow_line` logic
+        // as the top-level `tool_use` handler, not lose text to an ellipsis.
         let cmd = "b".repeat(200);
         let line = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"x","name":"Bash","input":{{"command":"{cmd}"}}}}]}}}}"#
         );
         let mut turn = 0;
         let items = parse_json_events_readable(&line, &mut turn, None, 80);
-        assert_eq!(items.len(), 1);
-        let text = &items[0].text.spans[0].text;
         assert!(
-            text.chars().count() <= 80,
-            "tool-only arrow line should be truncated to wrap_width: {} chars",
-            text.chars().count()
+            items.len() > 1,
+            "a 200-char command at wrap_width 80 must wrap onto multiple rows, got {} item(s)",
+            items.len()
         );
+        let mut b_count = 0usize;
+        for item in &items {
+            let text = &item.text.spans[0].text;
+            assert!(
+                text.chars().count() <= 80,
+                "tool-only arrow row exceeds wrap_width: {} chars",
+                text.chars().count()
+            );
+            assert!(!text.contains('…'), "no row should be ellipsised: {text:?}");
+            b_count += text.chars().filter(|&c| c == 'b').count();
+        }
+        assert_eq!(b_count, 200, "no characters of the command may be dropped");
     }
 
     #[test]

@@ -431,7 +431,7 @@ impl CoordApp {
     /// finding: "hit-testing appears to route straight to
     /// `DataTableHit::Row`"). Callers must check this *before*
     /// `audit_table_hit` so a scrollbar click never reaches row selection.
-    pub(crate) fn audit_scrollbar_hit(&self, pos: Point) -> Option<AuditScrollAxis> {
+    pub(crate) fn audit_scrollbar_hit(&self, pos: Point) -> Option<ScrollAxis> {
         let layout_ref = self.audit_table_layout.borrow();
         let (rect, layout) = layout_ref.as_ref()?;
         let x = pos.x - rect.x;
@@ -444,13 +444,13 @@ impl CoordApp {
         if layout.scrollbar_width > 0.0 {
             let sb_x0 = layout.viewport_width - layout.scrollbar_width;
             if x >= sb_x0 && y >= layout.header_height {
-                return Some(AuditScrollAxis::Vertical);
+                return Some(ScrollAxis::Vertical);
             }
         }
         if layout.h_scrollbar_height > 0.0 {
             let hsb_y0 = layout.viewport_height - layout.h_scrollbar_height;
             if y >= hsb_y0 {
-                return Some(AuditScrollAxis::Horizontal);
+                return Some(ScrollAxis::Horizontal);
             }
         }
         None

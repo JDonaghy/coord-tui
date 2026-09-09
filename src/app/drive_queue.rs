@@ -1880,7 +1880,7 @@ impl CoordApp {
     /// header/row sits under it.
     ///
     /// #2043: extended from a plain vertical-only `bool` to
-    /// `Option<QueueScrollAxis>` the same way `audit_scrollbar_hit` reports
+    /// `Option<ScrollAxis>` the same way `audit_scrollbar_hit` reports
     /// both of Audit's tracks — same geometry the TUI rasteriser paints
     /// them at (`quadraui::tui::data_table::draw_data_table`: the vertical
     /// track occupies the rightmost `scrollbar_width` columns below the
@@ -1888,7 +1888,7 @@ impl CoordApp {
     /// `h_scrollbar_height` row(s), left of the vertical track). Vertical
     /// takes priority in the bottom-right corner, matching Audit's own
     /// priority order.
-    pub(crate) fn queue_scrollbar_hit(&self, pos: Point) -> Option<QueueScrollAxis> {
+    pub(crate) fn queue_scrollbar_hit(&self, pos: Point) -> Option<ScrollAxis> {
         let cache = self.queue_table_layout.borrow();
         let (rect, layout) = cache.as_ref()?;
         let x = pos.x - rect.x;
@@ -1900,11 +1900,11 @@ impl CoordApp {
             && x >= layout.viewport_width - layout.scrollbar_width
             && y >= layout.header_height
         {
-            return Some(QueueScrollAxis::Vertical);
+            return Some(ScrollAxis::Vertical);
         }
         if layout.h_scrollbar_height > 0.0 && y >= layout.viewport_height - layout.h_scrollbar_height
         {
-            return Some(QueueScrollAxis::Horizontal);
+            return Some(ScrollAxis::Horizontal);
         }
         None
     }

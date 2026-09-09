@@ -1534,6 +1534,29 @@ fn extract_tool_calls(json: &str) -> Vec<(String, String)> {
     calls
 }
 
+/// #61: quadraui's TUI list rasteriser (`quadraui::tui::list::draw_list`)
+/// draws a mandatory 2-column `"▶ "` / `"  "` selection-marker prefix before
+/// every row's own content — unconditionally, regardless of
+/// `ListView::has_focus` or whether that particular row is selected — and
+/// that prefix is *not* reflected in the `Rect` width these panes stash
+/// (`last_log_panel_cols` / `last_issue_panel_cols` / `last_stage_content_cols`).
+///
+/// Every wrap-budget computation below must subtract this on top of its own
+/// application-level indent (if any), or the *last* column of any row that
+/// exactly fills its computed budget gets silently clipped at paint time —
+/// the "size" → "siz" symptom #61 reports (`word_wrap` itself picks the
+/// right split point; the loss happens only when the row is rasterised).
+/// Confirmed empirically against all three call sites below (a driver test
+/// per site, in `tests.rs`'s "#61: TUI wrap-budget off-by-one" section):
+/// each needed exactly this much subtracted *in addition to* its own indent
+/// to stop losing a character on a full-width row.
+///
+/// Also the single source [`pipeline_log_list`]'s `max_content_width`
+/// derives from (render.rs), so the wrap budget and the row-width
+/// measurement used for the Log tab's horizontal scrollbar can't drift
+/// apart the way they did before #61.
+pub(crate) const LIST_ROW_PREFIX_COLS: usize = 2;
+
 /// Parse the `REVIEW_VERDICT` / `REVIEW_BODY` block embedded in a result event's
 /// `result` string and return it as renderable list items. Returns an empty
 /// Vec when the result isn't a structured review (e.g. a normal work or plan
@@ -1584,7 +1607,9 @@ fn extract_review_items(line: &str, wrap_width: usize) -> Vec<ListItem> {
     items.push(activity_item(&format!("[review] {}", verdict), color));
 
     let indent = "  ";
-    let prose_wrap = wrap_width.saturating_sub(indent.len());
+    // #61: subtract the list widget's own mandatory row prefix on top of this
+    // function's indent — see `LIST_ROW_PREFIX_COLS`'s doc comment.
+    let prose_wrap = wrap_width.saturating_sub(indent.len() + LIST_ROW_PREFIX_COLS);
     let md_theme = quadraui::Theme::default();
     let rendered = quadraui::render_markdown_to_styled_wrapped(&body, &md_theme, prose_wrap);
     for md_line in rendered.lines {
@@ -2772,21 +2797,31 @@ pub struct CoordApp {
     /// hard-coded `items.len() - 40` cut off latest lines when the terminal
     /// viewport was under 40 rows).
     last_main_visible_rows: std::cell::Cell<usize>,
-    /// Panel width in "backend units" (character columns for TUI, pixels for
-    /// GTK) of the Pipeline Log tab's content rect, updated just before
-    /// `pipeline_log_list` is called on each render.  Defaults to 120.  Used
-    /// by `parse_log_content_readable` / `parse_sse_log_readable` to word-wrap
-    /// long assistant text blocks so the Log tab is readable without horizontal
-    /// scrolling (#385).
+    /// Panel width **in character columns** of the Pipeline Log tab's content
+    /// rect, updated just before `pipeline_log_list` is called on each
+    /// render.  Defaults to 120.  Used by `parse_log_content_readable` /
+    /// `parse_sse_log_readable` to word-wrap long assistant text blocks so the
+    /// Log tab is readable without horizontal scrolling (#385).
+    ///
+    /// #61: the stash site divides the rect's width (backend units — pixels
+    /// on GTK/macOS, already columns on TUI) by `Backend::char_width()`
+    /// before storing, so this cell always holds a real character count
+    /// regardless of backend. It used to store the raw backend-unit width,
+    /// which meant a ~1100px-wide GTK pane became an ~1100-character wrap
+    /// budget and nothing ever wrapped.
     last_log_panel_cols: std::cell::Cell<usize>,
-    /// Panel width in backend units of the Issue tab's content rect, updated
-    /// just before `board_issue_body_list` / `pipeline_issue_body_list` is
-    /// called on each render.  Defaults to 120.  Used by `issue_body_list` to
-    /// word-wrap long lines to the viewport width (#669).
+    /// Panel width **in character columns** of the Issue tab's content rect,
+    /// updated just before `board_issue_body_list` / `pipeline_issue_body_list`
+    /// is called on each render.  Defaults to 120.  Used by `issue_body_list`
+    /// to word-wrap long lines to the viewport width (#669).
+    ///
+    /// #61: converted from backend units at the stash site — see
+    /// `last_log_panel_cols`'s doc comment.
     last_issue_panel_cols: std::cell::Cell<usize>,
-    /// #2288 (ms-65 §9): the Board panel's Issue sub-tab content width, in
-    /// backend units, **per pane** — entry `i` is the width pane `i` last
-    /// painted its Issue body at.
+    /// #2288 (ms-65 §9): the Board panel's Issue sub-tab content width, **in
+    /// character columns** (#61: converted from backend units at the stash
+    /// site, same as `last_log_panel_cols`), **per pane** — entry `i` is the
+    /// width pane `i` last painted its Issue body at.
     ///
     /// A single shared `Cell` (`last_issue_panel_cols`) cannot express this
     /// once the panel can hold two panes at once: `render_content` paints
@@ -2802,14 +2837,17 @@ pub struct CoordApp {
     /// body yet", which falls back to `last_issue_panel_cols` so a
     /// never-painted fixture keeps the 120-column default it always had.
     board_pane_issue_cols: std::cell::RefCell<Vec<usize>>,
-    /// #55: content width in backend units of the Pipeline panel's stage-detail
-    /// pane (the Overview tab's meta body, and the Completed tab's row-detail
-    /// body — the two `pipeline_tab_body_list_for` call sites), updated just
-    /// before that list is built each frame.  Read back by
-    /// `stage_content_review` (the reviewer's findings body) and
+    /// #55: content width **in character columns** of the Pipeline panel's
+    /// stage-detail pane (the Overview tab's meta body, and the Completed
+    /// tab's row-detail body — the two `pipeline_tab_body_list_for` call
+    /// sites), updated just before that list is built each frame.  Read back
+    /// by `stage_content_review` (the reviewer's findings body) and
     /// `stage_content_test` (the per-step captured output and the build-log
     /// tail) to word-wrap that prose to the live viewport instead of clipping
     /// it at a fixed character count. Defaults to 120.
+    ///
+    /// #61: converted from backend units (pixels on GTK/macOS) at both stash
+    /// sites — see `last_log_panel_cols`'s doc comment.
     ///
     /// A single shared `Cell`, not one indexed per pane like
     /// `board_pane_issue_cols`: the Pipeline panel is single-pane today (the

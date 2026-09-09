@@ -2855,7 +2855,10 @@ impl CoordApp {
                 // `last_stage_content_cols`'s doc comment for why one shared
                 // `Cell` is safe here (this tab and Overview never paint in
                 // the same frame).
-                self.last_stage_content_cols.set(body_rect.width as usize);
+                // #61: convert backend units (pixels on GTK) to columns —
+                // see `render.rs`'s matching comment on the Overview arm's stash.
+                self.last_stage_content_cols
+                    .set((body_rect.width / backend.char_width().max(1.0)) as usize);
                 backend.draw_list(body_rect, &self.pipeline_tab_body_list_for(Some(idx)))
             }
             None => backend.draw_list(

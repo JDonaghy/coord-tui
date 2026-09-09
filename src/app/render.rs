@@ -347,7 +347,14 @@ impl ShellApp for CoordApp {
                             // stage_content_test / stage_content_plan can
                             // word-wrap prose to the viewport instead of
                             // clipping it at a fixed character count.
-                            self.last_stage_content_cols.set(meta_rect.width as usize);
+                            // #61: `meta_rect.width` is in backend units —
+                            // character columns on TUI, pixels on GTK/macOS —
+                            // but the wrap consumers want a character count.
+                            // Divide by `char_width()` (1.0 on TUI, a no-op)
+                            // to convert, same as `render.rs:469` /
+                            // `drive_queue.rs:1534` / `dialogs.rs:1545`.
+                            self.last_stage_content_cols
+                                .set((meta_rect.width / backend.char_width().max(1.0)) as usize);
                             backend.draw_list(meta_rect, &self.pipeline_tab_body_list());
                         }
                         PipelineDetailTab::Issue => {
@@ -355,7 +362,10 @@ impl ShellApp for CoordApp {
                             let body_rect = content_below_strip(self, backend, content_rect);
                             // #669: stash content width so pipeline_issue_body_list can
                             // word-wrap long lines to the viewport.
-                            self.last_issue_panel_cols.set(body_rect.width as usize);
+                            // #61: convert backend units (pixels on GTK) to columns —
+                            // see the matching comment on `last_stage_content_cols` above.
+                            self.last_issue_panel_cols
+                                .set((body_rect.width / backend.char_width().max(1.0)) as usize);
                             backend.draw_list(body_rect, &self.pipeline_issue_body_list());
                         }
                         PipelineDetailTab::Log => {
@@ -380,7 +390,10 @@ impl ShellApp for CoordApp {
                             );
                             // #385: stash panel width so pipeline_log_list can
                             // word-wrap assistant prose to the viewport.
-                            self.last_log_panel_cols.set(list_rect.width as usize);
+                            // #61: convert backend units (pixels on GTK) to columns —
+                            // see the matching comment on `last_stage_content_cols` above.
+                            self.last_log_panel_cols
+                                .set((list_rect.width / backend.char_width().max(1.0)) as usize);
                             let log_list = self.pipeline_log_list();
 
                             // #399: draw the vertical scrollbar at the right edge.
@@ -1649,14 +1662,23 @@ pub(crate) fn issue_body_list(
                 // #669: render through `render_markdown_to_styled_wrapped` so
                 // long body lines are wrapped to the panel width.  Fenced code
                 // blocks are never wrapped (quadraui guarantees that).  When
-                // width == 0 the function falls back to the unwrapped path.
+                // width == 0 the function falls back to the unwrapped path
+                // (`saturating_sub` keeps that true after the #61 adjustment
+                // below).
                 // #372-pattern: headings, bold, italic, inline code, lists,
                 // blockquotes, and fenced code blocks are styled.
                 // TODO(#217): pass active_theme once issue_body_list accepts a theme
                 // parameter; for now the quadraui dark default is a reasonable fallback.
+                // #61: unlike `extract_review_items`/`push_markdown_prose_rows`,
+                // rendered lines here carry no extra application-level indent —
+                // but the list widget's own mandatory row prefix still applies.
+                // See `LIST_ROW_PREFIX_COLS`'s doc comment (mod.rs).
                 let md_theme = quadraui::Theme::default();
-                let rendered =
-                    quadraui::render_markdown_to_styled_wrapped(body, &md_theme, width);
+                let rendered = quadraui::render_markdown_to_styled_wrapped(
+                    body,
+                    &md_theme,
+                    width.saturating_sub(LIST_ROW_PREFIX_COLS),
+                );
                 for md_line in rendered.lines {
                     items.push(ListItem {
                         text: md_line,
@@ -1697,7 +1719,9 @@ pub(crate) fn issue_body_list(
 /// theme parameter; for now the quadraui dark default matches every other
 /// adapter call site in this crate.
 fn push_markdown_prose_rows(rows: &mut Vec<ListItem>, text: &str, wrap_width: usize, indent: &str) {
-    let prose_wrap = wrap_width.saturating_sub(indent.len());
+    // #61: subtract the list widget's own mandatory row prefix on top of this
+    // caller's indent — see `LIST_ROW_PREFIX_COLS`'s doc comment (mod.rs).
+    let prose_wrap = wrap_width.saturating_sub(indent.len() + LIST_ROW_PREFIX_COLS);
     let md_theme = quadraui::Theme::default();
     let rendered = quadraui::render_markdown_to_styled_wrapped(text, &md_theme, prose_wrap);
     for md_line in rendered.lines {
@@ -1937,7 +1961,12 @@ impl CoordApp {
                 // (because the cell outlives the frame) a wrong scroll clamp
                 // in `mouse_main_scroll`, which re-derives `items.len()`
                 // from it after the paint.
-                self.stash_board_pane_issue_cols(content_rect.width as usize);
+                // #61: convert backend units (pixels on GTK) to columns —
+                // see `render.rs`'s matching comment on `last_stage_content_cols`'s
+                // stash sites.
+                self.stash_board_pane_issue_cols(
+                    (content_rect.width / backend.char_width().max(1.0)) as usize,
+                );
                 backend.draw_list(content_rect, &self.board_issue_body_list());
             }
             // #316: Chat tab — empty state CTA or live board chat.
@@ -4264,11 +4293,9 @@ impl CoordApp {
                 ));
                 items.push(kv_item("", "", None));
 
-                // #385: readable wrapped rendering.  Panel width is set by
-                // the render path via `last_log_panel_cols` just before calling
-                // this method — TUI backends store columns directly; GTK stores
-                // pixels (large values mean wrapping won't fire, which is fine
-                // since GTK handles layout internally).
+                // #385: readable wrapped rendering.  Panel width (in
+                // character columns — #61) is set by the render path via
+                // `last_log_panel_cols` just before calling this method.
                 let wrap_width = self.last_log_panel_cols.get().max(40);
 
                 // Use SSE from the watch pool if a stream exists for this
@@ -4448,9 +4475,15 @@ impl CoordApp {
             self.pipeline_detail_scroll
         };
         // #302: measure the widest row so the rasteriser knows when content
-        // overflows and should paint a horizontal scrollbar. Width = the 3-char
-        // "   " indent the rows carry + the item's visible text width.
-        let max_content_width = items.iter().map(|it| 3 + it.text.visible_width()).max();
+        // overflows and should paint a horizontal scrollbar. Width = the list
+        // widget's own mandatory row prefix (#61's `LIST_ROW_PREFIX_COLS`,
+        // never part of `it.text`) + the item's visible text width (which
+        // already includes any indent a caller like `extract_review_items`
+        // pushed as its own leading span).
+        let max_content_width = items
+            .iter()
+            .map(|it| LIST_ROW_PREFIX_COLS + it.text.visible_width())
+            .max();
         // Clamp the horizontal offset so it can't scroll past the content.
         let h_scroll = match max_content_width {
             Some(w) => self.pipeline_log_hscroll.min(w.saturating_sub(1)),

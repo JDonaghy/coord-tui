@@ -1201,6 +1201,33 @@ pub(crate) fn extract_text_block_keep_newlines(json: &str) -> String {
 
 // ─── Readable log rendering (#385) ───────────────────────────────────────────
 
+/// Truncate a `"  → Name: detail"`-style single-line prefix so the full row —
+/// including the list widget's own mandatory row prefix that isn't reflected
+/// in `wrap_width` (`LIST_ROW_PREFIX_COLS`; see its doc comment in mod.rs) —
+/// fits the pane. Appends `…` when truncated. `wrap_width == 0` (or a budget
+/// too small to hold even one column after subtracting the row prefix)
+/// disables truncation, matching this module's existing wrap-width
+/// convention elsewhere.
+///
+/// #61: this used to compare `prefix.chars().count()` directly against the
+/// raw `wrap_width`, which is one column wider than the row can actually
+/// paint — the same off-by-one `extract_review_items`'s indent already
+/// accounted for. Shared here across the tool-only-turn, mixed-content-turn,
+/// and bare `tool_use` call sites so the three can't drift out of sync again.
+fn truncate_arrow_line(prefix: &str, wrap_width: usize) -> String {
+    let effective_wrap = wrap_width.saturating_sub(LIST_ROW_PREFIX_COLS);
+    if effective_wrap > 0 && prefix.chars().count() > effective_wrap {
+        let cut = prefix
+            .char_indices()
+            .nth(effective_wrap.saturating_sub(1))
+            .map(|(i, _)| i)
+            .unwrap_or(prefix.len());
+        format!("{}…", &prefix[..cut])
+    } else {
+        prefix.to_string()
+    }
+}
+
 /// Parse one stream-json event line into zero or more displayable `ListItem`s
 /// using a readable, human-friendly format (#385):
 ///
@@ -1296,7 +1323,10 @@ pub(crate) fn parse_json_events_readable(
                         return vec![activity_item(&header, Color::rgb(80, 80, 100))];
                     }
                     let mut items = vec![activity_item(&header, Color::rgb(80, 80, 100))];
-                    let think_inner_wrap = if wrap_width > 2 { wrap_width - 2 } else { 0 };
+                    // #61: subtract the list widget's own mandatory row prefix
+                    // on top of this closure's own "  " indent — see
+                    // `LIST_ROW_PREFIX_COLS`'s doc comment (mod.rs).
+                    let think_inner_wrap = wrap_width.saturating_sub(2 + LIST_ROW_PREFIX_COLS);
                     for wl in word_wrap(&format!("💭 {}", thinking), think_inner_wrap) {
                         items.push(activity_item(
                             &format!("  {}", wl),
@@ -1315,16 +1345,7 @@ pub(crate) fn parse_json_events_readable(
                     } else {
                         format!("  \u{2192} {}: {}", call_name, call_detail)
                     };
-                    let display = if wrap_width > 0 && prefix.chars().count() > wrap_width {
-                        let cut = prefix
-                            .char_indices()
-                            .nth(wrap_width.saturating_sub(1))
-                            .map(|(i, _)| i)
-                            .unwrap_or(prefix.len());
-                        format!("{}…", &prefix[..cut])
-                    } else {
-                        prefix
-                    };
+                    let display = truncate_arrow_line(&prefix, wrap_width);
                     items.push(activity_item(&display, Color::rgb(160, 130, 200)));
                 }
                 return items;
@@ -1332,11 +1353,11 @@ pub(crate) fn parse_json_events_readable(
 
             // Normal turn: dim header + wrapped prose + any tool calls.
             let indent = "  ";
-            let prose_wrap = if wrap_width > indent.len() {
-                wrap_width - indent.len()
-            } else {
-                0
-            };
+            // #61: subtract the list widget's own mandatory row prefix on top
+            // of this arm's own indent — see `LIST_ROW_PREFIX_COLS`'s doc
+            // comment (mod.rs). Same treatment as `extract_review_items` and
+            // `push_markdown_prose_rows`.
+            let prose_wrap = wrap_width.saturating_sub(indent.len() + LIST_ROW_PREFIX_COLS);
             let mut items = Vec::new();
             let header = format!("  Turn {}{}", n, elapsed_str);
             items.push(activity_item(&header, Color::rgb(80, 80, 100)));
@@ -1381,16 +1402,7 @@ pub(crate) fn parse_json_events_readable(
                 } else {
                     format!("  \u{2192} {}: {}", call_name, call_detail)
                 };
-                let display = if wrap_width > 0 && prefix.chars().count() > wrap_width {
-                    let cut = prefix
-                        .char_indices()
-                        .nth(wrap_width.saturating_sub(1))
-                        .map(|(i, _)| i)
-                        .unwrap_or(prefix.len());
-                    format!("{}…", &prefix[..cut])
-                } else {
-                    prefix
-                };
+                let display = truncate_arrow_line(&prefix, wrap_width);
                 items.push(activity_item(&display, Color::rgb(160, 130, 200)));
             }
             items
@@ -1408,16 +1420,7 @@ pub(crate) fn parse_json_events_readable(
             };
             // For very long bash commands, truncate at wrap_width with ellipsis
             // so the arrow line stays on screen without horizontal scrolling.
-            let display = if wrap_width > 0 && prefix.chars().count() > wrap_width {
-                let cut = prefix
-                    .char_indices()
-                    .nth(wrap_width.saturating_sub(1))
-                    .map(|(i, _)| i)
-                    .unwrap_or(prefix.len());
-                format!("{}…", &prefix[..cut])
-            } else {
-                prefix
-            };
+            let display = truncate_arrow_line(&prefix, wrap_width);
             vec![activity_item(&display, Color::rgb(160, 130, 200))]
         }
 
@@ -3890,7 +3893,12 @@ impl CoordApp {
                     if let Some(output) = self.test_step_output.get(&key) {
                         let wrap_width = self.last_stage_content_cols.get().max(40);
                         let indent = "     ";
-                        let prose_wrap = wrap_width.saturating_sub(indent.len());
+                        // #61: subtract the list widget's own mandatory row
+                        // prefix on top of this indent — see
+                        // `LIST_ROW_PREFIX_COLS`'s doc comment (mod.rs). Same
+                        // treatment as `push_markdown_prose_rows` above.
+                        let prose_wrap =
+                            wrap_width.saturating_sub(indent.len() + LIST_ROW_PREFIX_COLS);
                         for line in output.lines().take(50) {
                             for wrapped in word_wrap(line, prose_wrap) {
                                 rows.push(kv_item(
@@ -3988,7 +3996,10 @@ impl CoordApp {
             // clipping each line at a fixed column.
             let wrap_width = self.last_stage_content_cols.get().max(40);
             let indent = "   ";
-            let prose_wrap = wrap_width.saturating_sub(indent.len());
+            // #61: subtract the list widget's own mandatory row prefix on top
+            // of this indent — see `LIST_ROW_PREFIX_COLS`'s doc comment
+            // (mod.rs). Same treatment as `push_markdown_prose_rows` above.
+            let prose_wrap = wrap_width.saturating_sub(indent.len() + LIST_ROW_PREFIX_COLS);
             for line in content.lines().take(200) {
                 for wrapped in word_wrap(line, prose_wrap) {
                     rows.push(kv_item("", &format!("{indent}{wrapped}"), None));
@@ -4480,6 +4491,18 @@ impl CoordApp {
         // never part of `it.text`) + the item's visible text width (which
         // already includes any indent a caller like `extract_review_items`
         // pushed as its own leading span).
+        //
+        // #61: the original #302 comment here asserted this indent was 3
+        // columns ("the 3-char '   ' indent the rows carry"), while the wrap
+        // budget computations elsewhere only ever subtracted a 2-character
+        // caller-level indent — neither number was the actual widget prefix.
+        // `quadraui::tui::list::draw_list` draws a mandatory 2-column
+        // "▶ "/"  " selection marker (measured empirically via the
+        // paint-level tests above), so `LIST_ROW_PREFIX_COLS == 2` is the one
+        // correct value; the old literal `3` overstated it by a column in
+        // this measurement (harmless here — it only widens the scrollbar
+        // trigger) while the wrap-budget call sites understated the row's
+        // *total* overhead by a column (the actual #61 bug).
         let max_content_width = items
             .iter()
             .map(|it| LIST_ROW_PREFIX_COLS + it.text.visible_width())

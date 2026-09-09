@@ -1541,15 +1541,18 @@ fn extract_tool_calls(json: &str) -> Vec<(String, String)> {
 /// that prefix is *not* reflected in the `Rect` width these panes stash
 /// (`last_log_panel_cols` / `last_issue_panel_cols` / `last_stage_content_cols`).
 ///
-/// Every wrap-budget computation below must subtract this on top of its own
-/// application-level indent (if any), or the *last* column of any row that
-/// exactly fills its computed budget gets silently clipped at paint time —
-/// the "size" → "siz" symptom #61 reports (`word_wrap` itself picks the
-/// right split point; the loss happens only when the row is rasterised).
-/// Confirmed empirically against all three call sites below (a driver test
-/// per site, in `tests.rs`'s "#61: TUI wrap-budget off-by-one" section):
-/// each needed exactly this much subtracted *in addition to* its own indent
-/// to stop losing a character on a full-width row.
+/// Every wrap-budget computation that reads `last_log_panel_cols` /
+/// `last_issue_panel_cols` / `last_stage_content_cols` (directly, or via a
+/// parameter threaded down from one of them, e.g. `parse_json_events_readable`'s
+/// `wrap_width`) must subtract this on top of its own application-level
+/// indent (if any), or the *last* column of any row that exactly fills its
+/// computed budget gets silently clipped at paint time — the "size" → "siz"
+/// symptom #61 reports (`word_wrap` itself picks the right split point; the
+/// loss happens only when the row is rasterised). Confirmed empirically
+/// against every call site in `tests.rs`'s "#61: TUI wrap-budget off-by-one"
+/// section (a driver test per site): each needed exactly this much
+/// subtracted *in addition to* its own indent to stop losing a character on
+/// a full-width row.
 ///
 /// Also the single source [`pipeline_log_list`]'s `max_content_width`
 /// derives from (render.rs), so the wrap budget and the row-width

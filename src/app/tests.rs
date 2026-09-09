@@ -22976,6 +22976,144 @@
         assert_digit_cycle_unbroken(&digits, cycle);
     }
 
+    #[test]
+    fn pipeline_log_list_assistant_prose_does_not_clip_a_full_width_wrapped_row() {
+        // parse_json_events_readable's normal-turn prose wrap (render.rs) —
+        // the Log tab's renderer for *every* ordinary assistant turn, the
+        // primary, highest-traffic consumer of `last_log_panel_cols` (#385's
+        // original purpose), far more common than the REVIEW_VERDICT/
+        // REVIEW_BODY block `extract_review_items` handles above.
+        use quadraui::tui::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+
+        let mut work = _stage_assignment("asst-clip", "work", 200.0, "in_progress");
+        work.issue_number = 42;
+        app.data.assignments.push(work);
+
+        let cycle = "1234567";
+        let long_token: String = cycle.chars().cycle().take(2000).collect();
+        let text = format!("STARTMARK{long_token}");
+        let assistant_line = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        );
+        let (mut sse, _tx) = make_sse_state_pair();
+        sse.lines.push(assistant_line);
+        sse.line_times.push(std::time::Instant::now());
+        sse.done = false;
+        let ctx = WatchContext {
+            state: WatchState {
+                assignment_id: "asst-clip".to_string(),
+                machine: "m1".to_string(),
+                repo: "api".to_string(),
+                issue_number: 42,
+                assignment_type: "work".to_string(),
+                scroll: usize::MAX,
+            },
+            sse,
+            inject_transcript: Vec::new(),
+            inject_sse_offsets: Vec::new(),
+            history_turns: Vec::new(),
+            last_focused_at: Instant::now(),
+        };
+        app.watch_pool.insert("asst-clip".to_string(), ctx);
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let digits = digit_cycle_from_screen(&driver, "STARTMARK", 25);
+        assert_digit_cycle_unbroken(&digits, cycle);
+    }
+
+    #[test]
+    fn stage_content_test_captured_output_does_not_clip_a_full_width_wrapped_row() {
+        // stage_content_test's per-step captured-output wrap (render.rs) — one
+        // of the two `pipeline_tab_body_list_for` call sites the
+        // `last_stage_content_cols` doc comment names, i.e. the "stage detail
+        // panes" the issue's "Done when" checklist calls out as sharing both
+        // bugs.
+        use quadraui::tui::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        // "test" isn't one of this fixture's default gates — add it so the
+        // stage strip (and `pipeline_focused_stage`) has a "test" entry to
+        // point at.
+        app.data.pipeline_default_gates = vec!["test".to_string(), "review".to_string()];
+        let stage_names = app.pipeline_stage_names_for_issue(&app.pipeline_issues[0].clone());
+        let test_idx = stage_names
+            .iter()
+            .position(|s| s == "test")
+            .expect("test must be one of this issue's stages");
+        app.pipeline_focused_stage = Some(test_idx);
+
+        let mut work = _stage_assignment("work-clip", "work", 100.0, "done");
+        work.issue_number = 42;
+        work.test_plan = Some(vec![TestPlanStep {
+            kind: "run".to_string(),
+            cmd: Some("echo hi".to_string()),
+            label: None,
+            check: None,
+        }]);
+        app.data.assignments.push(work);
+
+        let cycle = "1234567";
+        let long_token: String = cycle.chars().cycle().take(2000).collect();
+        let output = format!("STARTMARK{long_token}");
+        app.test_step_output.insert(("work-clip".to_string(), 0), output);
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let digits = digit_cycle_from_screen(&driver, "STARTMARK", 25);
+        assert_digit_cycle_unbroken(&digits, cycle);
+    }
+
+    #[test]
+    fn stage_content_test_build_log_tail_does_not_clip_a_full_width_wrapped_row() {
+        // stage_content_test's build-log-tail wrap (render.rs) — the other
+        // half of the same gap: build logs and captured test output routinely
+        // contain long unbroken tokens (paths, hashes, URLs) that hit
+        // `word_wrap`'s hard-split path.
+        use quadraui::tui::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.data.pipeline_default_gates = vec!["test".to_string(), "review".to_string()];
+        let stage_names = app.pipeline_stage_names_for_issue(&app.pipeline_issues[0].clone());
+        let test_idx = stage_names
+            .iter()
+            .position(|s| s == "test")
+            .expect("test must be one of this issue's stages");
+        app.pipeline_focused_stage = Some(test_idx);
+
+        let mut work = _stage_assignment("work-clip2", "work", 100.0, "done");
+        work.issue_number = 42;
+        app.data.assignments.push(work);
+
+        let tid = format!("{:?}", std::thread::current().id()).replace(['(', ')'], "");
+        let log_path =
+            std::env::temp_dir().join(format!("coord-tui-test-61-build-log-{}.log", tid));
+        let cycle = "1234567";
+        let long_token: String = cycle.chars().cycle().take(2000).collect();
+        std::fs::write(&log_path, format!("STARTMARK{long_token}")).unwrap();
+        app.last_test_builds.insert(
+            "work-clip2".to_string(),
+            TestBuildResult {
+                branch: "issue-42-fix".to_string(),
+                issue_number: 42,
+                exit_code: 0,
+                first_error: String::new(),
+                log_path: log_path.clone(),
+                duration_secs: 10,
+                finished_at: Instant::now(),
+            },
+        );
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let digits = digit_cycle_from_screen(&driver, "STARTMARK", 25);
+        assert_digit_cycle_unbroken(&digits, cycle);
+        let _ = std::fs::remove_file(&log_path);
+    }
+
     // ── #57: markdown adapter adoption ──────────────────────────────────────
 
     #[test]

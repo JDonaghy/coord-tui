@@ -49300,8 +49300,7 @@ Milestone tracking issue.
         // No render has happened (nothing cached in `audit_table_layout`),
         // but the empty-list check short-circuits before that matters.
         let app = make_test_app(BoardData::default());
-        let main_b = Rect::new(0.0, 0.0, 100.0, 20.0);
-        assert_eq!(app.audit_table_hit(Point::new(5.0, 0.4), main_b), None);
+        assert_eq!(app.audit_table_hit(Point::new(5.0, 0.4)), None);
     }
 
     #[test]
@@ -49433,7 +49432,17 @@ Milestone tracking issue.
         driver.mouse_up(divider_x + 4.0, header_y);
         driver.render();
 
-        let (category_x_after, _) = driver.find("Category").unwrap_or_else(|| {
+        // #70: post-fix, a divider drag moves width *only* between the two
+        // columns it separates (`DataTableLayout::drag_divider`), pinning
+        // Category's combined width with Time constant rather than letting
+        // Category sit untouched while Flex columns elsewhere redistribute
+        // (the pre-#70 behaviour). So widening Time by 4 shrinks Category
+        // by 4 too — from `Fixed(9)` to 5 — which is now too narrow to show
+        // the full 8-character "Category" title. Search for the truncated
+        // "Cate" prefix instead; it still resolves to the header row (the
+        // first on-screen occurrence) rather than the "Category: all"
+        // filter line lower in the sidebar.
+        let (category_x_after, _) = driver.find("Cate").unwrap_or_else(|| {
             panic!(
                 "Category column header not rendered after resize:\n{}",
                 driver.screen()
@@ -49445,6 +49454,236 @@ Milestone tracking issue.
             "dragging the Time/Category divider 4 cells right must widen \
              column 0 by 4, pushing Category's header start right by 4:\n{}",
             driver.screen()
+        );
+
+        // #70 acceptance: a column on the far side of the dragged pair
+        // (Actor, two columns over) must keep its resolved position —
+        // the pair's *combined* width is conserved, so nothing past
+        // Category shifts.
+        let (actor_x_after, _) = driver.find("Actor").unwrap_or_else(|| {
+            panic!("Actor column header not rendered after resize:\n{}", driver.screen())
+        });
+        assert_eq!(
+            actor_x_after,
+            time_x + 11.0 + 9.0,
+            "#70: Actor (untouched by this drag) must stay at Time+Category's \
+             original combined width — the dragged pair's combined width is \
+             conserved, not redistributed among later columns:\n{}",
+            driver.screen()
+        );
+    }
+
+    #[test]
+    fn audit_resize_drag_tracks_cursor_when_h_scrolled() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        // #70: this is the actual reported defect. `audit_update_resize_
+        // drag` used to compute `(pos.x - main_b.x) - column.x`, mixing
+        // viewport-space `pos.x - main_b.x` with `column.x`'s *content*
+        // space (`ResolvedColumn::x` is measured from the first column's
+        // left edge, not the viewport's). At `audit_h_scroll == 0.0` the
+        // two coincide, which is why the bug shipped invisibly (see
+        // `audit_header_divider_drag_resizes_column` above); away from
+        // zero the divider drifted toward `AUDIT_MIN_COLUMN_WIDTH` by the
+        // scroll offset instead of tracking the cursor.
+        //
+        // Reproduces the issue's own repro steps: narrow the viewport
+        // below `AUDIT_TABLE_MIN_WIDTH` (75) so the table's h-scrollbar
+        // engages, scroll it right, THEN drag a divider.
+        let n = 5;
+        let app = make_app_with_audit_json(BoardData::default(), &audit_page_json_n_entries(n));
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 80, 24);
+        click_activity_icon(&mut driver, "§");
+        driver.render();
+
+        // Scroll the h-scrollbar to (near) its max — same track-click
+        // mechanism `audit_horizontal_scrollbar_click_scrolls_columns_
+        // into_view` already exercises for `audit_apply_hscroll`.
+        let lines: Vec<String> = driver.screen().lines().map(str::to_string).collect();
+        let (track_row, right_col) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| {
+                let chars: Vec<char> = line.chars().collect();
+                let last = chars.iter().rposition(|&c| c == '▄' || c == '▁')?;
+                Some((y, last))
+            })
+            .unwrap_or_else(|| panic!("h-scrollbar not rendered:\n{}", lines.join("\n")));
+        driver.click(right_col as f32 + 0.5, track_row as f32 + 0.5);
+        // `click()` only sends `MouseDown` (see its doc comment) — release
+        // it explicitly, exactly as a real click would, so
+        // `audit_scrollbar_drag` doesn't stay latched into the divider
+        // drag below (`MouseMoved` continues *every* active drag
+        // unconditionally — see `events.rs` — so a still-armed scrollbar
+        // drag would recompute `audit_h_scroll` out from under the resize
+        // on each move, corrupting this test independently of the fix
+        // under test).
+        driver.mouse_up(right_col as f32 + 0.5, track_row as f32 + 0.5);
+        driver.render();
+
+        // At (near-)max scroll, Repo#Issue and Summary — the two
+        // rightmost columns — are the pair still on screen; their shared
+        // divider (col 3, the last valid one) is what a real user could
+        // actually grab here.
+        let (summary_x_before, header_y) = driver.find("Summary").unwrap_or_else(|| {
+            panic!(
+                "Summary column header not rendered after h-scroll:\n{}",
+                driver.screen()
+            )
+        });
+
+        let divider_x = summary_x_before - 0.5;
+        driver.mouse_down(divider_x, header_y);
+        driver.mouse_move(divider_x + 4.0, header_y);
+        driver.mouse_up(divider_x + 4.0, header_y);
+        driver.render();
+
+        let (summary_x_after, _) = driver.find("Summary").unwrap_or_else(|| {
+            panic!(
+                "Summary column header not rendered after resize:\n{}",
+                driver.screen()
+            )
+        });
+        assert_eq!(
+            summary_x_after,
+            summary_x_before + 4.0,
+            "#70: dragging a divider 4 cells right must widen the column to \
+             its left by 4 and push Summary's header start right by 4, \
+             regardless of horizontal scroll offset — the pre-fix formula \
+             would instead have collapsed Repo#Issue toward \
+             `AUDIT_MIN_COLUMN_WIDTH` and left Summary roughly where it \
+             started:\n{}",
+            driver.screen()
+        );
+    }
+
+    // #70: the remaining acceptance criteria are exercised as direct
+    // method-call tests against a plain `CoordApp`, with `audit_table_
+    // layout` populated via `DataTable::layout` — a pure computation (no
+    // `Backend`/frame needed, unlike `render_audit_panel`) — rather than
+    // through `TuiDriver`. `DataTableLayout::drag_divider` is quadraui's
+    // own, already-tested primitive (quadraui#521/#550); what's
+    // Audit-specific and worth pinning here is `audit_update_resize_drag`'s
+    // wiring around it: precise before/after override values, and the
+    // `col + 1` guard, which is unreachable through a real click at all
+    // (`DataTableLayout::hit_test` only ever returns `HeaderDivider { col
+    // }` for `col + 1 < columns.len()`, so `audit_resize_col` can never
+    // legitimately hold Audit's last column index through `TuiDriver`
+    // interaction) — it is a defensive guard against a stale/mismatched
+    // cache, not user-visible behaviour, hence tested directly rather than
+    // through a black-box driver.
+    fn audit_table_layout_for_test(overrides: Vec<Option<f32>>) -> (Rect, DataTableLayout) {
+        let table = DataTable {
+            id: WidgetId::new("audit-list-test"),
+            columns: CoordApp::audit_columns(),
+            rows: Vec::new(),
+            selected_idx: None,
+            scroll_offset: 0,
+            sort: None,
+            has_focus: false,
+            show_scrollbar: true,
+            min_total_width: Some(CoordApp::AUDIT_TABLE_MIN_WIDTH),
+            h_scroll: 0.0,
+            column_overrides: overrides,
+            footer: None,
+        };
+        let rect = Rect::new(0.0, 0.0, 60.0, 20.0);
+        let layout = table.layout(rect.width, rect.height, 1.0, 1.0, 1.0, |_| {
+            quadraui::ColumnMeasure::new(0.0)
+        });
+        (rect, layout)
+    }
+
+    #[test]
+    fn audit_resize_drag_preserves_total_content_width() {
+        // #70 acceptance: "the table's total content width is unchanged by
+        // a resize" — compare `content_width` before/after re-resolving
+        // the layout with the drag's resulting overrides applied.
+        let mut app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
+        let n_cols = CoordApp::audit_columns().len();
+        let (rect, layout) = audit_table_layout_for_test(vec![None; n_cols]);
+        let content_width_before = layout.content_width;
+        *app.audit_table_layout.borrow_mut() = Some((rect, layout));
+
+        app.audit_resize_col = Some(2); // Actor/Repo#Issue divider
+        assert!(app.audit_update_resize_drag(Point::new(30.0, 0.0)));
+
+        let (rect2, layout2) = audit_table_layout_for_test(app.audit_column_overrides.clone());
+        *app.audit_table_layout.borrow_mut() = Some((rect2, layout2.clone()));
+        assert_eq!(
+            content_width_before, layout2.content_width,
+            "#70: a column resize must never change the table's total \
+             content width — only redistribute it between the dragged pair"
+        );
+    }
+
+    #[test]
+    fn audit_resize_drag_neither_half_collapses_below_minimum() {
+        // #70 acceptance: "neither half of the dragged pair collapses
+        // below `AUDIT_MIN_COLUMN_WIDTH`" — drag far enough past either
+        // end that a naive (unclamped) computation would go negative or
+        // zero, and confirm both halves stay at/above the floor.
+        let mut app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
+        let n_cols = CoordApp::audit_columns().len();
+        let (rect, layout) = audit_table_layout_for_test(vec![None; n_cols]);
+        *app.audit_table_layout.borrow_mut() = Some((rect, layout));
+
+        app.audit_resize_col = Some(0);
+        // Absurdly far left — would drive column 0's width negative
+        // without the `AUDIT_MIN_COLUMN_WIDTH` clamp.
+        assert!(app.audit_update_resize_drag(Point::new(-500.0, 0.0)));
+        let overrides = app.audit_column_overrides.clone();
+        assert_eq!(
+            overrides[0],
+            Some(CoordApp::AUDIT_MIN_COLUMN_WIDTH),
+            "column 0 must clamp at the minimum, not go negative: {overrides:?}"
+        );
+        assert!(
+            overrides[1].unwrap_or(0.0) >= CoordApp::AUDIT_MIN_COLUMN_WIDTH,
+            "column 1 must not be squeezed below the minimum either: {overrides:?}"
+        );
+
+        // Refresh the cached layout from the new overrides (mirrors a
+        // real render between drag steps) before the opposite-extreme drag.
+        let (rect2, layout2) = audit_table_layout_for_test(overrides);
+        *app.audit_table_layout.borrow_mut() = Some((rect2, layout2));
+        app.audit_resize_col = Some(0);
+        assert!(app.audit_update_resize_drag(Point::new(500.0, 0.0)));
+        let overrides = app.audit_column_overrides.clone();
+        assert!(
+            overrides[0].unwrap_or(0.0) >= CoordApp::AUDIT_MIN_COLUMN_WIDTH,
+            "column 0 must not be squeezed below the minimum: {overrides:?}"
+        );
+        assert_eq!(
+            overrides[1],
+            Some(CoordApp::AUDIT_MIN_COLUMN_WIDTH),
+            "column 1 must clamp at the minimum, not go negative: {overrides:?}"
+        );
+    }
+
+    #[test]
+    fn audit_resize_drag_out_of_range_column_is_a_noop() {
+        // #70 acceptance: "dragging the last divider is a no-op rather
+        // than a width change" — modeled as `audit_resize_col` pointing
+        // past the last valid divider (`col + 1 >= columns.len()`), the
+        // only way this guard is reachable at all (see the module comment
+        // above): a stale/mismatched cache must fail closed rather than
+        // panic on an out-of-bounds `columns[col + 1]` access.
+        let mut app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
+        let n_cols = CoordApp::audit_columns().len();
+        let (rect, layout) = audit_table_layout_for_test(vec![None; n_cols]);
+        *app.audit_table_layout.borrow_mut() = Some((rect, layout));
+
+        let before = app.audit_column_overrides.clone();
+        app.audit_resize_col = Some(n_cols - 1);
+        assert!(
+            !app.audit_update_resize_drag(Point::new(50.0, 0.0)),
+            "#70: a resize drag with no `col + 1` to hand width back to must \
+             report no redraw"
+        );
+        assert_eq!(
+            app.audit_column_overrides, before,
+            "#70: and must leave the overrides completely untouched"
         );
     }
 

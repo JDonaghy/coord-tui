@@ -4546,7 +4546,7 @@ impl CoordApp {
                     // paths below are no-ops, but checking explicitly keeps
                     // the precedence self-documenting.
                     if self.active_view == SidebarView::Audit && buttons.left {
-                        redraw |= self.audit_update_resize_drag(pos, main_b);
+                        redraw |= self.audit_update_resize_drag(pos);
                         // #1094 fix: continue an in-progress scrollbar
                         // track drag (started by a `MouseDown` inside
                         // `audit_scrollbar_hit`'s region — see
@@ -4555,10 +4555,10 @@ impl CoordApp {
                         if let Some(axis) = self.audit_scrollbar_drag {
                             redraw |= match axis {
                                 AuditScrollAxis::Vertical => {
-                                    self.audit_apply_vscroll(pos, main_b)
+                                    self.audit_apply_vscroll(pos)
                                 }
                                 AuditScrollAxis::Horizontal => {
-                                    self.audit_apply_hscroll(pos, main_b)
+                                    self.audit_apply_hscroll(pos)
                                 }
                             };
                         }
@@ -5964,19 +5964,19 @@ impl CoordApp {
         // "scrollbar click passes through and selects/opens the row
         // underneath" bug).
         if self.active_view == SidebarView::Audit && !self.audit_detail_open {
-            if let Some(axis) = self.audit_scrollbar_hit(pos, main_b) {
+            if let Some(axis) = self.audit_scrollbar_hit(pos) {
                 self.audit_scrollbar_drag = Some(axis);
                 match axis {
                     AuditScrollAxis::Vertical => {
-                        self.audit_apply_vscroll(pos, main_b);
+                        self.audit_apply_vscroll(pos);
                     }
                     AuditScrollAxis::Horizontal => {
-                        self.audit_apply_hscroll(pos, main_b);
+                        self.audit_apply_hscroll(pos);
                     }
                 }
                 return true;
             }
-            return match self.audit_table_hit(pos, main_b) {
+            return match self.audit_table_hit(pos) {
                 Some(DataTableHit::Row { idx }) => {
                     self.audit_sel = idx;
                     true

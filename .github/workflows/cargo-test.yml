@@ -98,8 +98,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The hosted runner image ships third-party apt repositories this job
+      # has no use for (Google Chrome, Microsoft prod, ...). `apt-get update`
+      # exits 100 if ANY configured index fails to fetch, so a transient
+      # publish race on one of those CDNs — e.g. dl.google.com serving a
+      # Packages.gz whose hash does not match the Release file it just
+      # published, "E: Failed to fetch .../Packages.gz Hash Sum mismatch" —
+      # fails this step even though every package we need (libgtk-4-dev and
+      # its deps) comes from the Ubuntu archive, which fetched fine. That is
+      # not a flake worth re-running: the mismatch persists until the CDN
+      # catches up, so it blocked the merge gate repeatedly.
+      #
+      # Drop the third-party lists before updating, keeping only the Ubuntu
+      # archive sources. Both image layouts are handled: the deb822
+      # `sources.list.d/ubuntu.sources` used by 24.04, and a populated
+      # `/etc/apt/sources.list` (never touched here). apt then indexes
+      # exactly the repository this job actually installs from.
       - name: Install GTK4 dev libraries
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+        run: |
+          set -euo pipefail
+          for src in /etc/apt/sources.list.d/*; do
+            [ -e "$src" ] || continue
+            case "${src##*/}" in
+              ubuntu.sources|ubuntu.list) ;;
+              *) echo "removing unused apt source: $src"; sudo rm -f "$src" ;;
+            esac
+          done
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y libgtk-4-dev
 
       - name: cargo build --features gtk --bin coord-tui-gtk
         run: cargo build --features gtk --bin coord-tui-gtk

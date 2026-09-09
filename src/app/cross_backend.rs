@@ -128,6 +128,32 @@ fn two_tab_app() -> CoordApp {
     app
 }
 
+/// #61: a board with one issue whose body is long enough to *have* to wrap —
+/// `WRAP_FIRST`/`WRAP_SECOND` (below) sit ~200 characters apart in an
+/// unbroken run of space-separated filler words, further apart than any
+/// single row could hold at this module's [`VIEWPORT`] on either backend.
+/// `body_truncated` is left at its JSON default (`false`), so
+/// `issue_body_list` renders this text verbatim with no hydration fetch —
+/// see `OpenIssue::body_truncated`'s doc comment.
+const WRAP_BOARD_JSON: &str = r#"{
+  "issues": [
+    {"repo_name": "claude-coordinator", "number": 101, "title": "Fix login race timeout", "state": "open", "labels": ["coord"], "body": "WRAPFIRST lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco WRAPSECOND"}
+  ]
+}"#;
+
+/// [`smoke_app`]'s construction, against [`WRAP_BOARD_JSON`] instead of
+/// [`SMOKE_BOARD_JSON`].
+fn wrap_app() -> CoordApp {
+    let mut app = make_app_with_board_json(WRAP_BOARD_JSON);
+    let repos: Vec<String> = app.board_repo_names.clone();
+    for repo in repos {
+        app.board_milestone_expanded
+            .insert((repo, "no-milestone".to_string()), true);
+    }
+    app.rebuild_board_sidebar();
+    app
+}
+
 // ── Needles ───────────────────────────────────────────────────────────────
 //
 // Named rather than inlined so the "must sit inside one painted run" rule
@@ -174,6 +200,13 @@ const MENU_VIEW_IN_PIPELINE: &str = "View in Pipeline";
 /// A Board-row context-menu item further down the same menu, so a body can
 /// tell "the popup laid out" from "the popup painted its first row".
 const MENU_COPY_ISSUE: &str = "Copy issue #101";
+/// The first word of [`WRAP_BOARD_JSON`]'s long issue body.
+const WRAP_FIRST: &str = "WRAPFIRST";
+/// The last word of [`WRAP_BOARD_JSON`]'s long issue body — separated from
+/// [`WRAP_FIRST`] by enough filler prose that the two can only land on the
+/// same painted row if the body did not wrap at all (#61's GTK symptom: the
+/// wrap budget in pixels is so large nothing ever wraps).
+const WRAP_SECOND: &str = "WRAPSECOND";
 
 // ── Shared bodies ─────────────────────────────────────────────────────────
 //
@@ -383,6 +416,34 @@ fn a_context_menu_opens_on_right_click<D: ConformanceDriver + RightClick>(d: &mu
     );
 }
 
+/// #61: a long issue body must word-wrap to the pane, on **both** backends.
+///
+/// This is exactly the class of bug this module exists to catch (module doc
+/// comment): the wrap budget `issue_body_list` (render.rs) computes is
+/// character columns, but the Rect width it starts from is backend units —
+/// already columns on TUI, but *pixels* on GTK/macOS. Before #61, a GTK pane
+/// a little over 1000px wide turned into a budget of a little over 1000
+/// *characters*, so `WRAP_FIRST` and `WRAP_SECOND` — under 200 characters
+/// apart — always painted on the same unwrapped line on GTK, while TUI (whose
+/// backend units already are columns) wrapped correctly the whole time. A
+/// TUI-only test could not have caught that; this one runs against both.
+fn a_long_issue_body_word_wraps_to_the_pane<D: ConformanceDriver>(d: &mut D) {
+    d.click_text(ISSUE_ROW);
+    d.click_text(BOARD_SUB_TAB_ISSUE);
+
+    let inv = d.inventory();
+    assert!(
+        inv.screen_has(WRAP_FIRST) && inv.screen_has(WRAP_SECOND),
+        "precondition: the seeded issue's long body must have painted at all"
+    );
+    assert!(
+        inv.above(WRAP_FIRST, WRAP_SECOND),
+        "a long issue body must word-wrap to the pane width — {WRAP_FIRST:?} \
+         and {WRAP_SECOND:?} landed on the same row, meaning the body never \
+         wrapped at all (#61)"
+    );
+}
+
 /// Generate, for every shared body named, one `#[test]` per backend that
 /// builds that backend's driver from [`VIEWPORT`] and runs the body against
 /// the fixture its group names.
@@ -483,5 +544,8 @@ cross_backend_smoke!(
     two_tab_app => [
         a_board_sub_tab_switches_the_detail_view,
         a_doc_tab_activates_on_click,
+    ],
+    wrap_app => [
+        a_long_issue_body_word_wraps_to_the_pane,
     ],
 );

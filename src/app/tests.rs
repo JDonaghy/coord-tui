@@ -22807,6 +22807,175 @@
         assert!(body_rows > 1, "expected multiple wrapped rows; got: {joined:?}");
     }
 
+    // ── #61: TUI wrap-budget off-by-one (paint-time clip on full rows) ───────
+    //
+    // quadraui's TUI list rasteriser draws a mandatory 2-column "▶ " / "  "
+    // selection-marker prefix before every row's own content — unconditionally,
+    // regardless of `ListView::has_focus` (`quadraui::tui::list::draw_list`) —
+    // and that prefix is not reflected in the `Rect` width these panes stash
+    // (`last_log_panel_cols` / `last_issue_panel_cols` / `last_stage_content_cols`).
+    // A wrap-budget computation that only subtracts its own application-level
+    // indent silently loses the *last column* of any row that exactly fills its
+    // budget when painted — `word_wrap` itself computed the right split point,
+    // the clip happens only at paint time, so a plain `ListView.items` inspection
+    // (what most of this file's tests do) can never see it. These three tests
+    // drive a real frame and read the rasterised screen back instead.
+    //
+    // Each renders a cyclic `"1234567"` digit token long enough to hard-wrap
+    // across many rows (`word_wrap` hard-splits a token longer than its budget
+    // into exact-budget-sized chunks — quadraui's contract, restated in #61's
+    // "Not a quadraui bug" section), then reads the digits back off the
+    // rasterised screen starting at the token's on-screen origin. If a paint-time
+    // clip drops the row's last character, the reassembled digit stream skips a
+    // value in the cycle at every row boundary — independent of the exact pane
+    // width, so these tests need no knowledge of the live layout's column count.
+
+    /// Read back the digit-cycle token `marker` introduces, starting at its
+    /// on-screen origin (`TuiDriver::find_bounds`) and scanning up to
+    /// `max_rows` rows downward at that same left column — every wrapped
+    /// continuation row carries the same fixed indent, so they all start at
+    /// the same x. Panics if `marker` never painted (the precondition every
+    /// caller needs anyway) rather than returning an empty/misleading result.
+    fn digit_cycle_from_screen<A: quadraui::runner::AppLogic>(
+        driver: &quadraui::tui::testing::TuiDriver<A>,
+        marker: &str,
+        max_rows: u16,
+    ) -> String {
+        let bounds = driver
+            .find_bounds(marker)
+            .unwrap_or_else(|| panic!("{marker:?} must be on screen"));
+        let start_x = bounds.x as u16;
+        let start_y = bounds.y as u16;
+        let mut digits = String::new();
+        for y in start_y..start_y.saturating_add(max_rows) {
+            let row = driver.styled_row(y);
+            if (start_x as usize) >= row.len() {
+                break;
+            }
+            for &(ch, _) in &row[start_x as usize..] {
+                if ch.is_ascii_digit() {
+                    digits.push(ch);
+                } else if !digits.is_empty() {
+                    // Trailing background past the wrapped content on this row.
+                    break;
+                }
+            }
+        }
+        digits
+    }
+
+    /// Assert `digits` (as collected by [`digit_cycle_from_screen`]) is an
+    /// unbroken prefix of `cycle` repeated — i.e. no character was dropped
+    /// anywhere in the reassembled on-screen stream.
+    fn assert_digit_cycle_unbroken(digits: &str, cycle: &str) {
+        assert!(
+            !digits.is_empty(),
+            "no digits were painted on screen — the marker/row scan itself is broken, \
+             not the thing under test"
+        );
+        let expected: String = cycle.chars().cycle().take(digits.len()).collect();
+        assert_eq!(
+            digits, expected,
+            "#61: the on-screen digit-cycle diverged from the expected unbroken \
+             sequence — a character was dropped, i.e. a full-width wrapped row lost \
+             its last column when painted"
+        );
+    }
+
+    #[test]
+    fn pipeline_log_list_review_body_does_not_clip_a_full_width_wrapped_row() {
+        // extract_review_items (mod.rs) — the Log tab's REVIEW_BODY renderer.
+        use quadraui::tui::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Log;
+        let mut review = _stage_assignment("rev-clip", "review", 200.0, "done");
+        review.issue_number = 42;
+        review.review_verdict = Some("approve".to_string());
+        app.data.assignments.push(review);
+
+        let cycle = "1234567";
+        let long_token: String = cycle.chars().cycle().take(2000).collect();
+        let body = format!("STARTMARK{long_token}");
+        let result_line = format!(
+            r#"{{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n{body}\nEND_REVIEW"}}"#
+        );
+        let (mut sse, _tx) = make_sse_state_pair();
+        sse.lines.push(result_line);
+        sse.line_times.push(std::time::Instant::now());
+        sse.done = true;
+        let ctx = WatchContext {
+            state: WatchState {
+                assignment_id: "rev-clip".to_string(),
+                machine: "m1".to_string(),
+                repo: "api".to_string(),
+                issue_number: 42,
+                assignment_type: "review".to_string(),
+                scroll: usize::MAX,
+            },
+            sse,
+            inject_transcript: Vec::new(),
+            inject_sse_offsets: Vec::new(),
+            history_turns: Vec::new(),
+            last_focused_at: Instant::now(),
+        };
+        app.watch_pool.insert("rev-clip".to_string(), ctx);
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let digits = digit_cycle_from_screen(&driver, "STARTMARK", 25);
+        assert_digit_cycle_unbroken(&digits, cycle);
+    }
+
+    #[test]
+    fn pipeline_issue_body_does_not_clip_a_full_width_wrapped_row() {
+        // issue_body_list (render.rs) — the Issue tab's body renderer, shared
+        // by the Board and Pipeline panels.
+        use quadraui::tui::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.pipeline_detail_tab = PipelineDetailTab::Issue;
+
+        let cycle = "1234567";
+        let long_token: String = cycle.chars().cycle().take(2000).collect();
+        app.pipeline_issues[0].body = format!("STARTMARK{long_token}");
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let digits = digit_cycle_from_screen(&driver, "STARTMARK", 25);
+        assert_digit_cycle_unbroken(&digits, cycle);
+    }
+
+    #[test]
+    fn stage_content_review_does_not_clip_a_full_width_wrapped_row() {
+        // push_markdown_prose_rows (render.rs), via stage_content_review — the
+        // Overview tab's focused-stage content, shared with the Completed tab's
+        // row detail (both route through `last_stage_content_cols`).
+        use quadraui::tui::testing::driver_with_shell;
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        let stage_names = app.pipeline_stage_names_for_issue(&app.pipeline_issues[0].clone());
+        let review_idx = stage_names
+            .iter()
+            .position(|s| s == "review")
+            .expect("review must be one of this issue's stages");
+        app.pipeline_focused_stage = Some(review_idx);
+        let mut review = _stage_assignment("rev-clip", "review", 200.0, "done");
+        review.issue_number = 42;
+        review.review_verdict = Some("approve".to_string());
+        let cycle = "1234567";
+        let long_token: String = cycle.chars().cycle().take(2000).collect();
+        let body = format!("STARTMARK{long_token}");
+        review.review_findings =
+            Some(serde_json::json!({"verdict": "approve", "body": body}).to_string());
+        app.data.assignments.push(review);
+
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        let digits = digit_cycle_from_screen(&driver, "STARTMARK", 25);
+        assert_digit_cycle_unbroken(&digits, cycle);
+    }
+
     // ── #57: markdown adapter adoption ──────────────────────────────────────
 
     #[test]

@@ -4598,6 +4598,10 @@ impl CoordApp {
                         redraw |= self.board_update_split_drag(pos);
                     }
                     if self.active_view == SidebarView::Queue && buttons.left {
+                        // #68: continue an in-progress Queue-grid
+                        // column-resize drag. Same precedence as the
+                        // Audit/Reports blocks above.
+                        redraw |= self.queue_update_resize_drag(pos);
                         if self.queue_split_drag {
                             redraw |= self.queue_update_split_drag(pos, main_b, lh);
                         }
@@ -4790,6 +4794,7 @@ impl CoordApp {
                     released |= self.audit_scrollbar_drag.take().is_some();
                     released |= self.reports_resize_col.take().is_some();
                     released |= std::mem::take(&mut self.reports_vscroll_drag);
+                    released |= self.queue_resize_col.take().is_some();
                     released |= std::mem::take(&mut self.queue_split_drag);
                     released |= std::mem::take(&mut self.queue_vscroll_drag);
                     released |= std::mem::take(&mut self.queue_hscroll_drag);
@@ -6032,15 +6037,17 @@ impl CoordApp {
                     self.queue_set_sel(idx);
                     true
                 }
-                // No column-resize drag on this table yet (#1853 covers that
-                // for Reports), and there is no footer — so a divider hit is
-                // a plain no-op rather than being mis-read as a header
-                // click, which would sort a column the operator was aiming
-                // to resize.
-                Some(DataTableHit::HeaderDivider { .. })
-                | Some(DataTableHit::Footer)
-                | Some(DataTableHit::Empty)
-                | None => false,
+                // #68: a divider hit begins a column-resize drag, continued
+                // in the `MouseMoved` arm above and released on `MouseUp`.
+                // `hit_test` gives the divider grab zone priority over the
+                // header body, so this arm is what keeps a drag from also
+                // toggling the sort. Same shape as Reports' own
+                // `HeaderDivider` arm (`reports_resize_col`).
+                Some(DataTableHit::HeaderDivider { col }) => {
+                    self.queue_resize_col = Some(col);
+                    true
+                }
+                Some(DataTableHit::Footer) | Some(DataTableHit::Empty) | None => false,
             };
         }
         // #1911: Reports main panel is now just the result `DataTable` (+

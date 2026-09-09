@@ -1102,6 +1102,13 @@ impl CoordApp {
     /// ever needs the same conversion, that's the moment to promote it.
     const QUEUE_MIN_WIDTH_CHARS: f32 = 120.0;
 
+    /// #68: the floor a Queue-grid column can be dragged down to — same
+    /// value as `AUDIT_MIN_COLUMN_WIDTH` / `REPORTS_MIN_COLUMN_WIDTH`, and
+    /// enforced by `DataTableLayout::drag_divider` itself, not by this app
+    /// code. `pub(crate)` (unlike those two) so `tests.rs` can assert
+    /// against it directly.
+    pub(crate) const QUEUE_MIN_COLUMN_WIDTH: f32 = 4.0;
+
     /// Index of the `#` (position) column — sorted numerically.
     pub(crate) const QUEUE_COL_POSITION: usize = 0;
     /// Index of the `#Work` column — sorted numerically. #2524: replaced
@@ -1549,9 +1556,10 @@ impl CoordApp {
             // stale offset (see the clamp's own comment for why "clamp
             // after paint" isn't good enough).
             h_scroll: 0.0,
-            // No column-resize drag on this table yet (#1853 covers that for
-            // the Reports result table).
-            column_overrides: Vec::new(),
+            // #68: per-column width overrides from a user's header-divider
+            // drag, mirroring `audit_column_overrides` / the Reports result
+            // table's overrides (#1853).
+            column_overrides: self.queue_column_overrides.clone(),
             footer: None,
         };
         // #2043 fix: a resize (or anything else that shrinks `content_width`
@@ -1810,6 +1818,57 @@ impl CoordApp {
         let cache = self.queue_table_layout.borrow();
         let (rect, layout) = cache.as_ref()?;
         Some(layout.hit_test(pos.x - rect.x, pos.y - rect.y, self.queue_scroll, n))
+    }
+
+    /// #68: continue an in-progress Queue-grid column-resize drag, storing
+    /// the new pair of widths into `queue_column_overrides`. Returns
+    /// whether anything changed (i.e. whether a redraw is warranted).
+    ///
+    /// Same shape as `reports_update_resize_drag`, not Audit's
+    /// `audit_update_resize_drag`: the Queue grid does not start at the
+    /// main panel's origin, so the divider's viewport-space x is taken from
+    /// the cached `(rect, layout)` in `queue_table_layout` — the same cache
+    /// `queue_table_hit` reads — rather than a `main_b` argument. And
+    /// `drag_divider` does the pair-resize arithmetic (quadraui#521)
+    /// instead of Audit's local `pointer_x - column.x`, so an untouched
+    /// column can't be reshuffled mid-drag and the table's total content
+    /// width stays invariant.
+    ///
+    /// #2043: this is also the only table in the crate that drives
+    /// `h_scroll` != 0. `drag_divider` reads `pointer_x` in *viewport*
+    /// space and `hit_test` is already h_scroll-aware (quadraui#550), so
+    /// `pos.x - rect.x` is passed through unadjusted — no separate
+    /// h_scroll correction needed, and `queue_h_scroll` itself is never
+    /// touched by a resize.
+    pub(crate) fn queue_update_resize_drag(&mut self, pos: Point) -> bool {
+        let Some(col) = self.queue_resize_col else {
+            return false;
+        };
+        let next = {
+            let cache = self.queue_table_layout.borrow();
+            let Some((rect, layout)) = cache.as_ref() else {
+                return false;
+            };
+            // A divider only exists between two columns; a `col` past the
+            // end would mean the cached layout no longer matches
+            // `QUEUE_COLUMNS`, which can't happen (the column set is
+            // const) but is guarded the same way Reports guards its
+            // per-report column count.
+            if col + 1 >= layout.columns.len() {
+                return false;
+            }
+            layout.drag_divider(
+                &self.queue_column_overrides,
+                col,
+                pos.x - rect.x,
+                Self::QUEUE_MIN_COLUMN_WIDTH,
+            )
+        };
+        if next.len() != self.queue_column_overrides.len() {
+            return false;
+        }
+        self.queue_column_overrides = next;
+        true
     }
 
     /// Did a click land on either of the grid's scrollbar tracks?

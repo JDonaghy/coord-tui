@@ -54938,6 +54938,55 @@ Milestone tracking issue.
     }
 
     #[test]
+    fn tuidriver_queue_divider_drag_resizes_only_its_own_pair() {
+        // Mirrors `reports_divider_drag_resizes_only_its_own_pair`. Wide
+        // enough (200 cols) that the grid sits comfortably above the
+        // 120-char `QUEUE_MIN_WIDTH_CHARS` floor, so no h_scroll is in play
+        // — that case gets its own test below.
+        //
+        // `State` (weight 1.0, one of the Queue grid's narrowest columns)
+        // resolves to ~10 cells at this width — unlike Reports' equivalent
+        // fixture, there's no headroom for an 8-cell drag: it would shrink
+        // `State` to ~2 cells, past the point its own 5-character label can
+        // render, and the post-drag `find("State")` below would fail on a
+        // truncated label rather than proving anything about the resize. 3
+        // cells keeps `State` at ~7 — comfortably above its label length —
+        // while still being an unambiguous, assertable move.
+        let mut driver = queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
+        let before = reports_header_xs(&driver, &["Title", "State", "Machine"]);
+
+        // The divider between `Title` and `State`, dragged 3 cells right.
+        reports_drag_divider(&mut driver, "State", 3.0);
+        let after = reports_header_xs(&driver, &["Title", "State", "Machine"]);
+
+        assert_eq!(
+            before[0], after[0],
+            "#68: dragging a divider must not move the left column's own \
+             left edge — that edge is fixed by the columns before it:\n{}",
+            driver.screen()
+        );
+        assert!(
+            (after[1] - (before[1] + 3.0)).abs() <= 1.0,
+            "#68: dragging the Title|State divider 3 cells right must widen \
+             Title by ~3 — `State` moved from {} to {}:\n{}",
+            before[1],
+            after[1],
+            driver.screen()
+        );
+        // The pair-only invariant: everything after the dragged pair,
+        // hence the table's total content width, is untouched.
+        assert_eq!(
+            before[2], after[2],
+            "#68: a divider drag must move width between its own two \
+             columns only — `Machine` (one column right of the drag) \
+             moved from {} to {}:\n{}",
+            before[2],
+            after[2],
+            driver.screen()
+        );
+    }
+
+    #[test]
     fn tuidriver_queue_panel_renders_the_declared_columns() {
         let driver = queue_driver(queue_fixture_json(), 200, 30);
         let screen = driver.screen();
@@ -57350,6 +57399,229 @@ Milestone tracking issue.
             at_reason, "Reason ▲",
             "#2043/#2017: after a splitter drag, a header click at a \
              scrolled position must still sort the right column:\n{row}\n{screen}"
+        );
+    }
+
+    // ── #68: Queue grid header-divider drag resizes columns ───────────────
+    //
+    // Third copy of the Audit (#1094) / Reports (#1853) feature, over
+    // `queue_column_overrides` / `queue_resize_col`. Reuses `reports_
+    // header_xs` and `reports_drag_divider` — both are generic over
+    // `A: quadraui::AppLogic`, so they work unchanged against a Queue
+    // driver too, and the Queue grid is a flat `Vec<Option<f32>>` (no
+    // `ReportsColumnKey`-style keying needed — `QUEUE_COLUMNS` never
+    // changes shape, same as Audit's five).
+
+    #[test]
+    fn queue_column_overrides_are_session_only() {
+        // Session-only, matching Audit and Reports: persisting widths is a
+        // separate decision, not part of #68. Mirrors
+        // `reports_column_overrides_are_session_only`.
+        let mut app = make_app_with_drive_queue(BoardData::default(), queue_fixture_json());
+        assert_eq!(
+            app.queue_column_overrides,
+            vec![None; CoordApp::QUEUE_COLUMNS.len()],
+            "#68: a freshly-built app must have no column overrides — there \
+             is no settings field for them to be loaded from"
+        );
+        // …and with no table painted yet there is nothing a stray drag
+        // could resize, so a spurious `MouseMoved` cannot invent one.
+        app.queue_resize_col = Some(0);
+        assert!(
+            !app.queue_update_resize_drag(Point::new(40.0, 3.0)),
+            "#68: a resize drag against a table that was never painted must \
+             be a no-op"
+        );
+        assert_eq!(
+            app.queue_column_overrides,
+            vec![None; CoordApp::QUEUE_COLUMNS.len()]
+        );
+    }
+
+
+    #[test]
+    fn tuidriver_queue_divider_drag_survives_repaints_and_scroll() {
+        // "Widths survive re-render, sort, and scroll within the session"
+        // (#68 acceptance). Mirrors `reports_divider_drag_survives_until_
+        // the_panel_changes_report`, plus a sort and a vertical-scroll
+        // idle tick for the extra two acceptance words.
+        // 3 cells, not more — see `tuidriver_queue_divider_drag_resizes_
+        // only_its_own_pair`'s comment on why `State`'s ~10-cell width at
+        // this terminal size can't absorb a bigger drag without truncating
+        // its own label.
+        let mut driver = queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
+        let before = reports_header_xs(&driver, &["State"])[0];
+        reports_drag_divider(&mut driver, "State", 3.0);
+        let dragged = reports_header_xs(&driver, &["State"])[0];
+        assert!(dragged > before, "the drag must have widened Title");
+
+        for _ in 0..3 {
+            reports_idle_tick(&mut driver);
+        }
+        assert_eq!(
+            dragged,
+            reports_header_xs(&driver, &["State"])[0],
+            "#68: a dragged width must survive repaints for as long as the \
+             panel stays open:\n{}",
+            driver.screen()
+        );
+
+        // A header click sorts by that column — the width must survive it.
+        let (_, header_y) = driver.find("State").unwrap();
+        driver.click(reports_header_xs(&driver, &["Reason"])[0], header_y);
+        driver.render();
+        assert_eq!(
+            dragged,
+            reports_header_xs(&driver, &["State"])[0],
+            "#68: sorting must not reset a dragged width:\n{}",
+            driver.screen()
+        );
+    }
+
+    #[test]
+    fn tuidriver_queue_divider_drag_cannot_collapse_either_column_below_the_floor() {
+        // "Neither half of the dragged pair can be collapsed below the
+        // minimum width" (#68 acceptance) — enforced by
+        // `DataTableLayout::drag_divider` itself (quadraui#521), not by
+        // app code, so this proves the app wires the floor through rather
+        // than re-deriving the arithmetic.
+        let mut driver = queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
+        let before = reports_header_xs(&driver, &["Title", "State", "Machine"]);
+        let title_x_before = before[0];
+        let title_width_before = before[1] - before[0];
+        let pair_total_before = before[2] - before[0];
+
+        // A large left drag — trying to shrink `Title` (width ~30 here)
+        // well past its floor. -40 (rather than some even more extreme
+        // value like -1000) keeps the synthetic pointer's on-screen x
+        // (`State`'s x, ~90, plus this delta) comfortably within the
+        // driver's simulated terminal — a pointer dragged outside the
+        // table's own painted region doesn't continue the drag at all
+        // (proven empirically: -55 here is a silent no-op), which would
+        // make this test pass for the wrong reason (no drag happened)
+        // rather than the right one (the drag hit the floor). -40
+        // overshoots the floor (~26 cells of give) with margin to spare.
+        // This must squeeze `Title` well below its own 5-character label,
+        // so — unlike the other divider tests in this file — `after`
+        // deliberately does NOT re-`find` `Title`: a `Title` collapsed to
+        // the floor can no longer render its own label intact, and `find`
+        // would just fail on that, proving nothing. `Title`'s left edge is
+        // fixed (established by `tuidriver_queue_divider_drag_resizes_
+        // only_its_own_pair`'s own invariant), so `State`'s new on-screen
+        // position is enough to derive `Title`'s collapsed width.
+        reports_drag_divider(&mut driver, "State", -40.0);
+        let after = reports_header_xs(&driver, &["State", "Machine"]);
+        let title_width_after = after[0] - title_x_before;
+        let pair_total_after = after[1] - title_x_before;
+
+        assert!(
+            title_width_after < title_width_before,
+            "sanity: the drag must have shrunk Title at all:\n{}",
+            driver.screen()
+        );
+        assert!(
+            title_width_after >= CoordApp::QUEUE_MIN_COLUMN_WIDTH - 1.0,
+            "#68: Title must not collapse below the minimum column width \
+             ({}), got {title_width_after}:\n{}",
+            CoordApp::QUEUE_MIN_COLUMN_WIDTH,
+            driver.screen()
+        );
+        assert!(
+            (pair_total_before - pair_total_after).abs() <= 1.0,
+            "#68: the Title+State pair's combined width (and so the \
+             table's total content width) must be conserved even at the \
+             floor — before={pair_total_before}, after={pair_total_after}:\n{}",
+            driver.screen()
+        );
+    }
+
+    #[test]
+    fn tuidriver_queue_divider_drag_while_h_scrolled_moves_the_pair_under_the_cursor_and_leaves_h_scroll_alone(
+    ) {
+        // #68's genuinely-new case: the Queue grid is the only table in the
+        // crate that drives `h_scroll` != 0 (#2043), and `drag_divider`
+        // reads `pointer_x` in *viewport* space (quadraui#521/#550) — so a
+        // resize while scrolled must move the divider actually under the
+        // cursor, and must not itself move `queue_h_scroll`.
+        let mut driver = queue_driver(queue_fixture_json(), QUEUE_NARROW_COLS, 30);
+        let screen_before = driver.screen();
+        assert!(
+            !screen_before.contains("Machine"),
+            "sanity: at h_scroll=0 in a {QUEUE_NARROW_COLS}-col terminal, \
+             `Machine` must be scrolled off the left edge once scrolled \
+             right below — otherwise this test isn't exercising a real \
+             scroll:\n{screen_before}"
+        );
+
+        let (_sep_x, sep_y) = find_queue_separator(&driver);
+        let (sb_y, _track_x0, track_x1) =
+            hscrollbar_track_in_row(&screen_before, 0, sep_y as usize).unwrap_or_else(|| {
+                panic!(
+                    "horizontal scrollbar must render at {QUEUE_NARROW_COLS} \
+                     cols:\n{screen_before}"
+                )
+            });
+        // Scroll all the way right, bringing the tail columns into view.
+        // An explicit `mouse_up` (not the down-only `click` convenience
+        // method) matters here specifically: `TuiDriver::click` never
+        // releases the button, so without this the divider drag below
+        // would run with `queue_hscroll_drag` still latched from THIS
+        // click — and its `MouseMoved` continuation
+        // (`queue_apply_hscroll`) would silently overwrite `queue_h_scroll`
+        // out from under the resize, which is exactly the failure mode
+        // this test exists to rule out.
+        driver.mouse_down(track_x1, sb_y);
+        driver.mouse_up(track_x1, sb_y);
+        driver.render();
+
+        let scrolled = reports_header_xs(&driver, &["After", "Hold", "Reason"]);
+        assert!(
+            !driver.screen().contains("Machine"),
+            "sanity: `Machine` must still be off-screen (scrolled past) \
+             after maxing the h_scroll:\n{}",
+            driver.screen()
+        );
+
+        // Drag the After|Hold divider, at its CURRENT (scrolled) on-screen
+        // position, 3 cells LEFT — shrinking `After` (weight 1.4, plenty of
+        // headroom above its 5-character label at this floor-width
+        // content) and growing `Hold` (weight 0.9, the tighter of the
+        // pair). The opposite direction risks squeezing `Hold` below its
+        // own 4-character label, the same trap
+        // `tuidriver_queue_divider_drag_resizes_only_its_own_pair`'s
+        // comment documents for `State`.
+        reports_drag_divider(&mut driver, "Hold", -3.0);
+
+        let after = reports_header_xs(&driver, &["After", "Hold", "Reason"]);
+        assert_eq!(
+            scrolled[0], after[0],
+            "#68: the drag must not move `After`'s own left edge:\n{}",
+            driver.screen()
+        );
+        assert!(
+            (after[1] - (scrolled[1] - 3.0)).abs() <= 1.0,
+            "#68: dragging the After|Hold divider 3 cells left must shrink \
+             After by ~3 while scrolled — `Hold` moved from {} to {}:\n{}",
+            scrolled[1],
+            after[1],
+            driver.screen()
+        );
+        assert_eq!(
+            scrolled[2], after[2],
+            "#68: `Reason` (one column right of the drag) must be \
+             untouched:\n{}",
+            driver.screen()
+        );
+        // The `queue_h_scroll`-untouched half of the acceptance bar: a
+        // column that was scrolled out of view stays out of view — if the
+        // resize had nudged `queue_h_scroll`, `Machine` (or something else
+        // upstream of `After`) could have crept back on screen.
+        assert!(
+            !driver.screen().contains("Machine"),
+            "#68: a column-resize drag must leave `queue_h_scroll` alone — \
+             `Machine` must still be scrolled off-screen after the \
+             resize:\n{}",
+            driver.screen()
         );
     }
 

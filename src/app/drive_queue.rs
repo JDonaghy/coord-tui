@@ -1891,50 +1891,25 @@ impl CoordApp {
     pub(crate) fn queue_scrollbar_hit(&self, pos: Point) -> Option<ScrollAxis> {
         let cache = self.queue_table_layout.borrow();
         let (rect, layout) = cache.as_ref()?;
-        let x = pos.x - rect.x;
-        let y = pos.y - rect.y;
-        if x < 0.0 || y < 0.0 || x >= layout.viewport_width || y >= layout.viewport_height {
-            return None;
-        }
-        if layout.scrollbar_width > 0.0
-            && x >= layout.viewport_width - layout.scrollbar_width
-            && y >= layout.header_height
-        {
-            return Some(ScrollAxis::Vertical);
-        }
-        if layout.h_scrollbar_height > 0.0 && y >= layout.viewport_height - layout.h_scrollbar_height
-        {
-            return Some(ScrollAxis::Horizontal);
-        }
-        None
+        table_nav::scrollbar_axis_hit(pos, *rect, layout)
     }
 
     /// Jump `queue_scroll` to the row implied by a click along the vertical
-    /// scrollbar track. Mirrors `reports_apply_vscroll`.
+    /// scrollbar track. Mirrors `reports_apply_vscroll`. Track math lives in
+    /// `table_nav::vscroll_offset` (#71).
     pub(crate) fn queue_apply_vscroll(&mut self, pos: Point) -> bool {
         let n = self.queue_rows().len();
         if n == 0 {
             return false;
         }
-        let (track_y0, track_h, visible_rows) = {
+        let offset = {
             let cache = self.queue_table_layout.borrow();
             let Some((rect, layout)) = cache.as_ref() else {
                 return false;
             };
-            let track_y0 = rect.y + layout.header_height;
-            let track_h = (layout.viewport_height
-                - layout.header_height
-                - layout.h_scrollbar_height)
-                .max(1.0);
-            (track_y0, track_h, layout.visible_rows.max(1))
+            table_nav::vscroll_offset(pos.y, *rect, layout, n)
         };
-        let max_scroll = n.saturating_sub(visible_rows);
-        self.queue_scroll = if max_scroll == 0 {
-            0
-        } else {
-            let frac = ((pos.y - track_y0) / track_h).clamp(0.0, 1.0);
-            (frac * max_scroll as f32).round() as usize
-        };
+        self.queue_scroll = offset;
         true
     }
 
@@ -1943,23 +1918,17 @@ impl CoordApp {
     /// `queue_apply_vscroll` for the other axis (and `audit_apply_hscroll`
     /// for the other table) — over the cached `queue_table_layout` instead
     /// of a `main_b` handle, the same `rect`-carrying-cache reason
-    /// `queue_table_hit` documents.
+    /// `queue_table_hit` documents. Track math lives in
+    /// `table_nav::hscroll_offset` (#71).
     pub(crate) fn queue_apply_hscroll(&mut self, pos: Point) -> bool {
-        let (track_x0, track_w, content_w, visible_w) = {
+        let offset = {
             let cache = self.queue_table_layout.borrow();
             let Some((rect, layout)) = cache.as_ref() else {
                 return false;
             };
-            let visible_w = (layout.viewport_width - layout.scrollbar_width).max(1.0);
-            (rect.x, visible_w, layout.content_width, visible_w)
+            table_nav::hscroll_offset(pos.x, *rect, layout)
         };
-        let max_scroll = (content_w - visible_w).max(0.0);
-        self.queue_h_scroll.set(if max_scroll <= 0.0 {
-            0.0
-        } else {
-            let frac = ((pos.x - track_x0) / track_w).clamp(0.0, 1.0);
-            frac * max_scroll
-        });
+        self.queue_h_scroll.set(offset);
         true
     }
 
@@ -2054,20 +2023,23 @@ impl CoordApp {
     /// #2017: did a click land on the detail pane's vertical scrollbar
     /// track? Same #1094-precedent shape as `queue_scrollbar_hit`, over the
     /// `Scrollbar` geometry `render_queue_panel` cached from `Backend::
-    /// list_vscrollbar` rather than a `DataTableLayout`.
+    /// list_vscrollbar` rather than a `DataTableLayout`. #71: the track is
+    /// already a `Rect`, so this is exactly `Rect::contains` — no local
+    /// wrapper needed.
     pub(crate) fn queue_detail_scrollbar_hit(&self, pos: Point) -> bool {
         let cache = self.queue_detail_scrollbar.borrow();
         let Some(sb) = cache.as_ref() else {
             return false;
         };
-        let t = sb.track;
-        pos.x >= t.x && pos.x < t.x + t.width && pos.y >= t.y && pos.y < t.y + t.height
+        sb.track.contains(pos)
     }
 
     /// #2017: jump `queue_detail_scroll` to the position implied by a
     /// click/drag along the detail pane's vertical scrollbar track. Mirrors
     /// `queue_apply_vscroll` / `reports_apply_vscroll`, over the cached
-    /// `Scrollbar.track` instead of a `DataTableLayout`.
+    /// `Scrollbar.track` instead of a `DataTableLayout` — shared with
+    /// `pipeline_log_apply_vscroll` via `table_nav::track_vscroll_offset`
+    /// (#71).
     ///
     /// Reads `last_queue_detail_item_count` / `last_queue_detail_visible_rows`
     /// — the same live, per-frame-refreshed pane geometry `mouse_main_scroll`'s
@@ -2078,7 +2050,6 @@ impl CoordApp {
     pub(crate) fn queue_apply_detail_vscroll(&mut self, pos: Point) -> bool {
         let items = self.last_queue_detail_item_count.get();
         let visible = self.last_queue_detail_visible_rows.get().max(1);
-        let max_scroll = items.saturating_sub(visible);
         let track = {
             let cache = self.queue_detail_scrollbar.borrow();
             match cache.as_ref() {
@@ -2086,12 +2057,7 @@ impl CoordApp {
                 None => return false,
             }
         };
-        self.queue_detail_scroll = if max_scroll == 0 || track.height <= 0.0 {
-            0
-        } else {
-            let frac = ((pos.y - track.y) / track.height).clamp(0.0, 1.0);
-            (frac * max_scroll as f32).round() as usize
-        };
+        self.queue_detail_scroll = table_nav::track_vscroll_offset(pos.y, track, items, visible);
         true
     }
 

@@ -159,6 +159,9 @@ pub(crate) mod audit;
 // arithmetic (by delegating it to quadraui).
 pub(crate) mod issue_tree;
 pub(crate) mod tree_nav;
+// #71: the ONE copy of the scrollbar-track hit-test/apply arithmetic every
+// table/list-with-a-scrollbar panel used to hand-roll — see the module doc.
+pub(crate) mod table_nav;
 // #1741: Reports panel + the reusable `MultiSectionView` routing it is the
 // first consumer of (epic #571's panel consolidation is the next).
 pub(crate) mod msv;

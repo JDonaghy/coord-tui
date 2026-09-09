@@ -434,26 +434,7 @@ impl CoordApp {
     pub(crate) fn audit_scrollbar_hit(&self, pos: Point) -> Option<ScrollAxis> {
         let layout_ref = self.audit_table_layout.borrow();
         let (rect, layout) = layout_ref.as_ref()?;
-        let x = pos.x - rect.x;
-        let y = pos.y - rect.y;
-        if x < 0.0 || y < 0.0 || x >= layout.viewport_width || y >= layout.viewport_height {
-            return None;
-        }
-        // Vertical scrollbar takes priority in the bottom-right corner,
-        // matching `hit_test`'s own divider-before-header priority style.
-        if layout.scrollbar_width > 0.0 {
-            let sb_x0 = layout.viewport_width - layout.scrollbar_width;
-            if x >= sb_x0 && y >= layout.header_height {
-                return Some(ScrollAxis::Vertical);
-            }
-        }
-        if layout.h_scrollbar_height > 0.0 {
-            let hsb_y0 = layout.viewport_height - layout.h_scrollbar_height;
-            if y >= hsb_y0 {
-                return Some(ScrollAxis::Horizontal);
-            }
-        }
-        None
+        table_nav::scrollbar_axis_hit(pos, *rect, layout)
     }
 
     /// #1094 fix: jump `audit_scroll` to the row implied by a click/drag
@@ -461,52 +442,39 @@ impl CoordApp {
     /// click/drag-to-position scrollbar behaviour (not thumb-relative
     /// dragging). No-op when there's nothing to scroll (empty list, or the
     /// cached layout is stale/missing).
+    ///
+    /// #71: the track arithmetic itself now lives in `table_nav::
+    /// vscroll_offset` — this keeps only the "is there anything to scroll"
+    /// guards, which are panel-specific state, not shared math.
     pub(crate) fn audit_apply_vscroll(&mut self, pos: Point) -> bool {
         let n = self.audit_entries().len();
         if n == 0 {
             return false;
         }
-        let (track_y0, track_h, visible_rows) = {
+        let offset = {
             let layout_ref = self.audit_table_layout.borrow();
             let Some((rect, layout)) = layout_ref.as_ref() else {
                 return false;
             };
-            let track_y0 = rect.y + layout.header_height;
-            let track_h = (layout.viewport_height
-                - layout.header_height
-                - layout.h_scrollbar_height)
-                .max(1.0);
-            (track_y0, track_h, layout.visible_rows.max(1))
+            table_nav::vscroll_offset(pos.y, *rect, layout, n)
         };
-        let max_scroll = n.saturating_sub(visible_rows);
-        self.audit_scroll = if max_scroll == 0 {
-            0
-        } else {
-            let frac = ((pos.y - track_y0) / track_h).clamp(0.0, 1.0);
-            (frac * max_scroll as f32).round() as usize
-        };
+        self.audit_scroll = offset;
         true
     }
 
     /// #1094 fix: same as `audit_apply_vscroll` but for the horizontal
     /// scrollbar — jumps `audit_h_scroll` to the column offset implied by
-    /// the click/drag position along the horizontal track.
+    /// the click/drag position along the horizontal track. Track math lives
+    /// in `table_nav::hscroll_offset` (#71).
     pub(crate) fn audit_apply_hscroll(&mut self, pos: Point) -> bool {
-        let (track_x0, track_w, content_w, visible_w) = {
+        let offset = {
             let layout_ref = self.audit_table_layout.borrow();
             let Some((rect, layout)) = layout_ref.as_ref() else {
                 return false;
             };
-            let visible_w = (layout.viewport_width - layout.scrollbar_width).max(1.0);
-            (rect.x, visible_w, layout.content_width, visible_w)
+            table_nav::hscroll_offset(pos.x, *rect, layout)
         };
-        let max_scroll = (content_w - visible_w).max(0.0);
-        self.audit_h_scroll = if max_scroll <= 0.0 {
-            0.0
-        } else {
-            let frac = ((pos.x - track_x0) / track_w).clamp(0.0, 1.0);
-            frac * max_scroll
-        };
+        self.audit_h_scroll = offset;
         true
     }
 

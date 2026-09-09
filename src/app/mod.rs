@@ -2725,6 +2725,25 @@ pub struct CoordApp {
     /// body yet", which falls back to `last_issue_panel_cols` so a
     /// never-painted fixture keeps the 120-column default it always had.
     board_pane_issue_cols: std::cell::RefCell<Vec<usize>>,
+    /// #55: content width in backend units of the Pipeline panel's stage-detail
+    /// pane (the Overview tab's meta body, and the Completed tab's row-detail
+    /// body — the two `pipeline_tab_body_list_for` call sites), updated just
+    /// before that list is built each frame.  Read back by
+    /// `stage_content_review` (the reviewer's findings body) and
+    /// `stage_content_test` (the per-step captured output and the build-log
+    /// tail) to word-wrap that prose to the live viewport instead of clipping
+    /// it at a fixed character count. Defaults to 120.
+    ///
+    /// A single shared `Cell`, not one indexed per pane like
+    /// `board_pane_issue_cols`: the Pipeline panel is single-pane today (the
+    /// Overview and Completed tabs are two arms of the same `match` on
+    /// `pipeline_detail_tab` in `render_content`, so at most one of them
+    /// paints in a given frame). If the Pipeline panel ever grows a
+    /// multi-pane split the way the Board panel did (#2288), this will need
+    /// the same per-pane `Vec` treatment `board_pane_issue_cols` got — see
+    /// that field's doc comment for why a shared `Cell` breaks under two
+    /// panes painted in one frame.
+    last_stage_content_cols: std::cell::Cell<usize>,
     /// Minimum age in days for a done/failed assignment row to be eligible
     /// for the 'P' purge action.  Default 7.
     ///
@@ -4040,6 +4059,7 @@ impl CoordApp {
             last_log_panel_cols: std::cell::Cell::new(120),
             last_issue_panel_cols: std::cell::Cell::new(120),
             board_pane_issue_cols: std::cell::RefCell::new(Vec::new()),
+            last_stage_content_cols: std::cell::Cell::new(120),
             purge_days: 7,
             sidebar_action_bar_hover: ToolbarHoverTracker::new(),
             panel_toolbar_hover: ToolbarHoverTracker::new(),

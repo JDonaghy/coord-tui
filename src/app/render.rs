@@ -625,6 +625,11 @@ impl ShellApp for CoordApp {
                         show_v_scrollbar: false,
                     },
                 );
+                // #57: stash content width so chat_transcript_from_pool's
+                // callers can pre-wrap assistant markdown to (approximately)
+                // the live overlay width — see `last_chat_panel_cols`'s doc
+                // comment for why "approximately" is fine here.
+                self.last_chat_panel_cols.set(m.width as usize);
                 chat.render(backend, m);
             }
         }
@@ -883,7 +888,10 @@ impl ShellApp for CoordApp {
                 if let Some(ctx) = self.watch_pool.get(&id) {
                     let key = (id.clone(), ctx.sse.lines.len(), ctx.inject_transcript.len());
                     if self.chat_transcript_cache_key.as_ref() != Some(&key) {
-                        let transcript = chat_transcript_from_pool(ctx);
+                        let transcript = chat_transcript_from_pool(
+                            ctx,
+                            self.last_chat_panel_cols.get().max(40),
+                        );
                         if let Some(ref mut chat) = self.inject_chat {
                             chat.set_transcript(transcript);
                         }
@@ -1319,16 +1327,38 @@ pub(crate) fn parse_json_events_readable(
             let mut items = Vec::new();
             let header = format!("  Turn {}{}", n, elapsed_str);
             items.push(activity_item(&header, Color::rgb(80, 80, 100)));
-            // #5: quadraui::text_util::word_wrap wraps a single logical line
-            // (no embedded `\n`) — `text_nl` deliberately preserves paragraph
-            // breaks (see `extract_text_block_keep_newlines`'s doc comment),
-            // so split on them first and wrap each line, same convention
-            // quadraui's own `compose::chat_controller` uses.
-            for src_line in text_nl.trim_end().split('\n') {
-                for wrapped_line in word_wrap(src_line, prose_wrap) {
-                    let display = format!("{}{}", indent, wrapped_line);
-                    items.push(activity_item(&display, Color::rgb(200, 210, 230)));
-                }
+            // #57: `text_nl` is the assistant's own markdown prose (an agent
+            // wrote it) — route it through the same
+            // `render_markdown_to_styled_wrapped` adapter `issue_body_list`
+            // (#669) and `stage_content_review` use, so headings, bold,
+            // italic, inline code, lists, and fenced code blocks render
+            // styled instead of literal markdown source. Feeding the whole
+            // multi-line block through in one call (rather than word-wrapping
+            // each paragraph separately, as the old `word_wrap` loop did)
+            // also lets a fenced code block span paragraph breaks correctly
+            // and keeps it from being wrapped. This is the single function
+            // both the live-SSE and read-from-disk log paths call
+            // (`parse_sse_log_more` / `parse_log_content_readable`), so the
+            // fix applies identically to both.
+            // TODO(#217): pass active_theme once this function accepts a
+            // theme parameter; for now the quadraui dark default matches the
+            // other adapter call sites in this crate.
+            let md_theme = quadraui::Theme::default();
+            let rendered = quadraui::render_markdown_to_styled_wrapped(
+                text_nl.trim_end(),
+                &md_theme,
+                prose_wrap,
+            );
+            for md_line in rendered.lines {
+                let mut spans = Vec::with_capacity(md_line.spans.len() + 1);
+                spans.push(StyledSpan::plain(indent));
+                spans.extend(md_line.spans);
+                items.push(ListItem {
+                    text: StyledText { spans },
+                    icon: None,
+                    detail: None,
+                    decoration: Decoration::Normal,
+                });
             }
             // Mixed-content turn: also emit one arrow line per tool call in
             // the same turn (e.g. "I'll read that file" + Read in one turn).
@@ -1649,6 +1679,41 @@ pub(crate) fn issue_body_list(
         h_scroll: 0,
         max_content_width: None,
         show_v_scrollbar,
+    }
+}
+
+/// #57: render `text` — markdown prose an agent or a human wrote — through
+/// `render_markdown_to_styled_wrapped` and append one `ListItem` per output
+/// line to `rows`, each prefixed with `indent`. A genuinely blank markdown
+/// line (no spans at all) is pushed as a bare blank row so vertical spacing
+/// matches the `kv_item("", "", None)` separator convention used throughout
+/// this file, instead of an indent-only row of trailing whitespace.
+///
+/// Shared by `stage_content_review` and `stage_content_plan` — both render
+/// agent-authored prose (a reviewer's findings body / a planner's
+/// summary-approach-risks fields) at the same 3-space indent convention.
+///
+/// TODO(#217): pass active_theme through once these call sites accept a
+/// theme parameter; for now the quadraui dark default matches every other
+/// adapter call site in this crate.
+fn push_markdown_prose_rows(rows: &mut Vec<ListItem>, text: &str, wrap_width: usize, indent: &str) {
+    let prose_wrap = wrap_width.saturating_sub(indent.len());
+    let md_theme = quadraui::Theme::default();
+    let rendered = quadraui::render_markdown_to_styled_wrapped(text, &md_theme, prose_wrap);
+    for md_line in rendered.lines {
+        if md_line.spans.is_empty() {
+            rows.push(kv_item("", "", None));
+            continue;
+        }
+        let mut spans = Vec::with_capacity(md_line.spans.len() + 1);
+        spans.push(StyledSpan::plain(indent));
+        spans.extend(md_line.spans);
+        rows.push(ListItem {
+            text: StyledText { spans },
+            icon: None,
+            detail: None,
+            decoration: Decoration::Normal,
+        });
     }
 }
 
@@ -3465,12 +3530,19 @@ impl CoordApp {
         let label_color = Color::rgb(180, 200, 240);
         let body_color = Color::rgb(220, 220, 220);
         let mut rows: Vec<ListItem> = Vec::new();
+        // #57: Summary / Approach / Risks are markdown prose the planning
+        // agent wrote — route them through the same
+        // `render_markdown_to_styled_wrapped` adapter `stage_content_review`
+        // / `issue_body_list` use. `files_modify` (below) and `estimate` /
+        // `smoke_tests` (further down) stay on `kv_item` plain text: they're
+        // structured data (file paths, a duration string, a bullet list of
+        // scenarios), not free-form prose, and a bare file path containing
+        // `_` would otherwise get misread as markdown emphasis.
+        let wrap_width = self.last_stage_content_cols.get().max(40);
 
         if !plan.plan.is_empty() {
             rows.push(kv_item("", " Summary", Some(label_color)));
-            for line in plan.plan.lines() {
-                rows.push(kv_item("", &format!("   {}", line), Some(body_color)));
-            }
+            push_markdown_prose_rows(&mut rows, &plan.plan, wrap_width, "   ");
             rows.push(kv_item("", "", None));
         }
 
@@ -3484,17 +3556,13 @@ impl CoordApp {
 
         if !plan.approach.is_empty() {
             rows.push(kv_item("", " Approach", Some(label_color)));
-            for line in plan.approach.lines() {
-                rows.push(kv_item("", &format!("   {}", line), Some(body_color)));
-            }
+            push_markdown_prose_rows(&mut rows, &plan.approach, wrap_width, "   ");
             rows.push(kv_item("", "", None));
         }
 
         if !plan.risks.is_empty() {
             rows.push(kv_item("", " Risks", Some(label_color)));
-            for line in plan.risks.lines() {
-                rows.push(kv_item("", &format!("   {}", line), Some(body_color)));
-            }
+            push_markdown_prose_rows(&mut rows, &plan.risks, wrap_width, "   ");
             rows.push(kv_item("", "", None));
         }
 
@@ -3635,33 +3703,33 @@ impl CoordApp {
         };
         rows.push(kv_item("Verdict", vtext, Some(vcolor)));
         rows.push(kv_item("", "", None));
-        // Render the body line-by-line as plain text (markdown
-        // styling lands once quadraui#262 ships and we adopt it).
-        // Filter out the coord:review header — that's machine-readable
-        // metadata, not user-facing prose.
+        // #57: the reviewer's findings body is markdown prose (a human or an
+        // AI reviewer wrote it — REVIEWER_SYSTEM_PROMPT asks for a
+        // `REVIEW_BODY:` markdown block) — route it through the same
+        // `render_markdown_to_styled_wrapped` adapter `issue_body_list`
+        // (#669) uses so `## heading`, `- item`, and `` `code` `` render
+        // styled instead of literal markdown source, with fenced code
+        // blocks left unwrapped and unstyled-as-prose.
+        //
+        // Filter out the coord:review header first — that's machine-readable
+        // metadata, not user-facing prose — then feed the remaining lines to
+        // the adapter as one block so multi-line structure (lists,
+        // blockquotes, fenced code) is recognised correctly.
         //
         // #55: a reviewer's finding is routinely one logical line of
         // 300-800 chars with no hard wrap. Word-wrap to the pane width
-        // stashed by `render_content` (same `word_wrap` + stash-a-Cell
-        // pattern as the Log tab's #385 and the Issue tab's #669) instead
-        // of clipping at a fixed character count — the old behaviour
-        // silently discarded everything past column 180 with no
-        // indication the finding was cut short.
+        // stashed by `render_content` (same stash-a-Cell pattern as the Log
+        // tab's #385 and the Issue tab's #669) instead of clipping at a
+        // fixed character count — the old behaviour silently discarded
+        // everything past column 180 with no indication the finding was cut
+        // short.
         let wrap_width = self.last_stage_content_cols.get().max(40);
-        let indent = "   ";
-        let prose_wrap = wrap_width.saturating_sub(indent.len());
-        for line in body
+        let filtered_body: String = body
             .lines()
             .filter(|l| !l.trim_start().starts_with("<!-- coord:review"))
-        {
-            if line.is_empty() {
-                rows.push(kv_item("", "", None));
-            } else {
-                for wrapped in word_wrap(line, prose_wrap) {
-                    rows.push(kv_item("", &format!("{indent}{wrapped}"), None));
-                }
-            }
-        }
+            .collect::<Vec<_>>()
+            .join("\n");
+        push_markdown_prose_rows(&mut rows, &filtered_body, wrap_width, "   ");
         rows
     }
 

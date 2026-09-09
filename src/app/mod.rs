@@ -1551,7 +1551,17 @@ fn extract_tool_calls(json: &str) -> Vec<(String, String)> {
 /// The body comes back with `\n` escape sequences (JSON-encoded). We
 /// un-escape `\\n` → `\n` and `\\"` → `"` before splitting into lines so the
 /// rendered output matches the verbatim review.
-fn extract_review_items(line: &str) -> Vec<ListItem> {
+///
+/// #57: `body` is the reviewer's markdown prose (the doc comment above says
+/// so explicitly). Route it through `render_markdown_to_styled_wrapped` —
+/// same adapter `issue_body_list` (render.rs) uses — so `## Nits`, `- item`,
+/// and `` `code` `` render as a styled heading/list/inline-code instead of
+/// literal source, and long lines wrap to `wrap_width` instead of running
+/// off the pane. `wrap_width == 0` falls back to the unwrapped path, same as
+/// `issue_body_list`. TODO(#217): pass active_theme once this function
+/// accepts a theme parameter; for now the quadraui dark default matches the
+/// other two adapter call sites.
+fn extract_review_items(line: &str, wrap_width: usize) -> Vec<ListItem> {
     let mut items: Vec<ListItem> = Vec::new();
     // Find the verdict marker. The result text is itself JSON-encoded inside
     // the result field, so `\n` appears as the two-char sequence `\\n`.
@@ -1611,11 +1621,20 @@ fn extract_review_items(line: &str) -> Vec<ListItem> {
     // Skip the leading newline(s) right after `REVIEW_BODY:` so the first
     // rendered line is meaningful content rather than a blank row.
     let body = unescaped.trim_start_matches('\n');
-    for body_line in body.lines() {
-        items.push(activity_item(
-            &format!("  {}", body_line),
-            Color::rgb(200, 200, 210),
-        ));
+    let indent = "  ";
+    let prose_wrap = wrap_width.saturating_sub(indent.len());
+    let md_theme = quadraui::Theme::default();
+    let rendered = quadraui::render_markdown_to_styled_wrapped(body, &md_theme, prose_wrap);
+    for md_line in rendered.lines {
+        let mut spans = Vec::with_capacity(md_line.spans.len() + 1);
+        spans.push(StyledSpan::plain(indent));
+        spans.extend(md_line.spans);
+        items.push(ListItem {
+            text: StyledText { spans },
+            icon: None,
+            detail: None,
+            decoration: Decoration::Normal,
+        });
     }
     items
 }
@@ -1806,7 +1825,12 @@ fn parse_log_content(content: &str) -> Vec<ListItem> {
             // of result events so reviewers don't have to leave the TUI to
             // see what the reviewer said.
             if line.contains("\"type\":\"result\"") {
-                items.extend(extract_review_items(line));
+                // #57: this legacy (non-#385-readable) path has no wrap-width
+                // concept anywhere else in `parse_log_content` — pass 0 so the
+                // markdown adapter still styles the body (headings, lists,
+                // inline code) but falls back to its unwrapped rendering,
+                // matching this function's existing widthless behaviour.
+                items.extend(extract_review_items(line, 0));
             }
         } else {
             // Plain-text log: surface STATUS: / STUCK: lines.
@@ -2744,6 +2768,17 @@ pub struct CoordApp {
     /// that field's doc comment for why a shared `Cell` breaks under two
     /// panes painted in one frame.
     last_stage_content_cols: std::cell::Cell<usize>,
+    /// #57: panel width in backend units of the inject-chat overlay's
+    /// transcript rect, updated just before `chat.render` paints it each
+    /// frame.  Defaults to 120.  Read back by `chat_transcript_from_pool`'s
+    /// callers so assistant markdown prose is wrapped through
+    /// `render_markdown_to_styled_wrapped` at (approximately) the live
+    /// overlay width instead of the unwrapped variant — the `ChatController`
+    /// itself re-wraps every row to its exact rect at paint time regardless,
+    /// so this only needs to be in the right ballpark, matching the
+    /// `last_stage_content_cols` / `last_log_panel_cols` lag-one-frame
+    /// pattern used elsewhere in this file.
+    last_chat_panel_cols: std::cell::Cell<usize>,
     /// Minimum age in days for a done/failed assignment row to be eligible
     /// for the 'P' purge action.  Default 7.
     ///
@@ -4060,6 +4095,7 @@ impl CoordApp {
             last_issue_panel_cols: std::cell::Cell::new(120),
             board_pane_issue_cols: std::cell::RefCell::new(Vec::new()),
             last_stage_content_cols: std::cell::Cell::new(120),
+            last_chat_panel_cols: std::cell::Cell::new(120),
             purge_days: 7,
             sidebar_action_bar_hover: ToolbarHoverTracker::new(),
             panel_toolbar_hover: ToolbarHoverTracker::new(),
@@ -5462,11 +5498,12 @@ impl CoordApp {
             // worked for worker-guidance chat — the user assumed the
             // assistant was "doing the work" via the Log tab — but for
             // refinement-chat the assistant's reply IS the deliverable.
+            let chat_wrap_width = self.last_chat_panel_cols.get().max(40);
             let transcript = self
                 .focused_watch_state()
                 .map(|w| w.assignment_id.clone())
                 .and_then(|id| self.watch_pool.get(&id))
-                .map(chat_transcript_from_pool)
+                .map(|ctx| chat_transcript_from_pool(ctx, chat_wrap_width))
                 .unwrap_or_else(|| self.focused_transcript().to_vec());
             if let Some(ref mut chat) = self.inject_chat {
                 chat.set_transcript(transcript);

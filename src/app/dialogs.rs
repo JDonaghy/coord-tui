@@ -6514,7 +6514,13 @@ impl CoordApp {
         // previous messages".
         let history_turns: Vec<ChatTurn> =
             if let Some(old_ctx) = self.watch_pool.get(&pending.old_assignment_id) {
-                chat_transcript_from_pool(old_ctx)
+                // #57: chat_transcript_from_pool now takes a wrap_width
+                // (mod.rs / render.rs changed signature — this call site is
+                // outside coord-tui#57's file scope but needed updating to
+                // keep the crate compiling). `last_chat_panel_cols` is the
+                // ballpark-only overlay width Cell; ChatController re-wraps
+                // every row to its exact rect at paint time regardless.
+                chat_transcript_from_pool(old_ctx, self.last_chat_panel_cols.get().max(40))
                     .into_iter()
                     .filter(|t| !matches!(t.role, ChatRole::System))
                     .collect()

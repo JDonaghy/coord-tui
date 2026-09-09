@@ -6185,19 +6185,29 @@
 
     // ── extract_review_items ──────────────────────────────────────────────────
 
+    /// Join every span's text on one `ListItem` into a single string, so
+    /// assertions don't have to know how the markdown adapter split a line
+    /// across spans (heading text, list marker, inline-code span, etc).
+    fn item_text(item: &ListItem) -> String {
+        item.text.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
     #[test]
     fn extract_review_items_renders_verdict_and_body_lines() {
         // Result event with the structured REVIEW_VERDICT/REVIEW_BODY block
         // the way the reviewer system prompt asks workers to emit it. Body
         // text is JSON-encoded (`\n` → `\\n`).
         let line = r#"{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n## Summary\n\nLGTM.\nEND_REVIEW"}"#;
-        let items = extract_review_items(line);
-        let texts: Vec<String> = items.iter().map(|i| i.text.spans[0].text.clone()).collect();
+        let items = extract_review_items(line, 80);
+        let texts: Vec<String> = items.iter().map(item_text).collect();
         // First item is the verdict header.
         assert!(texts[0].contains("[review]"));
         assert!(texts[0].contains("approve"));
-        // Subsequent items are the unescaped body lines.
+        // Subsequent items are the markdown-rendered body lines: the `##`
+        // marker itself must not survive (#57 — styled heading, not literal
+        // source), but the heading text must.
         assert!(texts.iter().any(|t| t.contains("Summary")));
+        assert!(!texts.iter().any(|t| t.contains("##")));
         assert!(texts.iter().any(|t| t.contains("LGTM.")));
     }
 
@@ -6205,8 +6215,71 @@
     fn extract_review_items_empty_when_no_verdict() {
         // Plain work-completion result event — no review block, no items.
         let line = r#"{"type":"result","result":"work done"}"#;
-        let items = extract_review_items(line);
+        let items = extract_review_items(line, 80);
         assert!(items.is_empty());
+    }
+
+    // ── #57: extract_review_items markdown-adapter wrapping ────────────────
+    // Mirrors the three `issue_body_list` tests (render.rs, #669) for the
+    // review-verdict body — the adapter and wrap/fallback contract are the
+    // same; only the caller differs.
+
+    /// A long plain-text body line must produce more rows than the unwrapped
+    /// (width=0) path when a narrow wrap width is given.
+    #[test]
+    fn extract_review_items_long_line_wraps() {
+        let long_line = "a".repeat(120);
+        let line = format!(
+            r#"{{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n{}\nEND_REVIEW"}}"#,
+            long_line
+        );
+        let unwrapped = extract_review_items(&line, 0);
+        let wrapped = extract_review_items(&line, 40);
+        assert!(
+            wrapped.len() > unwrapped.len(),
+            "wrapped ({} items) should have more rows than unwrapped ({} items) \
+             for a 120-char line at width 40",
+            wrapped.len(),
+            unwrapped.len(),
+        );
+    }
+
+    /// A fenced code block inside a review body must not be word-wrapped —
+    /// both unwrapped and wrapped outputs produce the same row count for
+    /// content that is entirely inside the fence.
+    #[test]
+    fn extract_review_items_code_block_not_wrapped() {
+        let long_code = "x".repeat(200);
+        let line = format!(
+            r#"{{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\n```\n{}\n```\nEND_REVIEW"}}"#,
+            long_code
+        );
+        let unwrapped = extract_review_items(&line, 0);
+        let wrapped = extract_review_items(&line, 40);
+        assert_eq!(
+            unwrapped.len(),
+            wrapped.len(),
+            "fenced code block must not be wrapped (unwrapped={} rows, wrapped={} rows)",
+            unwrapped.len(),
+            wrapped.len(),
+        );
+        // The code content itself must survive verbatim, not be re-styled as
+        // prose (no markdown emphasis parsing inside the fence).
+        let texts: Vec<String> = wrapped.iter().map(item_text).collect();
+        assert!(texts.iter().any(|t| t.contains(&long_code)));
+    }
+
+    /// width == 0 must fall back to the unwrapped path deterministically.
+    #[test]
+    fn extract_review_items_zero_width_falls_back() {
+        let line = r#"{"type":"result","result":"REVIEW_VERDICT: approve\nREVIEW_BODY:\nShort line.\nEND_REVIEW"}"#;
+        let a = extract_review_items(line, 0);
+        let b = extract_review_items(line, 0);
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "width=0 must be deterministic and unwrapped"
+        );
     }
 
     // ── parse_json_event ──────────────────────────────────────────────────────
@@ -22664,6 +22737,149 @@
             .filter(|l| l.trim_start().starts_with("finding"))
             .count();
         assert!(body_rows > 1, "expected multiple wrapped rows; got: {joined:?}");
+    }
+
+    // ── #57: markdown adapter adoption ──────────────────────────────────────
+
+    #[test]
+    fn stage_content_review_renders_markdown_not_literal_source() {
+        // The screenshot bug in #57: a reviewer's `## Nits` / `- bullet` /
+        // `` `code` `` markdown rendered as literal source. A fenced code
+        // block must survive verbatim (not re-styled as prose, not wrapped).
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.last_stage_content_cols.set(80);
+
+        let body = "## Nits\n\n- Rename `foo` to `bar`\n\n```\nfn unchanged() {}\n```";
+        let mut review = _stage_assignment("rev-md", "review", 200.0, "done");
+        review.issue_number = 42;
+        review.review_verdict = Some("request-changes".to_string());
+        review.review_findings =
+            Some(serde_json::json!({"verdict": "request-changes", "body": body}).to_string());
+        app.data.assignments.push(review);
+
+        let rows = app.stage_content_review(&app.pipeline_issues[0].clone());
+        let joined: Vec<String> = rows
+            .iter()
+            .map(|r| r.text.spans.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect();
+        let all = joined.join("\n");
+
+        assert!(all.contains("Nits"), "heading text must survive; got: {all:?}");
+        assert!(!all.contains("##"), "literal '##' must not survive; got: {all:?}");
+        assert!(
+            all.contains("Rename") && all.contains("foo") && all.contains("bar"),
+            "list item text must survive; got: {all:?}"
+        );
+        assert!(
+            !joined.iter().any(|l| l.trim_start().starts_with("- Rename")),
+            "literal '- ' list marker must not survive; got: {joined:?}"
+        );
+        assert!(
+            all.contains("fn unchanged() {}"),
+            "fenced code content must survive verbatim; got: {all:?}"
+        );
+    }
+
+    #[test]
+    fn stage_content_plan_renders_markdown_summary_approach_risks() {
+        // #57 item 2: the planning agent's Summary/Approach/Risks fields are
+        // markdown prose too — same adapter, same "no literal '##'" bar.
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_sel = Some(0);
+        app.last_stage_content_cols.set(80);
+
+        let mut plan_assignment = _stage_assignment("plan-md", "plan", 100.0, "done");
+        plan_assignment.issue_number = 42;
+        app.data.assignments.push(plan_assignment);
+        app.data.plans.insert(
+            "plan-md".to_string(),
+            PlanData {
+                plan: "## Summary\n\nMigrate the widget.".to_string(),
+                files_modify: vec!["src/app_render.rs".to_string()],
+                approach: "- step one\n- step two".to_string(),
+                risks: "None known.".to_string(),
+                estimate: "1h".to_string(),
+                smoke_tests: None,
+            },
+        );
+
+        let rows = app.stage_content_plan(&app.pipeline_issues[0].clone());
+        let all: String = rows
+            .iter()
+            .flat_map(|r| r.text.spans.iter().map(|s| s.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(all.contains("Migrate the widget."), "summary prose must survive; got: {all:?}");
+        assert!(!all.contains("##"), "literal '##' must not survive; got: {all:?}");
+        assert!(all.contains("step one") && all.contains("step two"), "got: {all:?}");
+        // Files to modify stays plain text (a path, not prose) — the literal
+        // filename must survive unmangled.
+        assert!(
+            all.contains("src/app_render.rs"),
+            "file path must render as plain text; got: {all:?}"
+        );
+    }
+
+    #[test]
+    fn parse_json_events_readable_assistant_markdown_renders_styled() {
+        // #57 item 5: the Log tab's assistant-prose path (shared by both the
+        // live-SSE and read-from-disk log sources — both call this same
+        // function) must route markdown through the adapter too.
+        let line = r###"{"type":"assistant","message":{"content":[{"type":"text","text":"## Heading\n\n- item one\n- item two"}]}}"###;
+        let mut turn = 0;
+        let items = parse_json_events_readable(line, &mut turn, None, 80);
+        let all: String = items
+            .iter()
+            .flat_map(|i| i.text.spans.iter().map(|s| s.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("Heading"), "got: {all:?}");
+        assert!(!all.contains("##"), "literal '##' must not survive; got: {all:?}");
+        assert!(all.contains("item one") && all.contains("item two"), "got: {all:?}");
+    }
+
+    #[test]
+    fn chat_transcript_from_pool_renders_markdown_wrapped() {
+        // #57 item 4: the chat overlay used the *unwrapped* adapter variant.
+        // Swapping to `render_markdown_to_styled_wrapped` must still style
+        // the markdown (this test) without losing any content to the width
+        // argument (width is a ballpark pre-wrap; the overlay itself
+        // re-wraps at paint time — see `last_chat_panel_cols`'s doc comment).
+        let (mut sse, _tx) = make_sse_state_pair();
+        sse.lines = vec![
+            r###"{"type":"assistant","message":{"content":[{"type":"text","text":"## Heading\n\nSome prose."}]}}"###
+                .to_string(),
+        ];
+        let state = WatchState {
+            assignment_id: "chat-md".to_string(),
+            machine: "m1".to_string(),
+            repo: "r".to_string(),
+            issue_number: 42,
+            assignment_type: "refinement".to_string(),
+            scroll: usize::MAX,
+        };
+        let ctx = WatchContext {
+            state,
+            sse,
+            inject_transcript: Vec::new(),
+            inject_sse_offsets: Vec::new(),
+            history_turns: Vec::new(),
+            last_focused_at: Instant::now(),
+        };
+
+        let turns = chat_transcript_from_pool(&ctx, 80);
+        let assistant = turns
+            .iter()
+            .find(|t| matches!(t.role, ChatRole::Assistant))
+            .expect("expected an assistant turn");
+        let text: String = assistant.text.spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("Heading"), "got: {text:?}");
+        assert!(!text.contains("##"), "literal '##' must not survive; got: {text:?}");
+        assert!(text.contains("Some prose."), "got: {text:?}");
     }
 
     #[test]

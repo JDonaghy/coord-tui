@@ -1201,31 +1201,70 @@ pub(crate) fn extract_text_block_keep_newlines(json: &str) -> String {
 
 // ─── Readable log rendering (#385) ───────────────────────────────────────────
 
-/// Truncate a `"  → Name: detail"`-style single-line prefix so the full row —
-/// including the list widget's own mandatory row prefix that isn't reflected
-/// in `wrap_width` (`LIST_ROW_PREFIX_COLS`; see its doc comment in mod.rs) —
-/// fits the pane. Appends `…` when truncated. `wrap_width == 0` (or a budget
-/// too small to hold even one column after subtracting the row prefix)
-/// disables truncation, matching this module's existing wrap-width
-/// convention elsewhere.
+/// Wrap a `"  → Name: detail"`-style tool-call line onto one or more rows so
+/// a long command reads like the wrapped prose around it instead of losing
+/// text to an ellipsis (#63). Accounts for the list widget's own mandatory
+/// row prefix that isn't reflected in `wrap_width` (`LIST_ROW_PREFIX_COLS`;
+/// see its doc comment in mod.rs) — every returned row pays that cost, not
+/// just the first.
 ///
-/// #61: this used to compare `prefix.chars().count()` directly against the
-/// raw `wrap_width`, which is one column wider than the row can actually
-/// paint — the same off-by-one `extract_review_items`'s indent already
-/// accounted for. Shared here across the tool-only-turn, mixed-content-turn,
-/// and bare `tool_use` call sites so the three can't drift out of sync again.
-fn truncate_arrow_line(prefix: &str, wrap_width: usize) -> String {
-    let effective_wrap = wrap_width.saturating_sub(LIST_ROW_PREFIX_COLS);
-    if effective_wrap > 0 && prefix.chars().count() > effective_wrap {
-        let cut = prefix
-            .char_indices()
-            .nth(effective_wrap.saturating_sub(1))
-            .map(|(i, _)| i)
-            .unwrap_or(prefix.len());
-        format!("{}…", &prefix[..cut])
+/// The first row keeps the full `"  → Name: "` header; continuation rows are
+/// indented to align under the detail text (past the header, not past just
+/// the arrow) so a wrapped command cannot be mistaken for a second tool
+/// call. Wrapping is delegated to `quadraui::text_util::word_wrap`, so a
+/// single unbroken token too long to fit any row (a 60-char SHA, a URL) is
+/// hard-split rather than left overflowing, and the whole operation stays
+/// char-safe (`word_wrap` works in `chars()`, never raw byte indices) —
+/// coord-tui#11 was exactly this bug class.
+///
+/// `wrap_width == 0` (or a budget too small to hold even one column after
+/// subtracting the row prefix, or too small to leave any room for detail
+/// text after the header) disables wrapping, matching this module's
+/// existing wrap-width convention elsewhere: the line comes back as a
+/// single row, unmodified. A line that already fits returns as a single
+/// row, byte-for-byte identical to today's unwrapped rendering.
+///
+/// #61: this replaces the old `truncate_arrow_line`, keeping the
+/// tool-only-turn, mixed-content-turn, and bare `tool_use` call sites
+/// routed through one shared function so the three can't drift out of sync.
+fn wrap_arrow_line(name: &str, detail: &str, wrap_width: usize) -> Vec<String> {
+    const ARROW: &str = "  \u{2192} "; // "  → "
+    let full = if detail.is_empty() {
+        format!("{}{}", ARROW, name)
     } else {
-        prefix.to_string()
+        format!("{}{}: {}", ARROW, name, detail)
+    };
+
+    let effective_wrap = wrap_width.saturating_sub(LIST_ROW_PREFIX_COLS);
+    if effective_wrap == 0 || full.chars().count() <= effective_wrap {
+        return vec![full];
     }
+
+    let (header, body): (String, &str) = if detail.is_empty() {
+        (ARROW.to_string(), name)
+    } else {
+        (format!("{}{}: ", ARROW, name), detail)
+    };
+    let indent_cols = header.chars().count();
+    let body_budget = effective_wrap.saturating_sub(indent_cols);
+    if body_budget == 0 {
+        // No room left for detail text once the header is painted —
+        // wrapping further would just produce empty rows.
+        return vec![full];
+    }
+
+    let indent = " ".repeat(indent_cols);
+    word_wrap(body, body_budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            if i == 0 {
+                format!("{}{}", header, chunk)
+            } else {
+                format!("{}{}", indent, chunk)
+            }
+        })
+        .collect()
 }
 
 /// Parse one stream-json event line into zero or more displayable `ListItem`s
@@ -1340,13 +1379,9 @@ pub(crate) fn parse_json_events_readable(
                 // content so the header is pure noise (#issue items 1-2).
                 let mut items = Vec::new();
                 for (call_name, call_detail) in &calls {
-                    let prefix = if call_detail.is_empty() {
-                        format!("  \u{2192} {}", call_name) // →
-                    } else {
-                        format!("  \u{2192} {}: {}", call_name, call_detail)
-                    };
-                    let display = truncate_arrow_line(&prefix, wrap_width);
-                    items.push(activity_item(&display, Color::rgb(160, 130, 200)));
+                    for display in wrap_arrow_line(call_name, call_detail, wrap_width) {
+                        items.push(activity_item(&display, Color::rgb(160, 130, 200)));
+                    }
                 }
                 return items;
             }
@@ -1397,13 +1432,9 @@ pub(crate) fn parse_json_events_readable(
             // Mixed-content turn: also emit one arrow line per tool call in
             // the same turn (e.g. "I'll read that file" + Read in one turn).
             for (call_name, call_detail) in extract_tool_calls(line) {
-                let prefix = if call_detail.is_empty() {
-                    format!("  \u{2192} {}", call_name) // →
-                } else {
-                    format!("  \u{2192} {}: {}", call_name, call_detail)
-                };
-                let display = truncate_arrow_line(&prefix, wrap_width);
-                items.push(activity_item(&display, Color::rgb(160, 130, 200)));
+                for display in wrap_arrow_line(&call_name, &call_detail, wrap_width) {
+                    items.push(activity_item(&display, Color::rgb(160, 130, 200)));
+                }
             }
             items
         }
@@ -1411,17 +1442,13 @@ pub(crate) fn parse_json_events_readable(
         "tool_use" => {
             let name = json_str(line, "name").unwrap_or_else(|| "?".to_string());
             let detail = tool_detail(&name, line);
-            // Compact single line: "  → Bash: <cmd>" or "  → Read: <path>"
-            // Wrap the detail if it's very long, but keep the arrow prefix.
-            let prefix = if detail.is_empty() {
-                format!("  \u{2192} {}", name) // →
-            } else {
-                format!("  \u{2192} {}: {}", name, detail)
-            };
-            // For very long bash commands, truncate at wrap_width with ellipsis
-            // so the arrow line stays on screen without horizontal scrolling.
-            let display = truncate_arrow_line(&prefix, wrap_width);
-            vec![activity_item(&display, Color::rgb(160, 130, 200))]
+            // Compact single line: "  → Bash: <cmd>" or "  → Read: <path>",
+            // wrapped onto continuation rows (indented past the header) when
+            // it doesn't fit on one — see `wrap_arrow_line` (#63).
+            wrap_arrow_line(&name, &detail, wrap_width)
+                .into_iter()
+                .map(|display| activity_item(&display, Color::rgb(160, 130, 200)))
+                .collect()
         }
 
         "result" => {

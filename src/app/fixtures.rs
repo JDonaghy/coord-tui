@@ -208,7 +208,24 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         pipeline_action_bar_hover: ToolbarHoverTracker::new(),
         pipeline_focused_stage: None,
         pipeline_stage_content_scroll: 0,
-        settings: TuiSettings::default(),
+        // #86: pin fixture apps to `nerd_font_icons: false`, deliberately
+        // *not* inheriting `TuiSettings::default()` (which #86 flipped to
+        // `true`). Every fixture in this module backs both in-crate
+        // `#[cfg(test)]` tests and the external sealed acceptance crate
+        // (`tests/acceptance/**`, `--features test-support`), and
+        // `CoordApp::shell_config()` (`app/mod.rs`) independently pins the
+        // *initial* activity-bar `ShellConfig` to `nerd_font_icons: false`
+        // for exactly that sealed suite. But `sync_activity_bar_icons`
+        // (`app/render.rs`) re-derives the bar from `self.settings
+        // .nerd_font_icons` after every dispatched event (#81, so a live
+        // Settings toggle repaints without a restart) — so unless the app's
+        // own `settings` agrees with `shell_config()`'s pin, the very first
+        // click a sealed test drives flips the bar back to Codicons out
+        // from under it. Tests that want the flag on set
+        // `app.settings.nerd_font_icons = true` explicitly (see
+        // `app/tests.rs`'s "#80/#81 half 2" tests) — that path is
+        // unaffected by this default.
+        settings: TuiSettings { nerd_font_icons: false, ..TuiSettings::default() },
         parsed_keybindings: parse_keybindings(&TuiSettings::default()),
         settings_form: std::cell::RefCell::new(FormController::new("settings".to_string())),
         settings_field_sel: 0,

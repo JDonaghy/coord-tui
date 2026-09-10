@@ -528,6 +528,16 @@ pub fn default_keybindings() -> HashMap<String, String> {
     m
 }
 
+/// Default value for [`TuiSettings::nerd_font_icons`] (#86).
+///
+/// Used both by `#[serde(default = "...")]` (so a `settings.toml` written
+/// before this key existed still resolves to `true` on load, rather than a
+/// bare `#[serde(default)]`'s `bool::default()` of `false`) and by
+/// [`TuiSettings::default`].
+fn default_nerd_font_icons() -> bool {
+    true
+}
+
 // ─── TuiSettings ─────────────────────────────────────────────────────────────
 
 /// All user-facing settings that are persisted to `~/.coord/settings.toml`.
@@ -550,14 +560,25 @@ pub struct TuiSettings {
     /// widget) with its Nerd Font glyph rather than its ASCII/Unicode
     /// fallback (#81).
     ///
-    /// Defaults to `false`: a terminal without a patched Nerd Font renders
-    /// every Private-Use-Area codepoint as a tofu box, so opting in has to
-    /// be the user's explicit choice. With this off, the bar is byte-for-byte
-    /// what it painted before #81 landed — that is the whole safety property
-    /// of the feature, and the sealed acceptance suites
-    /// (`tests/acceptance/ms-65`, `ms-33`) pin it by building their fixtures
-    /// from `TuiSettings::default()`.
-    #[serde(default)]
+    /// Defaults to `true` (#86): Codicons paint out of the box. The
+    /// trade-off this flips away from is real and does not disappear — a
+    /// terminal without a patched Nerd Font renders every Private-Use-Area
+    /// codepoint as a tofu box — but #86 makes that the opt-*out* cost
+    /// instead of the opt-*in* one, on the theory that most terminals in
+    /// practice do carry a patched font and the previous default meant
+    /// nobody saw #80/#81's icon work without first finding this setting.
+    /// An explicit `nerd_font_icons = false` in `settings.toml` is still
+    /// honoured — see `#[serde(default = "default_nerd_font_icons")]` below,
+    /// which is required because a bare `#[serde(default)]` on a `bool`
+    /// field would silently fall back to `false` for any settings file that
+    /// predates this key, defeating the flip for every existing user.
+    ///
+    /// The sealed acceptance suites (`tests/acceptance/ms-65`, `ms-33`,
+    /// `ms-38`, `ms-67`) do **not** track this setting — they pin their
+    /// fixtures to an explicit `nerd_font_icons: false` via
+    /// `CoordApp::shell_config()` (see its doc comment in `src/app/mod.rs`),
+    /// independent of this default.
+    #[serde(default = "default_nerd_font_icons")]
     pub nerd_font_icons: bool,
 
     /// Session-level model overrides keyed by machine name.
@@ -581,7 +602,7 @@ impl Default for TuiSettings {
             refresh_cadence: RefreshCadence::default(),
             audio_on_completion: false,
             log_cache_ttl: LogCacheTtl::default(),
-            nerd_font_icons: false,
+            nerd_font_icons: default_nerd_font_icons(),
             machine_model: HashMap::new(),
             keybindings: default_keybindings(),
         }
@@ -778,9 +799,9 @@ mod tests {
         assert!(!s.audio_on_completion);
         assert_eq!(s.log_cache_ttl, LogCacheTtl::default());
         assert!(
-            !s.nerd_font_icons,
-            "#81: Nerd Font icons must stay opt-in — a terminal with no \
-             patched font renders every PUA codepoint as tofu",
+            s.nerd_font_icons,
+            "#86: Nerd Font icons default on — malformed TOML falls back to \
+             `TuiSettings::default()`, which now paints Codicons",
         );
         assert!(s.machine_model.is_empty());
     }
@@ -833,6 +854,63 @@ mod tests {
         assert_eq!(
             loaded.keybindings.get(ACTION_PIPELINE_REFRESH).map(|s| s.as_str()),
             Some("Ctrl+R"),
+        );
+    }
+
+    // ── #86: nerd_font_icons default flip ─────────────────────────────────────
+
+    #[test]
+    fn tuisettings_default_has_nerd_font_icons_on() {
+        assert!(
+            TuiSettings::default().nerd_font_icons,
+            "#86: Codicons must be on by default for a fresh install",
+        );
+    }
+
+    #[test]
+    fn settings_toml_predating_the_key_still_defaults_nerd_font_icons_on() {
+        // A `settings.toml` written before #86 (or #81) has no
+        // `nerd_font_icons` line at all. `#[serde(default)]` on a bare
+        // `bool` field would resolve the missing key to `bool::default()`
+        // (`false`), silently defeating the flip for every existing user —
+        // this must go through `default_nerd_font_icons()` instead.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "coord_settings_test_predates_key_{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            b"theme = \"Light\"\naudio_on_completion = true\n",
+        )
+        .unwrap();
+        let s = TuiSettings::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            s.nerd_font_icons,
+            "#86: a settings.toml missing the nerd_font_icons key must still \
+             default to true, not fall back to bool::default()",
+        );
+    }
+
+    #[test]
+    fn settings_toml_explicit_false_stays_off() {
+        // An explicit user opt-out must never be overridden by the new
+        // default.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "coord_settings_test_explicit_false_{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"nerd_font_icons = false\n").unwrap();
+        let s = TuiSettings::load_from_path(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            !s.nerd_font_icons,
+            "#86: an explicit `nerd_font_icons = false` in settings.toml \
+             must be honoured, not overridden by the new default",
         );
     }
 

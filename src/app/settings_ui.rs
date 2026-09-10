@@ -1699,6 +1699,22 @@ impl CoordApp {
             disabled: false,
             validation: None,
         });
+        // #81: Codicon (Nerd Font) icons for the whole activity bar, with
+        // each panel's pre-#81 character kept as the fallback. Off by
+        // default — a terminal without a patched Nerd Font paints every
+        // Private-Use-Area codepoint as a tofu box.
+        fields.push(FormField {
+            id: WidgetId::new("settings:nerd-fonts"),
+            label: StyledText::plain("Nerd Font icons"),
+            kind: FieldKind::Toggle {
+                value: self.settings.nerd_font_icons,
+            },
+            hint: StyledText::plain(
+                "Use Codicon glyphs on the activity bar (needs a patched Nerd Font)",
+            ),
+            disabled: false,
+            validation: None,
+        });
 
         // ── Refresh ────────────────────────────────────────────────────
         fields.push(settings_label("Auto-Refresh"));
@@ -1927,19 +1943,24 @@ impl CoordApp {
                 true
             }
             FormEvent::ToggleChanged { id, value } => {
-                if id.as_str() == "settings:audio" {
-                    self.settings.audio_on_completion = *value;
-                    if let Err(e) = self.settings.save() {
-                        self.push_toast(
-                            "Settings",
-                            &format!("could not persist settings: {e}"),
-                            ToastSeverity::Error,
-                        );
-                    }
-                    true
-                } else {
-                    false
+                match id.as_str() {
+                    "settings:audio" => self.settings.audio_on_completion = *value,
+                    // #81: no extra work here — `CoordApp::handle` calls
+                    // `sync_activity_bar_icons` after every dispatch, which
+                    // re-registers the activity-bar rows with the other half
+                    // of each `PanelIconSpec`, and `render_content` pushes
+                    // the flag to the backend on the next frame.
+                    "settings:nerd-fonts" => self.settings.nerd_font_icons = *value,
+                    _ => return false,
                 }
+                if let Err(e) = self.settings.save() {
+                    self.push_toast(
+                        "Settings",
+                        &format!("could not persist settings: {e}"),
+                        ToastSeverity::Error,
+                    );
+                }
+                true
             }
             FormEvent::TextInputChanged { id, value }
             | FormEvent::TextInputCommitted { id, value }

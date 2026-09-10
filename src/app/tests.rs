@@ -19429,7 +19429,8 @@
         }
     }
 
-    /// #80 half 1 — with `nerd_font_icons` off (the default), the Board
+    /// #80 half 1 — with `nerd_font_icons` explicitly off (#86 flipped the
+    /// default on, so this column now has to opt out on purpose), the Board
     /// panel toolbar paints the exact plain-Unicode characters `main`
     /// painted before #80: no swap has happened, because `toolbar_button`
     /// only ever puts the fallback half into `ToolbarButton::Action.icon`
@@ -19439,8 +19440,8 @@
     fn board_panel_toolbar_paints_ascii_fallbacks_when_nerd_fonts_are_off() {
         use quadraui::tui::testing::driver_with_shell;
 
-        let app = make_app_default();
-        assert!(!app.settings.nerd_font_icons, "flag must default off");
+        let mut app = make_app_default();
+        app.settings.nerd_font_icons = false;
         let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
 
         assert!(
@@ -62507,22 +62508,23 @@ Milestone tracking issue.
             .collect()
     }
 
-    /// #81 half 1 — with `nerd_font_icons` off (the default), the bar is
+    /// #81 half 1 — with `nerd_font_icons` explicitly off, the bar is
     /// byte-identical to what it painted before #81 landed. This is the
     /// safety property the sealed suites (`tests/acceptance/ms-65`'s
     /// `BOARD_ICON: char = 'B'` / `PIPELINE_ICON: char = '▶'`, ms-33 §1's
     /// `§` for Audit) depend on, restated here as a first-class assertion so
     /// a regression fails in the *un*sealed suite too.
+    ///
+    /// #86 flipped `TuiSettings::default()` to `nerd_font_icons: true`, so
+    /// this no longer relies on the app's own settings — `CoordApp::
+    /// shell_config()` pins the activity bar to `false` on its own account
+    /// (see its doc comment), which is what the sealed suites actually key
+    /// off of.
     #[test]
     fn activity_bar_paints_ascii_fallbacks_when_nerd_fonts_are_off() {
         use quadraui::tui::testing::driver_with_shell;
 
         let app = make_test_app(BoardData::default());
-        assert!(
-            !app.settings.nerd_font_icons,
-            "Nerd Font icons must be opt-in — `TuiSettings::default()` decides \
-             what every sealed fixture renders",
-        );
         let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
 
         assert_eq!(
@@ -62716,6 +62718,7 @@ Milestone tracking issue.
     #[test]
     fn settings_form_offers_the_nerd_font_icons_toggle() {
         let mut app = make_app_default();
+        app.settings.nerd_font_icons = false;
         let field = app
             .build_settings_form()
             .fields
@@ -62726,7 +62729,7 @@ Milestone tracking issue.
         assert_eq!(label, "Nerd Font icons");
         assert!(
             matches!(field.kind, FieldKind::Toggle { value: false }),
-            "the row must be a Toggle reflecting the (off-by-default) setting",
+            "the row must be a Toggle reflecting the current (here: off) setting",
         );
 
         app.settings.nerd_font_icons = true;

@@ -4778,16 +4778,24 @@ impl CoordApp {
     /// Build the [`ShellConfig`] for the AppShell chrome, with the activity
     /// bar painting each panel's **fallback** icon.
     ///
-    /// This is the `TuiSettings::default()` shape — `nerd_font_icons: false`
-    /// — so every existing caller (the sealed acceptance entrypoint, the
-    /// in-crate `TuiDriver` fixtures, `cross_backend`) keeps seeing exactly
-    /// the bar it saw before #81. Live startup goes through
-    /// [`Self::shell_config_for`] with the user's loaded settings instead.
+    /// This pins `nerd_font_icons: false` explicitly (#86) rather than
+    /// deferring to `TuiSettings::default()` — since #86 flipped that
+    /// default to `true`, inheriting it here would silently swap every
+    /// caller (the sealed acceptance entrypoint, the in-crate `TuiDriver`
+    /// fixtures, `cross_backend`) onto Codicons out from under them. A
+    /// contract suite should state what it asserts rather than track a
+    /// user-facing preference that can move underneath it, so those callers
+    /// keep seeing exactly the ASCII/Unicode bar they saw before #81 by
+    /// construction. Live startup goes through [`Self::shell_config_for`]
+    /// with the user's loaded settings instead.
     ///
     /// The status bar is enabled so `render_content()` can draw into
     /// `layout.status_bar_bounds`.
     pub fn shell_config() -> ShellConfig {
-        Self::shell_config_for(&TuiSettings::default())
+        Self::shell_config_for(&TuiSettings {
+            nerd_font_icons: false,
+            ..Default::default()
+        })
     }
 
     /// The [`ShellConfig`] matching *this* app's own loaded settings (#81).

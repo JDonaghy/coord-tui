@@ -6381,7 +6381,7 @@ impl CoordApp {
                 ],
                 bg: None,
             };
-            backend.draw_toolbar(bar_rect, &toolbar, None, None);
+            backend.draw_toolbar_interactive(bar_rect, &toolbar, &InteractionState::new());
 
             // Descriptive text below the buttons.
             let mut items: Vec<ListItem> = Vec::new();

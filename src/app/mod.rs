@@ -59,6 +59,11 @@ use quadraui::{
     Color, Decoration,
     Dialog, DialogButton, DialogHit, DialogInput, DialogLayout, DialogMeasure,
     DialogSeverity, DialogTextInput,
+    // #85 (quadraui#819): `draw_status_bar_interactive` /
+    // `draw_toolbar_interactive` / `draw_sidebar_panel_interactive` all read
+    // hover/pressed off one `InteractionState` instead of two positional
+    // `Option<&WidgetId>` slots — see render.rs/dialogs.rs call sites.
+    InteractionState,
     Key, ListItem, ListItemMeasure, ListView, ListViewHit, Modifiers, MouseButton, NamedKey,
     PipelineHit, PipelineStage as QuiPipelineStage, PipelineView as QuiPipelineView,
     // #2017: resize-cursor hover affordance for the Queue splitter.

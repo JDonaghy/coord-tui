@@ -77,7 +77,11 @@ impl ShellApp for CoordApp {
 
         // ── Status bar ────────────────────────────────────────────────
         if let Some(sb_bounds) = layout.status_bar_bounds {
-            backend.draw_status_bar(sb_bounds, &self.status_bar(), None, None);
+            backend.draw_status_bar_interactive(
+                sb_bounds,
+                &self.status_bar(),
+                &InteractionState::new(),
+            );
         }
 
         // ── Sidebar: list content (sidebar system / machines) ────────
@@ -90,11 +94,13 @@ impl ShellApp for CoordApp {
             // dispatch routes through `SidebarPanelLayout::hit_test` so the
             // off-by-one math we had to maintain by hand is gone.
             let panel = self.build_sidebar_action_panel(lh);
-            let panel_layout = backend.draw_sidebar_panel(
+            let panel_layout = backend.draw_sidebar_panel_interactive(
                 full_sidebar_rect,
                 &panel,
-                self.sidebar_action_bar_hover.hovered_id(),
-                None,
+                &InteractionState::from_parts(
+                    self.sidebar_action_bar_hover.hovered_id().cloned(),
+                    None,
+                ),
             );
             let sidebar_rect = panel_layout.content_bounds;
             match self.active_view {
@@ -203,11 +209,13 @@ impl ShellApp for CoordApp {
                 toolbar: Some(toolbar),
                 toolbar_height: Some(self.toolbar_height(lh)),
             };
-            let panel_layout = backend.draw_sidebar_panel(
+            let panel_layout = backend.draw_sidebar_panel_interactive(
                 full_m,
                 &panel,
-                self.panel_toolbar_hover.hovered_id(),
-                None,
+                &InteractionState::from_parts(
+                    self.panel_toolbar_hover.hovered_id().cloned(),
+                    None,
+                ),
             );
             panel_layout.content_bounds
         } else {
@@ -368,11 +376,13 @@ impl ShellApp for CoordApp {
                                 (content_rect.height - bar_h - pv_rect.height).max(0.0),
                             );
                             if let Some(toolbar) = action_toolbar {
-                                backend.draw_toolbar(
+                                backend.draw_toolbar_interactive(
                                     bar_rect,
                                     &toolbar,
-                                    self.pipeline_action_bar_hover.hovered_id(),
-                                    None,
+                                    &InteractionState::from_parts(
+                                        self.pipeline_action_bar_hover.hovered_id().cloned(),
+                                        None,
+                                    ),
                                 );
                             }
                             if let Some(view) = self.build_pipeline_widget() {

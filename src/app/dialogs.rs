@@ -6356,6 +6356,11 @@ impl CoordApp {
                     ToolbarButton::Action {
                         id: WidgetId::new("board-chat:refine"),
                         label: "Refine".to_string(),
+                        // #80: `None` today (not the `icon_for_action`
+                        // "refine" fallback `✎`) — this CTA button has
+                        // never painted an icon, and giving it one now
+                        // (even a "flag off" fallback) would itself be the
+                        // visible flag-off change #80 promises not to make.
                         icon: None,
                         key_hint: Some("r".to_string()),
                         enabled: repo_known,
@@ -6366,6 +6371,7 @@ impl CoordApp {
                     ToolbarButton::Action {
                         id: WidgetId::new("board-chat:new-issue"),
                         label: "New Issue".to_string(),
+                        // #80: same reasoning as "board-chat:refine" above.
                         icon: None,
                         key_hint: Some("n".to_string()),
                         enabled: repo_known,

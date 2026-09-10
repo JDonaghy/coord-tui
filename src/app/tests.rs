@@ -19429,6 +19429,183 @@
         }
     }
 
+    /// #80 half 1 — with `nerd_font_icons` off (the default), the Board
+    /// panel toolbar paints the exact plain-Unicode characters `main`
+    /// painted before #80: no swap has happened, because `toolbar_button`
+    /// only ever puts the fallback half into `ToolbarButton::Action.icon`
+    /// (see its doc comment) and [`CoordApp::resolve_toolbar_icons`]
+    /// re-resolves to that same fallback when the flag is off.
+    #[test]
+    fn board_panel_toolbar_paints_ascii_fallbacks_when_nerd_fonts_are_off() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = make_app_default();
+        assert!(!app.settings.nerd_font_icons, "flag must default off");
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        assert!(
+            driver.screen_contains("[ [A]dd ][ ⓘ [N]otify ][ ↻ [R]etry ][ ✕ [P]urge ]"),
+            "flag off: the Board panel toolbar must read exactly as it did \
+             before #80:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #80 half 2 — with `nerd_font_icons` on, the same four buttons paint
+    /// their Codicon glyphs instead, in the same columns (`find` returns
+    /// the button's on-screen position, so a hit here also proves the
+    /// glyph didn't silently move or get dropped).
+    #[test]
+    fn board_panel_toolbar_paints_codicons_when_nerd_fonts_are_on() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_app_default();
+        app.settings.nerd_font_icons = true;
+        let config = app.shell_config_current();
+        let driver = driver_with_shell(app, config, 120, 40);
+
+        // "add" has no entry in `icon_for_action` — no icon before #80, and
+        // still none now; only the three glyph-bearing verbs are asserted.
+        assert!(
+            driver.find("\u{ea74}").is_some(), // cod-info — Notify
+            "flag on: Notify must paint cod-info:\n{}",
+            driver.screen(),
+        );
+        assert!(
+            driver.find("\u{ea77}").is_some(), // cod-sync — Retry
+            "flag on: Retry must paint cod-sync:\n{}",
+            driver.screen(),
+        );
+        assert!(
+            driver.find("\u{ea81}").is_some(), // cod-trash — Purge
+            "flag on: Purge must paint cod-trash:\n{}",
+            driver.screen(),
+        );
+        // The panel toolbar's fallback characters must be gone from their
+        // buttons — a leftover fallback next to its glyph would mean
+        // `resolve_toolbar_icons` appended rather than replaced. (The
+        // sidebar header's own "[ ↻ Sync (S) ]" button is a separate,
+        // deliberately-unrouted icon — see the PR notes — so this checks
+        // the exact bracketed panel-toolbar segments, not a bare `↻` scan.)
+        assert!(
+            !driver.screen_contains("[ ⓘ [N]otify ]"),
+            "flag on: Notify must not still show its fallback:\n{}",
+            driver.screen(),
+        );
+        assert!(
+            !driver.screen_contains("[ ↻ [R]etry ]"),
+            "flag on: Retry must not still show its fallback:\n{}",
+            driver.screen(),
+        );
+        assert!(
+            !driver.screen_contains("[ ✕ [P]urge ]"),
+            "flag on: Purge must not still show its fallback:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #80: the deliberate icon-grouping comments in `icon_for_action` must
+    /// hold in the *glyph* column too, not just the fallback column the
+    /// existing `pull_into_decomposition_session_has_a_fresh_icon_not_the_
+    /// pty_glyph` test already checked. Pure data assertions on
+    /// `icon_for_action` — no rendering involved — matching the style of
+    /// `activity_bar_icon_set_has_no_duplicate_glyphs_or_fallbacks` (#81).
+    #[test]
+    fn icon_for_action_preserves_the_deliberate_glyph_groupings() {
+        // #2863: the six PTY-launch verbs all share cod-terminal.
+        let pty_verbs = [
+            "start-work-interactive",
+            "start-plan-interactive",
+            "start-review-interactive",
+            "start-fix-interactive",
+            "reattach-live-session",
+            "open-attended-intake-session",
+        ];
+        for verb in pty_verbs {
+            assert_eq!(
+                icon_for_action(verb).map(|i| i.glyph),
+                Some("\u{ea85}".to_string()),
+                "{verb}: must share cod-terminal with the rest of the PTY family",
+            );
+        }
+
+        // #2063: the sign-off verdict set all share cod-check.
+        let check_verbs = ["mark-refined", "approve-gate-a", "ready"];
+        for verb in check_verbs {
+            assert_eq!(
+                icon_for_action(verb).map(|i| i.glyph),
+                Some("\u{eab2}".to_string()),
+                "{verb}: must share cod-check with the rest of the sign-off set",
+            );
+        }
+
+        // #2533: the decomposition hand-off is pointedly NOT cod-terminal,
+        // in either column.
+        let pull = icon_for_action("pull-into-decomposition-session").expect("has an icon");
+        assert_ne!(pull.glyph, "\u{ea85}");
+        assert_ne!(pull.fallback, "⌨");
+    }
+
+    /// #80: every glyph in `icon_for_action`'s table is a single `char` in
+    /// the BMP Private Use Area — the same shape `activity_bar_icon_set_
+    /// has_no_duplicate_glyphs_or_fallbacks` enforces for the activity bar
+    /// (#81), so a one-cell TUI rasteriser can never truncate one.
+    #[test]
+    fn icon_for_action_glyphs_are_single_char_bmp_pua() {
+        let verbs = [
+            "refine",
+            "mark-refined",
+            "send-to-pipeline",
+            "drop-to-backlog",
+            "drop-to-refining",
+            "start-work-interactive",
+            "start-plan-interactive",
+            "start-review-interactive",
+            "start-fix-interactive",
+            "reattach-live-session",
+            "chat-about-issue",
+            "audit-outcomes",
+            "dispatch-gate-a-mock",
+            "view-gate-a-mock",
+            "approve-gate-a",
+            "request-gate-a-changes",
+            "troubleshoot-interactive",
+            "diagnose-fix-stage",
+            "diagnose-stage",
+            "diagnose-reset",
+            "start-with-plan",
+            "start-skip-plan",
+            "watch",
+            "stop",
+            "open-pr",
+            "bounce",
+            "pull-into-decomposition-session",
+            "open-attended-intake-session",
+            "notify",
+            "retry",
+            "purge",
+            "ready",
+            "merge",
+        ];
+        for verb in verbs {
+            let icon = icon_for_action(verb).unwrap_or_else(|| panic!("{verb}: must have an icon"));
+            assert_eq!(
+                icon.glyph.chars().count(),
+                1,
+                "{verb}: glyph {:?} must be exactly one char",
+                icon.glyph,
+            );
+            let cp = icon.glyph.chars().next().unwrap() as u32;
+            assert!(
+                (0xE000..=0xF8FF).contains(&cp),
+                "{verb}: U+{cp:04X} is outside the BMP Private Use Area",
+            );
+        }
+        // "add" is deliberately absent from the table — it had no icon
+        // before #80 either.
+        assert!(icon_for_action("add").is_none());
+    }
+
     #[test]
     fn panel_toolbar_pipeline_is_absent() {
         // #438: Pipeline panel toolbar removed — every verb it offered
@@ -22367,15 +22544,17 @@
         // assertion would contradict the mock it indexes. It explicitly
         // leaves the *action-table*-level fact ("`icon_for_action` maps
         // this id to `⇢`, contract §4a") to an in-crate unit test — this one.
-        assert_eq!(
-            icon_for_action("pull-into-decomposition-session"),
-            Some("⇢"),
-        );
+        let icon = icon_for_action("pull-into-decomposition-session").expect("has an icon");
+        assert_eq!(icon.fallback, "⇢");
         // Contract §4c/§1: this dispatches a stream-json chat session, not
         // the `InteractiveLaunchMode` PTY family — reusing `⌨` (the glyph
         // every PTY-launch action already uses) would misleadingly imply
         // otherwise.
-        assert_ne!(icon_for_action("pull-into-decomposition-session"), Some("⌨"));
+        assert_ne!(icon.fallback, "⌨");
+        // #80: the same distinction, now enforced in the glyph column too —
+        // this action must NOT paint `cod-terminal` (`\u{ea85}`), the
+        // codepoint every PTY-launch verb's glyph shares.
+        assert_ne!(icon.glyph, "\u{ea85}");
     }
 
     #[test]

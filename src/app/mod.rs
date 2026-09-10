@@ -77,7 +77,10 @@ use quadraui::{
     // widths now come from `Backend::sidebar_panel_layout`.  (`dialogs.rs`
     // still names the type once, fully qualified, for `Dialog::layout`'s
     // unused measurer slot.)
-    ToolbarButton, ToolbarHoverTracker, TreeRow, UiEvent, WidgetId,
+    // #80: `ToolbarIcons` is the side table `sidebar.rs::icon_for_action`
+    // registers glyph/fallback pairs into — see
+    // `CoordApp::resolve_toolbar_icons`.
+    ToolbarButton, ToolbarHoverTracker, ToolbarIcons, TreeRow, UiEvent, WidgetId,
     BadgeStatus, BoardCard, BoardColumn, BoardHit, BoardLayout, BoardModel, CardBadge, MoveDir,
     // #1094: Audit panel row list — first `DataTable` use in coord-tui.
     Column, ColumnAlign, ColumnWidth, DataRow, DataTable, DataTableHit, DataTableLayout,

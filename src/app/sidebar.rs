@@ -29,6 +29,13 @@ impl CoordApp {
             buttons.push(ToolbarButton::Action {
                 id: WidgetId::new("sidebar-action:sync-issues"),
                 label: "Sync".to_string(),
+                // #80: stays a bare literal rather than routing through
+                // `icon_for_action`/`resolve_toolbar_icons` — "sync-issues"
+                // has no entry in that table (it isn't one of the reviewed
+                // verbs #80 scoped), and picking a Codicon codepoint here
+                // without checking it against nerd-fonts `glyphnames.json`
+                // would risk shipping an unverified glyph, which is exactly
+                // what #80's own bar requires every entry to avoid.
                 icon: Some("↻".to_string()),
                 key_hint: Some("S".to_string()),
                 enabled: true,
@@ -45,6 +52,9 @@ impl CoordApp {
             buttons.push(ToolbarButton::Action {
                 id: WidgetId::new("sidebar-action:new-terminal"),
                 label: "New terminal".to_string(),
+                // #80: same reasoning as "sync-issues" above — no reviewed
+                // Codicon pair for "new-terminal" in `icon_for_action`, so
+                // this stays outside the seam rather than guessing one.
                 icon: Some("+".to_string()),
                 key_hint: Some("n".to_string()),
                 enabled: true,
@@ -365,12 +375,38 @@ impl CoordApp {
             | SidebarView::Approved => return None,
         };
 
-        Some(Toolbar {
+        Some(self.resolve_toolbar_icons(Toolbar {
             focused_index: None,
             id: WidgetId::new("panel-toolbar"),
             buttons,
             bg: None,
-        })
+        }))
+    }
+
+    /// Bake `icon_for_action`'s Nerd-Font glyph into every `toolbar:<verb>`
+    /// button of `bar`, per the current `nerd_font_icons` setting — the
+    /// non-breaking side-table seam quadraui#913 added to `Toolbar`
+    /// (issue #80).
+    ///
+    /// [`toolbar_button`] already put the *fallback* half into each
+    /// button's `icon` field, so [`ToolbarIcons::apply`] re-resolving to
+    /// that same fallback when the flag is off is a no-op in substance
+    /// (identical string in, identical string out) — the byte-identical-
+    /// to-`main` guarantee doesn't depend on this method ever running.
+    /// When the flag is on, this is what actually swaps the fallback for
+    /// the glyph.
+    pub(crate) fn resolve_toolbar_icons(&self, bar: Toolbar) -> Toolbar {
+        let mut icons = ToolbarIcons::new();
+        for button in &bar.buttons {
+            if let ToolbarButton::Action { id, .. } = button {
+                if let Some(verb) = id.as_str().strip_prefix("toolbar:") {
+                    if let Some(icon) = icon_for_action(verb) {
+                        icons = icons.with(id.clone(), icon);
+                    }
+                }
+            }
+        }
+        icons.apply(&bar, self.settings.nerd_font_icons)
     }
 
     /// Hit-test a left-click against the panel toolbar at the top of
@@ -623,13 +659,19 @@ impl CoordApp {
 /// Action id is always `toolbar:<verb>` — disabled buttons keep the id
 /// (so the layout still records them for hover tooltips) but the
 /// primitive's `enabled` flag prevents click dispatch.
+///
+/// #80: `icon` always gets the *fallback* half of `icon_for_action`'s pair,
+/// never the glyph — so a caller that never runs this button's `Toolbar`
+/// through [`CoordApp::resolve_toolbar_icons`] still paints exactly what
+/// `main` painted before #80 (today's plain-Unicode character). The glyph
+/// only ever reaches the button via that seam.
 pub(crate) fn toolbar_button(verb: &str, label: &str, enabled: bool) -> ToolbarButton {
     ToolbarButton::Action {
         id: WidgetId::new(format!("toolbar:{}", verb)),
         // Strip the surrounding spaces — the primitive adds its own
         // padding via `[ ... ]` framing in the TUI rasteriser.
         label: label.trim().to_string(),
-        icon: icon_for_action(verb).map(String::from),
+        icon: icon_for_action(verb).map(|icon| icon.fallback),
         key_hint: None,
         enabled,
         is_active: false,
@@ -637,59 +679,76 @@ pub(crate) fn toolbar_button(verb: &str, label: &str, enabled: bool) -> ToolbarB
     }
 }
 
-/// Map an `action_id` (sidebar row action or panel-toolbar verb) to a
-/// short unicode glyph used as the button icon.  Plain printable
-/// unicode rather than Private-Use-Area nerdfont so the icons render
-/// on every terminal; the user can swap to nerdfont later if desired.
-pub(crate) fn icon_for_action(action_id: &str) -> Option<&'static str> {
-    match action_id {
+/// Map an `action_id` (sidebar row action or panel-toolbar verb) to its
+/// Codicon glyph / plain-Unicode fallback pair (#80).
+///
+/// `fallback` is **exactly** what this table returned before #80 — the
+/// character `main` has always painted — so a build that never resolves
+/// the glyph half (flag off, or a call site that doesn't go through
+/// [`CoordApp::resolve_toolbar_icons`]) renders byte-identical to
+/// pre-#80 `main`. `glyph` is a Codicon (Nerd Font) codepoint, verified
+/// against nerd-fonts `glyphnames.json`; all are BMP Private-Use-Area
+/// (`U+E000`–`U+F8FF`).
+///
+/// Three groupings are deliberate and preserved in *both* columns:
+/// the `⌨` / `cod-terminal` PTY family (#2863), the `✓` / `cod-check`
+/// sign-off set (#2063), and `pull-into-decomposition-session`'s `⇢` /
+/// `cod-arrow_swap` being pointedly distinct from the PTY family's glyph
+/// in both columns (#2533 — see
+/// `pull_into_decomposition_session_has_a_fresh_icon_not_the_pty_glyph`
+/// in `tests.rs`).
+pub(crate) fn icon_for_action(action_id: &str) -> Option<Icon> {
+    let (glyph, fallback) = match action_id {
         // Row actions (sidebar action bar).
-        "refine" => Some("✎"),
-        "mark-refined" => Some("✓"),
-        "send-to-pipeline" => Some("→"),
-        "drop-to-backlog" => Some("↩"),
-        "drop-to-refining" => Some("↶"),
-        "start-work-interactive" => Some("⌨"),
-        "start-plan-interactive" => Some("⌨"),
-        "start-review-interactive" => Some("⌨"),
-        "start-fix-interactive" => Some("⌨"),
-        "reattach-live-session" => Some("⌨"),
-        "chat-about-issue" => Some("✦"),
-        "audit-outcomes" => Some("🔍"),
-        "dispatch-gate-a-mock" => Some("🎭"),
-        "view-gate-a-mock" => Some("👁"),
+        "refine" => ("\u{ea73}", "✎"), // cod-edit
+        "mark-refined" => ("\u{eab2}", "✓"), // cod-check
+        "send-to-pipeline" => ("\u{ea9c}", "→"), // cod-arrow_right
+        "drop-to-backlog" => ("\u{eae2}", "↩"), // cod-discard
+        "drop-to-refining" => ("\u{ea82}", "↶"), // cod-history
+        "start-work-interactive" => ("\u{ea85}", "⌨"), // cod-terminal
+        "start-plan-interactive" => ("\u{ea85}", "⌨"), // cod-terminal
+        "start-review-interactive" => ("\u{ea85}", "⌨"), // cod-terminal
+        "start-fix-interactive" => ("\u{ea85}", "⌨"), // cod-terminal
+        "reattach-live-session" => ("\u{ea85}", "⌨"), // cod-terminal
+        "chat-about-issue" => ("\u{eac7}", "✦"), // cod-comment_discussion
+        "audit-outcomes" => ("\u{ea6d}", "🔍"), // cod-search
+        "dispatch-gate-a-mock" => ("\u{eb2f}", "🎭"), // cod-preview
+        "view-gate-a-mock" => ("\u{ea70}", "👁"), // cod-eye
         // #2063: the sign-off verdict, beside the 👁 it follows from.
-        "approve-gate-a" => Some("✓"),
-        "request-gate-a-changes" => Some("✎"),
-        "troubleshoot-interactive" => Some("⚕"),
-        "diagnose-fix-stage" => Some("⚕"),
-        "diagnose-stage" => Some("⚕"),
-        "diagnose-reset" => Some("↺"),
-        "start-with-plan" => Some("☰"),
-        "start-skip-plan" => Some("▶"),
-        "watch" => Some("◉"),
-        "stop" => Some("■"),
-        "open-pr" => Some("↗"),
-        "bounce" => Some("↺"),
-        // #2533 (ms-67 contract §4a): a fresh glyph, deliberately NOT `⌨`
-        // (which this table already spends on the `InteractiveLaunchMode`
-        // PTY family above) — this action dispatches a stream-json chat
-        // session, not a PTY, and reusing `⌨` would misleadingly imply
-        // otherwise (contract §1/§4c).
-        "pull-into-decomposition-session" => Some("⇢"),
+        "approve-gate-a" => ("\u{eab2}", "✓"), // cod-check
+        "request-gate-a-changes" => ("\u{eb43}", "✎"), // cod-request_changes
+        "troubleshoot-interactive" => ("\u{ead8}", "⚕"), // cod-debug
+        "diagnose-fix-stage" => ("\u{ead8}", "⚕"), // cod-debug
+        "diagnose-stage" => ("\u{ead8}", "⚕"), // cod-debug
+        "diagnose-reset" => ("\u{ead2}", "↺"), // cod-debug_restart
+        "start-with-plan" => ("\u{eab3}", "☰"), // cod-checklist
+        "start-skip-plan" => ("\u{eb2c}", "▶"), // cod-play
+        "watch" => ("\u{eba7}", "◉"), // cod-record
+        "stop" => ("\u{ead7}", "■"), // cod-debug_stop
+        "open-pr" => ("\u{ea64}", "↗"), // cod-git_pull_request
+        "bounce" => ("\u{eb37}", "↺"), // cod-refresh
+        // #2533 (ms-67 contract §4a): a fresh glyph, deliberately NOT
+        // `cod-terminal` (which this table already spends on the
+        // `InteractiveLaunchMode` PTY family above) — this action
+        // dispatches a stream-json chat session, not a PTY, and reusing
+        // the terminal glyph would misleadingly imply otherwise (contract
+        // §1/§4c). The plain-Unicode fallback keeps the same distinction
+        // (`⇢` is not `⌨`).
+        "pull-into-decomposition-session" => ("\u{ebcb}", "⇢"), // cod-arrow_swap
         // #2863: the ATTENDED (`--interactive`, #2750) counterpart of the
         // item above genuinely *is* the PTY family — a real tmux-attached
         // `claude` on this machine, launched through the embedded terminal
         // exactly like `start-work-interactive` and friends — so it takes
-        // the `⌨` glyph the comment above deliberately withholds from the
+        // the glyph the comment above deliberately withholds from the
         // headless one.
-        "open-attended-intake-session" => Some("⌨"),
+        "open-attended-intake-session" => ("\u{ea85}", "⌨"), // cod-terminal
         // Panel-level verbs (`toolbar:<verb>` keys after the prefix).
-        "notify" => Some("ⓘ"),
-        "retry" => Some("↻"),
-        "purge" => Some("✕"),
-        "ready" => Some("✓"),
-        "merge" => Some("⤵"),
-        _ => None,
-    }
+        "notify" => ("\u{ea74}", "ⓘ"), // cod-info
+        "retry" => ("\u{ea77}", "↻"), // cod-sync
+        "purge" => ("\u{ea81}", "✕"), // cod-trash
+        "ready" => ("\u{eab2}", "✓"), // cod-check
+        "merge" => ("\u{eafe}", "⤵"), // cod-git_merge
+        _ => return None,
+    };
+    Some(Icon::new(glyph, fallback))
 }

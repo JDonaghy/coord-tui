@@ -7829,6 +7829,10 @@ impl CoordApp {
             buttons: vec![ToolbarButton::Action {
                 id: WidgetId::new("pipeline-action:dispatch"),
                 label: label.clone(),
+                // #80: no icon today (`None`, not a fallback character), so
+                // there is nothing for the flag-off-must-match-`main`
+                // invariant to preserve here — adding one now would itself
+                // be the visible change #80 promises not to make.
                 icon: None,
                 key_hint: Some("⏎".to_string()),
                 enabled: true,

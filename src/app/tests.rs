@@ -62304,3 +62304,261 @@ Milestone tracking issue.
         });
         app
     }
+
+    // ── #81: activity-bar Codicon icon set ───────────────────────────────────
+
+    /// The activity bar's icon column, top-to-bottom.
+    ///
+    /// quadraui's TUI rasteriser paints exactly **one** character per row at
+    /// `x == 1` (`tui/activity_bar.rs`: `content_start = area.x + 1`, and the
+    /// 3-cell-wide bar leaves `content_w == 1`, so the `set_cell` branch
+    /// runs). The bar spans every row except the bottom status-bar row, so
+    /// dropping the last line and then the blanks yields the twelve top
+    /// panels in order followed by the bottom-pinned Settings row.
+    fn activity_icon_column<A: quadraui::AppLogic>(
+        driver: &quadraui::tui::testing::TuiDriver<A>,
+    ) -> Vec<char> {
+        let screen = driver.screen();
+        let rows: Vec<&str> = screen.lines().collect();
+        let bar_rows = &rows[..rows.len().saturating_sub(1)];
+        bar_rows
+            .iter()
+            .filter_map(|line| line.chars().nth(1))
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    /// #81 half 1 — with `nerd_font_icons` off (the default), the bar is
+    /// byte-identical to what it painted before #81 landed. This is the
+    /// safety property the sealed suites (`tests/acceptance/ms-65`'s
+    /// `BOARD_ICON: char = 'B'` / `PIPELINE_ICON: char = '▶'`, ms-33 §1's
+    /// `§` for Audit) depend on, restated here as a first-class assertion so
+    /// a regression fails in the *un*sealed suite too.
+    #[test]
+    fn activity_bar_paints_ascii_fallbacks_when_nerd_fonts_are_off() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = make_test_app(BoardData::default());
+        assert!(
+            !app.settings.nerd_font_icons,
+            "Nerd Font icons must be opt-in — `TuiSettings::default()` decides \
+             what every sealed fixture renders",
+        );
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        assert_eq!(
+            activity_icon_column(&driver),
+            vec!['B', 'M', '▶', '>', '▦', '≣', '◆', '◉', '§', '▤', '⇅', '✓', '⚙'],
+            "flag off: the icon column must read exactly as it did before \
+             #81 — twelve panels then the bottom-pinned gear:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #81 half 2 — with `nerd_font_icons` on, all thirteen Codicons paint
+    /// instead, at the same rows.
+    #[test]
+    fn activity_bar_paints_codicons_when_nerd_fonts_are_on() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_test_app(BoardData::default());
+        app.settings.nerd_font_icons = true;
+        let config = app.shell_config_current();
+        let driver = driver_with_shell(app, config, 120, 40);
+
+        assert_eq!(
+            activity_icon_column(&driver),
+            vec![
+                '\u{eb30}', // cod-project     Board
+                '\u{ea7a}', // cod-vm          Machines
+                '\u{eb2c}', // cod-play        Pipeline
+                '\u{ea85}', // cod-terminal    Terminal
+                '\u{ebeb}', // cod-layout      Kanban
+                '\u{eafe}', // cod-git_merge   Merge Queue
+                '\u{eb20}', // cod-milestone   Plans
+                '\u{eb31}', // cod-pulse       Sessions
+                '\u{eb12}', // cod-law         Audit
+                '\u{ebe2}', // cod-graph_line  Reports
+                '\u{eb16}', // cod-list_ordered Queue
+                '\u{eba4}', // cod-pass        Approved work items
+                '\u{eaf8}', // cod-gear        Settings (bottom-pinned)
+            ],
+            "flag on: every row must paint its Codicon:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #81 regression guard for the *truncated* icon, not merely the plain
+    /// one: `panel:terminal` used to be the two-char `">_"`, and quadraui's
+    /// TUI bar paints `icon.chars().next()` — so the `_` was dropped and the
+    /// operator saw a bare `>`. Assert the **whole** `cod-terminal` glyph is
+    /// on screen, not a first character of it.
+    #[test]
+    fn terminal_activity_icon_is_a_whole_glyph_not_a_truncated_one() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let terminal = ACTIVITY_PANELS
+            .iter()
+            .find(|s| s.id == "panel:terminal")
+            .expect("panel:terminal must be registered");
+        assert_eq!(
+            terminal.glyph.chars().count(),
+            1,
+            "cod-terminal must be a single char so the one-cell TUI bar can \
+             paint it whole; a wider icon is exactly the `>_` bug again",
+        );
+        assert_eq!(
+            terminal.fallback, ">",
+            "the fallback must be byte-identical to what the bar actually \
+             painted before #81 — the surviving half of `>_`",
+        );
+
+        let mut app = make_test_app(BoardData::default());
+        app.settings.nerd_font_icons = true;
+        let config = app.shell_config_current();
+        let driver = driver_with_shell(app, config, 120, 40);
+
+        assert!(
+            driver.screen_contains(terminal.glyph),
+            "the whole cod-terminal glyph must be painted:\n{}",
+            driver.screen(),
+        );
+        assert_eq!(
+            activity_icon_column(&driver).get(3).copied(),
+            terminal.glyph.chars().next(),
+            "cod-terminal must sit on the Terminal row (4th from the top), \
+             where `>` used to:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #81: every codepoint in the set is distinct, on both halves — two
+    /// panels sharing a glyph is how an activity bar stops being scannable
+    /// (the reasoning #1866 already recorded for `⇅` vs `≣`).
+    #[test]
+    fn activity_bar_icon_set_has_no_duplicate_glyphs_or_fallbacks() {
+        let specs: Vec<_> = ACTIVITY_PANELS
+            .iter()
+            .chain(std::iter::once(&SETTINGS_PANEL))
+            .collect();
+
+        let glyphs: std::collections::BTreeSet<&str> =
+            specs.iter().map(|s| s.glyph).collect();
+        assert_eq!(
+            glyphs.len(),
+            specs.len(),
+            "duplicate Codicon glyph in the activity-bar set",
+        );
+
+        let fallbacks: std::collections::BTreeSet<&str> =
+            specs.iter().map(|s| s.fallback).collect();
+        assert_eq!(
+            fallbacks.len(),
+            specs.len(),
+            "duplicate fallback character in the activity-bar set",
+        );
+
+        for spec in &specs {
+            assert_eq!(
+                spec.glyph.chars().count(),
+                1,
+                "{}: the TUI bar paints one cell, so a Nerd Font glyph that \
+                 is not exactly one char would be truncated (the `>_` bug)",
+                spec.id,
+            );
+            let cp = spec.glyph.chars().next().unwrap() as u32;
+            assert!(
+                (0xE000..=0xF8FF).contains(&cp),
+                "{}: U+{cp:04X} is outside the BMP Private Use Area — the \
+                 best-supported Nerd Font range",
+                spec.id,
+            );
+        }
+    }
+
+    /// #81: flipping the setting moves the live bar without a restart.
+    ///
+    /// quadraui#683's `AppShell::with_panel_icon` is a **consuming** builder
+    /// and a `ShellContext` only lends `&mut AppShell`, so the icon column of
+    /// an already-built shell can only be moved by re-registering its rows —
+    /// which is what `CoordApp::sync_activity_bar_icons` does after every
+    /// `handle` dispatch. This drives exactly that path by handing the shell
+    /// the *fallback* config while the app's settings say Codicons — the
+    /// mismatch a live toggle creates — and asserting one ordinary event is
+    /// enough to reconcile the painted bar.
+    ///
+    /// Deliberately does **not** go through the Settings form: a real
+    /// `FormEvent::ToggleChanged` runs `TuiSettings::save()`, which
+    /// overwrites the developer's own `~/.coord/settings.toml`.
+    #[test]
+    fn nerd_font_setting_repaints_the_live_activity_bar_without_a_restart() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_test_app(BoardData::default());
+        app.settings.nerd_font_icons = true;
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        assert_eq!(
+            activity_icon_column(&driver).first().copied(),
+            Some('B'),
+            "sanity: the shell was built from the fallback config, so the \
+             first frame must still paint `B`:\n{}",
+            driver.screen(),
+        );
+
+        // Any event that reaches `CoordApp::handle`. A hover would not do:
+        // `AppShell::handle` consumes `MouseMoved` for its own hover
+        // tracking and `ShellAdapter` returns before `app.handle`. A click
+        // on the empty main-content pane falls through as `Ignored`.
+        driver.click(60.0, 20.0);
+        // The click is inert, so it returns `Reaction::Ignored` and the
+        // driver does not repaint on its own — force the frame the real app
+        // would get from the toggle's own `Reaction::Redraw`.
+        driver.render();
+
+        assert_eq!(
+            activity_icon_column(&driver),
+            vec![
+                '\u{eb30}', '\u{ea7a}', '\u{eb2c}', '\u{ea85}', '\u{ebeb}', '\u{eafe}',
+                '\u{eb20}', '\u{eb31}', '\u{eb12}', '\u{ebe2}', '\u{eb16}', '\u{eba4}',
+                '\u{eaf8}',
+            ],
+            "the whole bar — twelve panels plus the bottom-pinned Settings \
+             row — must repaint in Codicons on the next frame:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// #81: the Settings panel offers the toggle, wired to the right field.
+    ///
+    /// Kept separate from the repaint test above because
+    /// `apply_settings_event` persists — asserting on the *form* rather than
+    /// dispatching a real toggle keeps this hermetic.
+    #[test]
+    fn settings_form_offers_the_nerd_font_icons_toggle() {
+        let mut app = make_app_default();
+        let field = app
+            .build_settings_form()
+            .fields
+            .into_iter()
+            .find(|f| f.id.as_str() == "settings:nerd-fonts")
+            .expect("#81: the Settings form must offer a Nerd Font icons row");
+        let label: String = field.label.spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(label, "Nerd Font icons");
+        assert!(
+            matches!(field.kind, FieldKind::Toggle { value: false }),
+            "the row must be a Toggle reflecting the (off-by-default) setting",
+        );
+
+        app.settings.nerd_font_icons = true;
+        let field = app
+            .build_settings_form()
+            .fields
+            .into_iter()
+            .find(|f| f.id.as_str() == "settings:nerd-fonts")
+            .expect("row must still be present once enabled");
+        assert!(
+            matches!(field.kind, FieldKind::Toggle { value: true }),
+            "the Toggle must mirror `settings.nerd_font_icons`",
+        );
+    }

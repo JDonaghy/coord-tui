@@ -62,6 +62,17 @@ impl ShellApp for CoordApp {
         // theme switches are visible within one redraw cycle.
         backend.set_theme(self.active_theme.clone());
 
+        // #81: push the Nerd Font preference every frame, for the same
+        // reason as the theme above — and specifically NOT once from
+        // `setup()`. quadraui's `Backend::set_nerd_fonts` doc
+        // (`src/backend.rs:363-374`) records vimcode#547, where a
+        // setup-only call left the flag stuck at whatever it was on the
+        // first frame, so a later toggle never reached the rasteriser.
+        // This drives every icon-bearing quadraui widget that carries a
+        // distinct `Icon { glyph, fallback }` pair — e.g. the Reports
+        // panel's CSV-export header action (`reports.rs`).
+        backend.set_nerd_fonts(self.settings.nerd_font_icons);
+
         let lh = backend.line_height();
 
         // ── Status bar ────────────────────────────────────────────────
@@ -763,6 +774,10 @@ impl ShellApp for CoordApp {
         ctx: &ShellContext,
     ) -> Reaction {
         let reaction = self.dispatch_handle(event, backend, ctx);
+        // #81: reconcile the activity bar with `nerd_font_icons` *after*
+        // dispatch, so flipping the Settings toggle repaints the bar on the
+        // very next frame instead of waiting for a restart.
+        self.sync_activity_bar_icons(ctx);
         // #2286 (ms-65 §6): unconditionally flush doc tabs on the way out —
         // exactly once, regardless of which of the several `Reaction::Exit`
         // call sites in `events.rs` (plain `q`/Esc, the force-quit confirm
@@ -1818,6 +1833,79 @@ fn push_markdown_prose_rows(rows: &mut Vec<ListItem>, text: &str, wrap_width: us
 // ─── Pipeline display methods ─────────────────────────────────────────────────
 
 impl CoordApp {
+    /// #81: reconcile the live `AppShell`'s activity-bar rows with the
+    /// current `nerd_font_icons` setting.
+    ///
+    /// quadraui#683's `AppShell::with_panel_icon` is a **consuming** builder
+    /// (`fn with_panel_icon(mut self, ..) -> Self`) and `ShellContext` only
+    /// lends `&mut AppShell`, so it is unreachable once the shell exists —
+    /// and `AppShell` exposes no mutable accessor for an already-registered
+    /// `PanelDefinition`. Re-registering the rows is therefore the only way
+    /// to move the icon column at runtime. See [`PanelIconSpec`] for the
+    /// full seam analysis.
+    ///
+    /// Idempotent, and cheap in the overwhelmingly common case: it compares
+    /// the registered icon strings and returns without mutating anything
+    /// unless the setting actually moved, so calling it once per `handle`
+    /// dispatch costs thirteen `str` comparisons. State that
+    /// `remove_panel`/`add_panel` perturb — the active panel, sidebar
+    /// visibility, and the activity bar's keyboard cursor/focus — is saved
+    /// and restored around the rebuild.
+    fn sync_activity_bar_icons(&self, ctx: &ShellContext) {
+        let nerd = self.settings.nerd_font_icons;
+        let mut shell = ctx.shell_mut();
+
+        let in_sync = shell.panels().len() == ACTIVITY_PANELS.len()
+            && shell
+                .panels()
+                .iter()
+                .zip(ACTIVITY_PANELS)
+                .all(|(def, spec)| def.icon == spec.icon(nerd))
+            && shell
+                .bottom_items()
+                .iter()
+                .all(|def| def.icon == SETTINGS_PANEL.icon(nerd));
+        if in_sync {
+            return;
+        }
+
+        let active = shell.active_panel_id().cloned();
+        let sidebar_visible = shell.sidebar_visible();
+        let keyboard_focused = shell.activity_keyboard_focused();
+        let selected = shell.activity_selected_id().cloned();
+
+        let top_ids: Vec<WidgetId> = shell.panels().iter().map(|p| p.id.clone()).collect();
+        for id in &top_ids {
+            shell.remove_panel(id);
+        }
+        let bottom_ids: Vec<WidgetId> = shell.bottom_items().iter().map(|p| p.id.clone()).collect();
+        for id in &bottom_ids {
+            shell.remove_bottom_item(id);
+        }
+        for spec in ACTIVITY_PANELS {
+            shell.add_panel(spec.definition(nerd));
+        }
+        shell.add_bottom_item(SETTINGS_PANEL.definition(nerd));
+
+        // `add_panel` makes the first registration active, and `show_panel`
+        // force-shows the sidebar — restore both to what the user had.
+        if let Some(id) = active {
+            shell.show_panel(&id);
+        }
+        if !sidebar_visible {
+            shell.hide_sidebar();
+        }
+        if let Some(sel) = selected {
+            let idx = ACTIVITY_PANELS
+                .iter()
+                .position(|s| s.id == sel.as_str())
+                .or_else(|| (sel.as_str() == SETTINGS_PANEL.id).then_some(ACTIVITY_PANELS.len()));
+            if let Some(idx) = idx {
+                shell.activity_set_cursor(idx);
+            }
+        }
+        shell.set_activity_keyboard_focused(keyboard_focused);
+    }
 
     /// #790: one-line copy-mode hint strip painted at the bottom of the
     /// terminal pane.  Advertises the F9 keyboard toggle — Shift+drag is

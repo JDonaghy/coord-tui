@@ -33,7 +33,13 @@ fn main() {
     // Err branch; we never resume normal execution with a potentially
     // inconsistent CoordApp.
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        quadraui::tui::shell_runner::run_with_shell(CoordApp::new(), CoordApp::shell_config());
+        // #81: the shell config has to be derived from *this* app's loaded
+        // settings, not from `TuiSettings::default()` — `run_with_shell`
+        // builds the `AppShell` (and therefore bakes in each activity-bar
+        // row's icon) before the first frame paints.
+        let app = CoordApp::new();
+        let shell_config = app.shell_config_current();
+        quadraui::tui::shell_runner::run_with_shell(app, shell_config);
     }));
 
     if run_result.is_err() {

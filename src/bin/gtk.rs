@@ -29,5 +29,10 @@ fn main() {
     coord_tui::boot::harden_subprocess_env();
     coord_tui::boot::install_panic_logger();
 
-    quadraui::gtk::shell_runner::run_with_shell(CoordApp::new(), CoordApp::shell_config());
+    // #81: see `src/main.rs` — the activity-bar icon set is baked into the
+    // `AppShell` at construction, so it has to come from the app's own
+    // loaded settings rather than `TuiSettings::default()`.
+    let app = CoordApp::new();
+    let shell_config = app.shell_config_current();
+    quadraui::gtk::shell_runner::run_with_shell(app, shell_config);
 }

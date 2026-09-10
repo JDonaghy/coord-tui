@@ -230,6 +230,221 @@ const NOTIFY_EVERY: Duration = Duration::from_secs(30);
 /// How long a toast stays visible before auto-dismissing.
 const TOAST_TTL: Duration = Duration::from_secs(4);
 
+// ─── Activity-bar icon set (#81) ──────────────────────────────────────────────
+
+/// One activity-bar row's identity, carrying **both** halves of its icon.
+///
+/// `glyph` is the Codicon (Nerd Font) codepoint; `fallback` is the plain
+/// ASCII/basic-Unicode character the bar has always painted. Which one ends
+/// up in the built [`PanelDefinition`] is decided by
+/// [`CoordApp::shell_config_for`] from `TuiSettings::nerd_font_icons`.
+///
+/// ### Why the pair rides in this table and not in quadraui's `Icon`
+///
+/// quadraui#683 added `AppShell::with_panel_icon(id, Icon)`, which is the
+/// natural home for a glyph/fallback pair — but it is a **consuming builder
+/// on `AppShell`**, and `coord-tui` never constructs an `AppShell`: it hands
+/// a [`ShellConfig`] to `run_with_shell`/`driver_with_shell`, and
+/// `quadraui::shell_adapter::build_shell_adapter` builds the shell out of
+/// sight. `ShellConfig` has no `with_panel_icon` passthrough at the pinned
+/// rev (`9b7f4de`), and `ShellContext::shell_mut()` only lends `&mut AppShell`,
+/// which a `self`-consuming builder cannot be called on. So the selection
+/// happens on our side of the seam instead: whichever half is live goes into
+/// `PanelDefinition::icon`, which `AppShell::resolved_icon` widens to
+/// `Icon { glyph: s, fallback: s }` — identical under either setting of the
+/// backend's `nerd_fonts_enabled` flag, so the painted column is exactly the
+/// half we chose on every backend. If a later quadraui rev grows a
+/// `ShellConfig`-level icon seam, this table is already the pair it wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PanelIconSpec {
+    /// `WidgetId` string, e.g. `"panel:board"`.
+    pub id: &'static str,
+    /// Codicon glyph (BMP Private Use Area, always exactly one `char` so it
+    /// measures one terminal cell).
+    pub glyph: &'static str,
+    /// The ASCII/basic-Unicode character the bar painted before #81 — and
+    /// still paints whenever `nerd_font_icons` is off.
+    pub fallback: &'static str,
+    pub tooltip: &'static str,
+    pub title: &'static str,
+}
+
+impl PanelIconSpec {
+    /// The icon string this row paints under the given setting.
+    pub(crate) fn icon(&self, nerd_fonts: bool) -> &'static str {
+        if nerd_fonts {
+            self.glyph
+        } else {
+            self.fallback
+        }
+    }
+
+    /// Build the quadraui panel registration for this row.
+    pub(crate) fn definition(&self, nerd_fonts: bool) -> PanelDefinition {
+        PanelDefinition {
+            id: WidgetId::new(self.id),
+            icon: self.icon(nerd_fonts).into(),
+            tooltip: self.tooltip.into(),
+            title: self.title.into(),
+        }
+    }
+}
+
+/// The twelve top activity-bar panels, in bar order (#81).
+///
+/// Every glyph is a Codicon verified against nerd-fonts `glyphnames.json`,
+/// chosen because this shell *is* a VS Code-style activity bar + sidebar and
+/// the family stays coherent as panels are added. All are BMP PUA
+/// (`U+E000`–`U+F8FF`), the best-supported Nerd range, and all thirteen
+/// codepoints (these plus `SETTINGS_PANEL` below) are distinct.
+///
+/// The `fallback` column is **exactly** what the bar painted before #81, so
+/// with `nerd_font_icons` off the rendered bar is byte-identical to what the
+/// sealed suites pin (`tests/acceptance/ms-65`'s `BOARD_ICON: char = 'B'` /
+/// `PIPELINE_ICON: char = '▶'`, ms-33 §1's `§` for Audit). Preserve that.
+pub(crate) const ACTIVITY_PANELS: &[PanelIconSpec] = &[
+    PanelIconSpec {
+        id: "panel:board",
+        // cod-project — the board *is* the project roster.
+        glyph: "\u{eb30}",
+        fallback: "B",
+        tooltip: "Board",
+        title: "BOARD",
+    },
+    PanelIconSpec {
+        id: "panel:machines",
+        // cod-vm, deliberately over cod-server (U+EB50): the fleet is dev
+        // boxes, not servers.
+        glyph: "\u{ea7a}",
+        fallback: "M",
+        tooltip: "Machines",
+        title: "MACHINES",
+    },
+    PanelIconSpec {
+        id: "panel:pipeline",
+        // cod-play — ▶ already marks a horizontal play / run pipeline.
+        glyph: "\u{eb2c}",
+        fallback: "▶",
+        tooltip: "Pipeline",
+        title: "PIPELINE",
+    },
+    // #424: embedded terminal pane (PTY-backed shell via
+    // quadraui::terminal_engine::TerminalSession).
+    PanelIconSpec {
+        id: "panel:terminal",
+        // cod-terminal. #81: the pre-existing icon was the two-char `">_"`,
+        // and quadraui's TUI activity bar paints one cell
+        // (`icon.chars().next()`) — so the `_` was silently dropped and the
+        // bar rendered a bare `>`. That truncation is why the fallback here
+        // is `">"` and not `">_"`: `>` is byte-identical to what actually
+        // painted, and a single-cell `cod-terminal` is a whole glyph rather
+        // than the first character of one.
+        glyph: "\u{ea85}",
+        fallback: ">",
+        tooltip: "Terminal",
+        title: "TERMINAL",
+    },
+    // §1 (#782): Kanban view — three-column board display.
+    PanelIconSpec {
+        id: "panel:kanban",
+        // cod-layout — the column layout that is the point of the view.
+        glyph: "\u{ebeb}",
+        fallback: "▦",
+        tooltip: "Kanban",
+        title: "KANBAN",
+    },
+    // §1 (#782): Merge Queue panel — global PR merge pipeline.
+    PanelIconSpec {
+        id: "panel:mergequeue",
+        // cod-git_merge.
+        glyph: "\u{eafe}",
+        fallback: "≣",
+        tooltip: "Merge Queue",
+        title: "MERGE QUEUE",
+    },
+    // #975: Plans panel — elevates/subsumes the older #771 "Milestones" DAG
+    // view. One row per milestone/epic with ready / blocked / in-flight /
+    // done counts, sourced from the server-computed `plan_roster` on
+    // `/board`. The old `panel:milestones` id is still recognised in
+    // `on_shell_event` for backward-compat with users who had it pinned, but
+    // the button surfaces as "Plans" now.
+    PanelIconSpec {
+        id: "panel:plans",
+        // cod-milestone.
+        glyph: "\u{eb20}",
+        fallback: "◆",
+        tooltip: "Plans",
+        title: "PLANS",
+    },
+    // #1032: Sessions panel — fleet-wide machine → repo → session tree of
+    // live claude work sessions. `◉` matches the icon used by the
+    // pre-existing #628 fleet-wide live-sessions overlay.
+    PanelIconSpec {
+        id: "panel:sessions",
+        // cod-pulse — live sessions.
+        glyph: "\u{eb31}",
+        fallback: "◉",
+        tooltip: "Sessions",
+        title: "SESSIONS",
+    },
+    // #1039: Audit panel — newest-first list of the audit trail (`/audit`,
+    // #1037) with an inline entry-detail view. `§` (section-mark) is the
+    // contract-pinned fallback (tests/acceptance/ms-33/contract.md §1).
+    PanelIconSpec {
+        id: "panel:audit",
+        // cod-law.
+        glyph: "\u{eb12}",
+        fallback: "§",
+        tooltip: "Audit",
+        title: "AUDIT",
+    },
+    // #1741: Reports panel — one collapsible section per entry in the
+    // `GET /report` catalogue (#1742).
+    PanelIconSpec {
+        id: "panel:reports",
+        // cod-graph_line.
+        glyph: "\u{ebe2}",
+        fallback: "▤",
+        tooltip: "Reports",
+        title: "REPORTS",
+    },
+    // #1866 (Q-1): Queue panel — the live drive-queue grid. `⇅` (up-down
+    // arrow) is the reorder affordance that is the point of this panel.
+    // Deliberately NOT `≣`, which is already Merge Queue — two queues with
+    // one glyph is how an activity bar stops being scannable; the Codicon
+    // pair keeps the same separation (cod-list_ordered vs cod-git_merge).
+    PanelIconSpec {
+        id: "panel:queue",
+        // cod-list_ordered.
+        glyph: "\u{eb16}",
+        fallback: "⇅",
+        tooltip: "Queue",
+        title: "QUEUE",
+    },
+    // #2532 (ms-67 contract §3a): Approved work items panel — portal
+    // submissions ready for decomposition. Appended after Queue and before
+    // the bottom-pinned Settings, per contract §3a.
+    PanelIconSpec {
+        id: "panel:approved",
+        // cod-pass.
+        glyph: "\u{eba4}",
+        fallback: "✓",
+        tooltip: "Approved work items",
+        title: "APPROVED WORK ITEMS",
+    },
+];
+
+/// §2 (#782): Settings is pinned to the *bottom* of the activity bar via
+/// `with_bottom_items` so it is visually separated from the primary views.
+pub(crate) const SETTINGS_PANEL: PanelIconSpec = PanelIconSpec {
+    id: "panel:settings",
+    // cod-gear.
+    glyph: "\u{eaf8}",
+    fallback: "⚙",
+    tooltip: "Settings",
+    title: "SETTINGS",
+};
+
 // ─── Shared sidebar filter ────────────────────────────────────────────────────
 
 /// State + logic for a sidebar "FILTER" search box.
@@ -4552,141 +4767,46 @@ impl CoordApp {
         app
     }
 
-    /// Build the [`ShellConfig`] for the AppShell chrome.
+    /// Build the [`ShellConfig`] for the AppShell chrome, with the activity
+    /// bar painting each panel's **fallback** icon.
     ///
-    /// Three activity-bar panels correspond to the three top-level views.
+    /// This is the `TuiSettings::default()` shape — `nerd_font_icons: false`
+    /// — so every existing caller (the sealed acceptance entrypoint, the
+    /// in-crate `TuiDriver` fixtures, `cross_backend`) keeps seeing exactly
+    /// the bar it saw before #81. Live startup goes through
+    /// [`Self::shell_config_for`] with the user's loaded settings instead.
+    ///
     /// The status bar is enabled so `render_content()` can draw into
     /// `layout.status_bar_bounds`.
     pub fn shell_config() -> ShellConfig {
-        // §2 (#782): Settings is pinned to the bottom of the activity bar via
-        // `with_bottom_items` so it is visually separated from the primary views.
-        let settings_panel = PanelDefinition {
-            id: WidgetId::new("panel:settings"),
-            // ⚙ gear icon for settings.
-            icon: "⚙".into(),
-            tooltip: "Settings".into(),
-            title: "SETTINGS".into(),
-        };
+        Self::shell_config_for(&TuiSettings::default())
+    }
+
+    /// The [`ShellConfig`] matching *this* app's own loaded settings (#81).
+    ///
+    /// What the live binaries use — `CoordApp::new()` reads
+    /// `~/.coord/settings.toml`, and the activity bar has to agree with the
+    /// `nerd_font_icons` value it found from frame 0 (`run_with_shell` takes
+    /// the config by value and builds the `AppShell` before the first paint).
+    pub fn shell_config_current(&self) -> ShellConfig {
+        Self::shell_config_for(&self.settings)
+    }
+
+    /// Build the [`ShellConfig`] for the AppShell chrome, choosing each
+    /// activity-bar icon's Codicon glyph or its ASCII/Unicode fallback from
+    /// `settings.nerd_font_icons` (#81).
+    ///
+    /// See [`PanelIconSpec`] for why the glyph/fallback selection happens
+    /// here rather than through quadraui's `AppShell::with_panel_icon`.
+    pub fn shell_config_for(settings: &TuiSettings) -> ShellConfig {
+        let nerd = settings.nerd_font_icons;
         let mut config = ShellConfig::new(
             "coord-tui",
-            vec![
-                PanelDefinition {
-                    id: WidgetId::new("panel:board"),
-                    icon: "B".into(),
-                    tooltip: "Board".into(),
-                    title: "BOARD".into(),
-                },
-                PanelDefinition {
-                    id: WidgetId::new("panel:machines"),
-                    icon: "M".into(),
-                    tooltip: "Machines".into(),
-                    title: "MACHINES".into(),
-                },
-                PanelDefinition {
-                    id: WidgetId::new("panel:pipeline"),
-                    // ▶ marks a horizontal play / run pipeline.
-                    icon: "▶".into(),
-                    tooltip: "Pipeline".into(),
-                    title: "PIPELINE".into(),
-                },
-                // #424: embedded terminal pane (PTY-backed shell via
-                // quadraui::terminal_engine::TerminalSession).
-                PanelDefinition {
-                    id: WidgetId::new("panel:terminal"),
-                    // >_ for a shell prompt glyph.
-                    icon: ">_".into(),
-                    tooltip: "Terminal".into(),
-                    title: "TERMINAL".into(),
-                },
-                // §1 (#782): Kanban view — three-column board display.
-                PanelDefinition {
-                    id: WidgetId::new("panel:kanban"),
-                    // ▦ box-grid icon for a kanban board.
-                    icon: "▦".into(),
-                    tooltip: "Kanban".into(),
-                    title: "KANBAN".into(),
-                },
-                // §1 (#782): Merge Queue panel — global PR merge pipeline.
-                PanelDefinition {
-                    id: WidgetId::new("panel:mergequeue"),
-                    // ≣ horizontal-lines icon for a queue.
-                    icon: "≣".into(),
-                    tooltip: "Merge Queue".into(),
-                    title: "MERGE QUEUE".into(),
-                },
-                // #975: Plans panel — elevates/subsumes the older #771
-                // "Milestones" DAG view.  One row per milestone/epic with
-                // ready / blocked / in-flight / done counts, sourced from
-                // the server-computed `plan_roster` on `/board`.  The old
-                // `panel:milestones` id is still recognised in
-                // `on_shell_event` for backward-compat with users who had
-                // it pinned, but the button surfaces as "Plans" now.
-                PanelDefinition {
-                    id: WidgetId::new("panel:plans"),
-                    // ◆ diamond — conventional plan/milestone marker.
-                    icon: "◆".into(),
-                    tooltip: "Plans".into(),
-                    title: "PLANS".into(),
-                },
-                // #1032: Sessions panel — fleet-wide machine → repo → session
-                // tree of live claude work sessions. ◉ matches the icon used
-                // by the pre-existing #628 fleet-wide live-sessions overlay.
-                PanelDefinition {
-                    id: WidgetId::new("panel:sessions"),
-                    icon: "◉".into(),
-                    tooltip: "Sessions".into(),
-                    title: "SESSIONS".into(),
-                },
-                // #1039: Audit panel — newest-first list of the audit trail
-                // (`/audit`, #1037) with an inline entry-detail view. `§`
-                // (section-mark) is the contract-pinned icon
-                // (tests/acceptance/ms-33/contract.md §1).
-                PanelDefinition {
-                    id: WidgetId::new("panel:audit"),
-                    icon: "§".into(),
-                    tooltip: "Audit".into(),
-                    title: "AUDIT".into(),
-                },
-                // #1741: Reports panel — one collapsible section per entry in
-                // the `GET /report` catalogue (#1742). `▤` collides with none
-                // of the icons above (B M ▶ >_ ▦ ≣ ◆ ◉ § $) or the pinned ⚙.
-                PanelDefinition {
-                    id: WidgetId::new("panel:reports"),
-                    icon: "▤".into(),
-                    tooltip: "Reports".into(),
-                    title: "REPORTS".into(),
-                },
-                // #1866 (Q-1): Queue panel — the live drive-queue grid.
-                // `⇅` (up-down arrow) is the reorder affordance that is the
-                // point of this panel, and collides with none of the icons
-                // above (B M ▶ >_ ▦ ≣ ◆ ◉ § ▤) or the pinned ⚙. Deliberately
-                // NOT `≣`, which is already Merge Queue — two queues with
-                // one glyph is how an activity bar stops being scannable.
-                PanelDefinition {
-                    id: WidgetId::new("panel:queue"),
-                    icon: "⇅".into(),
-                    tooltip: "Queue".into(),
-                    title: "QUEUE".into(),
-                },
-                // #2532 (ms-67 contract §3a): Approved work items panel —
-                // portal submissions ready for decomposition. `✓` collides
-                // with none of the icons above (B M ▶ >_ ▦ ≣ ◆ ◉ § ▤ ⇅) or
-                // the pinned ⚙; it echoes the same glyph `icon_for_action`
-                // already uses for `mark-refined`/`approve-gate-a`/`ready`
-                // (a different namespace — panel icon vs. row-action icon —
-                // so not a re-collision). Appended after Queue and before
-                // the bottom-pinned Settings, per contract §3a.
-                PanelDefinition {
-                    id: WidgetId::new("panel:approved"),
-                    icon: "✓".into(),
-                    tooltip: "Approved work items".into(),
-                    title: "APPROVED WORK ITEMS".into(),
-                },
-            ],
+            ACTIVITY_PANELS.iter().map(|s| s.definition(nerd)).collect(),
         )
         .with_status_bar()
         // §2 (#782): Settings pinned to the bottom of the activity bar.
-        .with_bottom_items(vec![settings_panel]);
+        .with_bottom_items(vec![SETTINGS_PANEL.definition(nerd)]);
         config.default_sidebar_width = 35.0;
         config.min_sidebar_width = 20.0;
         config.max_sidebar_width = 55.0;

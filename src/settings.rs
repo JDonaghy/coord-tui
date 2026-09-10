@@ -546,6 +546,20 @@ pub struct TuiSettings {
     /// How long a fetched log is cached before re-requesting from the agent.
     pub log_cache_ttl: LogCacheTtl,
 
+    /// Paint the activity bar (and every other icon-bearing quadraui
+    /// widget) with its Nerd Font glyph rather than its ASCII/Unicode
+    /// fallback (#81).
+    ///
+    /// Defaults to `false`: a terminal without a patched Nerd Font renders
+    /// every Private-Use-Area codepoint as a tofu box, so opting in has to
+    /// be the user's explicit choice. With this off, the bar is byte-for-byte
+    /// what it painted before #81 landed — that is the whole safety property
+    /// of the feature, and the sealed acceptance suites
+    /// (`tests/acceptance/ms-65`, `ms-33`) pin it by building their fixtures
+    /// from `TuiSettings::default()`.
+    #[serde(default)]
+    pub nerd_font_icons: bool,
+
     /// Session-level model overrides keyed by machine name.
     /// These do not modify `coordinator.yml`; they are passed to workers at
     /// dispatch time when the user explicitly overrides the default.
@@ -567,6 +581,7 @@ impl Default for TuiSettings {
             refresh_cadence: RefreshCadence::default(),
             audio_on_completion: false,
             log_cache_ttl: LogCacheTtl::default(),
+            nerd_font_icons: false,
             machine_model: HashMap::new(),
             keybindings: default_keybindings(),
         }
@@ -762,6 +777,11 @@ mod tests {
         assert_eq!(s.refresh_cadence, RefreshCadence::default());
         assert!(!s.audio_on_completion);
         assert_eq!(s.log_cache_ttl, LogCacheTtl::default());
+        assert!(
+            !s.nerd_font_icons,
+            "#81: Nerd Font icons must stay opt-in — a terminal with no \
+             patched font renders every PUA codepoint as tofu",
+        );
         assert!(s.machine_model.is_empty());
     }
 
@@ -791,6 +811,7 @@ mod tests {
             refresh_cadence: RefreshCadence::ThirtySec,
             audio_on_completion: true,
             log_cache_ttl: LogCacheTtl::FiveSec,
+            nerd_font_icons: true,
             machine_model,
             keybindings: default_keybindings(),
         };
@@ -803,6 +824,10 @@ mod tests {
         assert_eq!(loaded.refresh_cadence, RefreshCadence::ThirtySec);
         assert!(loaded.audio_on_completion);
         assert_eq!(loaded.log_cache_ttl, LogCacheTtl::FiveSec);
+        assert!(
+            loaded.nerd_font_icons,
+            "#81: nerd_font_icons should survive the TOML round-trip",
+        );
         assert_eq!(loaded.machine_model.get("mybox"), Some(&ModelPref::Opus));
         assert_eq!(loaded.machine_model.get("laptop"), Some(&ModelPref::Haiku));
         assert_eq!(

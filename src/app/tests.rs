@@ -17871,6 +17871,139 @@
         );
     }
 
+    // ── #90: transient board-load failures are never silent ───────────────────
+
+    /// Acceptance (`TuiDriver`): with no reachable board service — a
+    /// connect/timeout/non-2xx/parse failure from `load_data_remote`, as
+    /// opposed to #2895's "not configured at all" case above — the TUI must
+    /// render a NAMED error on cold start, not an empty machines list that
+    /// looks like a successful (if boring) empty board. Before #90 every one
+    /// of these failures collapsed to a bare `BoardData::default()`, which
+    /// is indistinguishable on screen from a genuinely empty, healthy board
+    /// — exactly the silent failure that cost hours of misdiagnosis on
+    /// 2026-09-11 (daemon healthy throughout, `/board` just slow).
+    #[test]
+    fn board_unreachable_error_is_named_on_cold_start() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = make_test_app(board_load_error_data(BoardLoadError::Timeout));
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 160, 40);
+
+        assert!(
+            driver.screen_contains("board unreachable"),
+            "a failed cold-start /board fetch must be named on screen, not \
+             rendered as an empty-but-healthy board:\n{}",
+            driver.screen(),
+        );
+        assert!(
+            driver.screen_contains("timed out"),
+            "the specific cause must be visible, not just a generic failure:\n{}",
+            driver.screen(),
+        );
+    }
+
+    /// The same cold-start rendering, for the other three named causes —
+    /// connect failure, non-2xx, and a JSON parse mismatch — so no single
+    /// `BoardLoadError` variant regresses to the old silent
+    /// `BoardData::default()` behaviour without a test noticing.
+    #[test]
+    fn board_unreachable_error_names_every_cause_on_cold_start() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        for (cause, needle) in [
+            (
+                BoardLoadError::ConnectFailed("refused".to_string()),
+                "connection failed",
+            ),
+            (BoardLoadError::HttpStatus(503), "HTTP 503"),
+            (
+                BoardLoadError::ParseError("EOF while parsing".to_string()),
+                "bad response",
+            ),
+        ] {
+            let app = make_test_app(board_load_error_data(cause));
+            let driver = driver_with_shell(app, CoordApp::shell_config(), 160, 40);
+            assert!(
+                driver.screen_contains(needle),
+                "expected {needle:?} on screen:\n{}",
+                driver.screen(),
+            );
+        }
+    }
+
+    /// #90 scope: on a WARM tick (a good board is already showing) a named
+    /// board-load failure must NOT wipe the last good board — #620's
+    /// existing behaviour — but the "board unreachable" banner must persist
+    /// across ticks for as long as the failure does, unlike the softer,
+    /// self-clearing `fetch_error` toast. Simulates two consecutive failing
+    /// ticks after a healthy load and checks the machines/banner survive
+    /// both.
+    #[test]
+    fn warm_tick_board_load_failure_keeps_last_good_board_and_pins_the_banner() {
+        let mut app = make_pipeline_app();
+        assert!(
+            !app.data.machines.is_empty(),
+            "fixture must seed at least one machine",
+        );
+        let machine_names_before: Vec<String> =
+            app.data.machines.iter().map(|m| m.name.clone()).collect();
+
+        for _ in 0..2 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(board_load_error_data(BoardLoadError::ConnectFailed(
+                "refused".to_string(),
+            )))
+            .unwrap();
+            app.pending_data = Some(rx);
+            assert!(app.apply_pending_data(), "a failing tick still redraws");
+
+            let machine_names_after: Vec<String> =
+                app.data.machines.iter().map(|m| m.name.clone()).collect();
+            assert_eq!(
+                machine_names_after, machine_names_before,
+                "a warm tick's board-load failure must preserve the last good \
+                 machines list, not wipe it (#620)",
+            );
+            assert_eq!(
+                app.data.load_error.as_deref(),
+                Some("board unreachable: connection failed (refused)"),
+                "the named cause must be pinned onto the preserved board so \
+                 the stale-board banner does not expire while the failure \
+                 persists",
+            );
+        }
+    }
+
+    /// A healthy tick after a run of failures must clear the pinned banner —
+    /// otherwise "persists while the failure persists" (above) would become
+    /// "persists forever".
+    #[test]
+    fn warm_tick_recovery_clears_the_pinned_banner() {
+        let mut app = make_app_with_assignments(vec![make_assignment_typed(
+            "running", 10, "repo-a", Some("work"),
+        )]);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(board_load_error_data(BoardLoadError::Timeout)).unwrap();
+        app.pending_data = Some(rx);
+        app.apply_pending_data();
+        assert!(app.data.load_error.is_some(), "precondition: banner is pinned");
+
+        let healthy = make_app_with_assignments(vec![make_assignment_typed(
+            "done", 10, "repo-a", Some("work"),
+        )])
+        .data;
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(healthy).unwrap();
+        app.pending_data = Some(rx);
+        app.apply_pending_data();
+
+        assert!(
+            app.data.load_error.is_none(),
+            "a real successful tick must clear the pinned banner",
+        );
+    }
+
     // ── #2895: the daemon host resolves its own loopback daemon ───────────────
 
     /// `is_remote_board_service()` gates the host-side control commands the

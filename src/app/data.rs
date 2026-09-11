@@ -2717,14 +2717,111 @@ pub(crate) fn fetch_issue_body_blocking(
     }
 }
 
+/// #90: the typed cause of a failed `/board` fetch.
+///
+/// Before this, every failure path in [`load_data_remote`] collapsed to a
+/// bare `BoardData::default()` — indistinguishable from a genuinely empty
+/// board. On 2026-09-11 that cost hours of misdiagnosis: the daemon was
+/// healthy throughout, but `/board` took 14-80 s against the 8 s timeout, so
+/// the panel blanked and every symptom pointed at "daemon unreachable" when
+/// the real cause was "daemon is just slow right now" — a different fault
+/// with a different operator response. Naming the cause is the whole fix;
+/// see `apply_pending_data` (`app/mod.rs`) for how it reaches the status bar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BoardLoadError {
+    /// Connect or read timed out (`timeout_connect/timeout` on the agent).
+    /// Distinguished from [`Self::ConnectFailed`] deliberately: a timeout
+    /// means the daemon process is likely healthy but slow, whereas a
+    /// connect failure means it isn't there to answer at all — different
+    /// causes, different operator responses.
+    Timeout,
+    /// The connection could not be made or maintained at all — refused,
+    /// DNS failure, or a mid-stream network error. Carries `Transport`'s (or
+    /// the underlying `io::Error`'s) own message for detail.
+    ConnectFailed(String),
+    /// The daemon answered but with a non-2xx HTTP status.
+    HttpStatus(u16),
+    /// The response body was not valid JSON, or didn't match the
+    /// `BoardPayload` shape.
+    ParseError(String),
+}
+
+impl std::fmt::Display for BoardLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BoardLoadError::Timeout => write!(f, "timed out"),
+            BoardLoadError::ConnectFailed(detail) => write!(f, "connection failed ({detail})"),
+            BoardLoadError::HttpStatus(code) => write!(f, "HTTP {code}"),
+            BoardLoadError::ParseError(detail) => write!(f, "bad response ({detail})"),
+        }
+    }
+}
+
+/// True iff the io::Error underlying a transport failure is a timeout.
+///
+/// Split out as its own pure function (rather than inlined into
+/// [`classify_ureq_error`]) so it's unit-testable without needing to
+/// construct a real `ureq::Transport` — its fields are private to the ureq
+/// crate, so the only way to get one is a real failing request. This helper
+/// takes a plain [`std::io::Error`], which IS publicly constructible, so the
+/// classification rule itself can be tested directly.
+fn io_error_is_timeout(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::TimedOut
+}
+
+/// Classify a `ureq::Error` from a `/board` request into a [`BoardLoadError`].
+///
+/// ureq normalizes both connect-timeout and read-timeout onto an
+/// `io::Error(TimedOut)` wrapped in `ErrorKind::Io` or `ErrorKind::ConnectionFailed`
+/// depending on which phase hit the deadline — so timeout detection has to
+/// look through to the wrapped `io::Error` rather than trust `ErrorKind`
+/// alone (`ErrorKind::ConnectionFailed` also covers plain connection-refused,
+/// which is NOT a timeout).
+pub(crate) fn classify_ureq_error(err: &ureq::Error) -> BoardLoadError {
+    match err {
+        ureq::Error::Status(code, _) => BoardLoadError::HttpStatus(*code),
+        ureq::Error::Transport(transport) => {
+            let is_timeout = std::error::Error::source(transport)
+                .and_then(|s| s.downcast_ref::<std::io::Error>())
+                .map(io_error_is_timeout)
+                .unwrap_or(false);
+            if is_timeout {
+                BoardLoadError::Timeout
+            } else {
+                BoardLoadError::ConnectFailed(transport.to_string())
+            }
+        }
+    }
+}
+
+/// Build the `BoardData` sentinel for a failed `/board` fetch: everything
+/// else defaulted (empty machines/assignments/etc — there is nothing to show
+/// this tick), `load_error` carrying the human-readable, named cause.
+///
+/// #90: this is exactly the string `apply_pending_data` and `status_bar`
+/// (`app/mod.rs`) surface — on cold start (no prior good board) it's applied
+/// and pinned immediately; on a warm tick (we already have a good board) the
+/// last-good data is preserved and only this message is pinned onto it, so a
+/// stale board keeps saying it's stale instead of the message expiring while
+/// the daemon is still unreachable.
+pub(crate) fn board_load_error_data(cause: BoardLoadError) -> BoardData {
+    BoardData {
+        load_error: Some(format!("board unreachable: {cause}")),
+        ..BoardData::default()
+    }
+}
+
 /// #584: fetch the read-only board projection from the `coord serve` daemon
 /// over HTTP and assemble it into a [`BoardData`] via the shared
 /// [`assemble_board_data`] tail (so the machine probes still run exactly as the
 /// local path does).
 ///
-/// On ANY error — network failure, non-2xx status, or JSON parse mismatch —
-/// returns `BoardData::default()` rather than panicking; the TUI's 5 s refresh
-/// loop simply retries.
+/// #90: on ANY error — network failure, non-2xx status, or JSON parse
+/// mismatch — returns a [`BoardLoadError`]-carrying `BoardData` (via
+/// [`board_load_error_data`]) rather than panicking or silently returning
+/// `BoardData::default()`; the TUI's refresh loop still simply retries, but
+/// `apply_pending_data`/`status_bar` can now name why the last attempt
+/// failed instead of rendering an unexplained empty board.
 pub(crate) fn load_data_remote(url: &str, token: Option<&str>) -> BoardData {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(8))
@@ -2752,11 +2849,19 @@ pub(crate) fn load_data_remote(url: &str, token: Option<&str>) -> BoardData {
         Ok(resp) if resp.status() == 304 => {
             // Not modified — the daemon validated our cached copy.
             let Some((_, body)) = cached else {
-                return BoardData::default();
+                // Race: the daemon says "unchanged" but we hold no cached
+                // body to reuse (e.g. the cache was evicted between building
+                // the request and reading the response). Not a network or
+                // JSON fault — the daemon behaved correctly — but there is
+                // still nothing here to assemble a board from, so it gets
+                // the same typed-error treatment as the other failure paths.
+                return board_load_error_data(BoardLoadError::ParseError(
+                    "304 Not Modified but no cached body available".to_string(),
+                ));
             };
             match serde_json::from_str::<BoardPayload>(&body) {
                 Ok(p) => p,
-                Err(_) => return BoardData::default(),
+                Err(e) => return board_load_error_data(BoardLoadError::ParseError(e.to_string())),
             }
         }
         Ok(resp) => {
@@ -2771,12 +2876,21 @@ pub(crate) fn load_data_remote(url: &str, token: Option<&str>) -> BoardData {
                         }
                         p
                     }
-                    Err(_) => return BoardData::default(),
+                    Err(e) => {
+                        return board_load_error_data(BoardLoadError::ParseError(e.to_string()))
+                    }
                 },
-                Err(_) => return BoardData::default(),
+                Err(e) => {
+                    let cause = if io_error_is_timeout(&e) {
+                        BoardLoadError::Timeout
+                    } else {
+                        BoardLoadError::ConnectFailed(e.to_string())
+                    };
+                    return board_load_error_data(cause);
+                }
             }
         }
-        Err(_) => return BoardData::default(),
+        Err(e) => return board_load_error_data(classify_ureq_error(&e)),
     };
 
     let mut assignments = payload.assignments;
@@ -3660,6 +3774,171 @@ mod tests {
     //! response is folded in as a second, independent source that cannot
     //! be silently masked.
     use super::*;
+
+    /// #90: `BoardLoadError` classification + the typed-error return paths
+    /// in `load_data_remote`. Uses real sockets (no `MockBoardService`
+    /// dependency) so timeout/connect-refused classification is exercised
+    /// against genuine `ureq`/`io` errors rather than hand-built stand-ins —
+    /// `ureq::Transport`'s fields are private to the ureq crate, so a real
+    /// failing request is the only way to get one at all.
+    mod board_load_error_tests {
+        use super::*;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        #[test]
+        fn io_error_is_timeout_distinguishes_timeout_from_other_io_errors() {
+            let timed_out = std::io::Error::new(std::io::ErrorKind::TimedOut, "deadline exceeded");
+            assert!(io_error_is_timeout(&timed_out));
+
+            let refused = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+            assert!(!io_error_is_timeout(&refused));
+
+            let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+            assert!(!io_error_is_timeout(&reset));
+        }
+
+        #[test]
+        fn display_messages_name_the_cause() {
+            assert_eq!(BoardLoadError::Timeout.to_string(), "timed out");
+            assert_eq!(BoardLoadError::HttpStatus(500).to_string(), "HTTP 500");
+            assert!(BoardLoadError::ConnectFailed("refused".to_string())
+                .to_string()
+                .contains("refused"));
+            assert!(BoardLoadError::ParseError("bad json".to_string())
+                .to_string()
+                .contains("bad json"));
+        }
+
+        #[test]
+        fn board_load_error_data_pins_the_named_cause_on_an_otherwise_empty_board() {
+            let data = board_load_error_data(BoardLoadError::Timeout);
+            assert_eq!(
+                data.load_error.as_deref(),
+                Some("board unreachable: timed out")
+            );
+            assert!(data.machines.is_empty());
+            assert!(data.assignments.is_empty());
+            assert!(data.open_issues.is_empty());
+        }
+
+        /// A minimal one-shot raw-socket responder: accepts a single
+        /// connection, drains the request, and writes back `raw_response`
+        /// verbatim. Used instead of `MockBoardService` (which always answers
+        /// `200 OK`) because these tests need to control the status line.
+        fn respond_once(listener: TcpListener, raw_response: &'static str) {
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(raw_response.as_bytes());
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            });
+        }
+
+        #[test]
+        fn classify_ureq_error_maps_non_2xx_status_to_http_status() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            respond_once(
+                listener,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+
+            let err = ureq::get(&format!("http://{addr}/board")).call().unwrap_err();
+            assert_eq!(classify_ureq_error(&err), BoardLoadError::HttpStatus(503));
+        }
+
+        #[test]
+        fn classify_ureq_error_maps_connection_refused_to_connect_failed_not_timeout() {
+            // Bind to grab a free port, then drop the listener — nothing is
+            // listening there any more, so the connect itself is refused.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+
+            let err = ureq::get(&format!("http://{addr}/board")).call().unwrap_err();
+            let cause = classify_ureq_error(&err);
+            assert!(
+                matches!(cause, BoardLoadError::ConnectFailed(_)),
+                "connection-refused must classify as ConnectFailed, not Timeout: got {cause:?}"
+            );
+        }
+
+        #[test]
+        fn classify_ureq_error_maps_read_timeout_to_timeout() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            // Accept the connection (so it's a genuine TCP connect success)
+            // but never write a response — the agent's own short timeout
+            // below fires while waiting on the response, independent of
+            // `load_data_remote`'s production 8s timeout.
+            let handle = std::thread::spawn(move || {
+                if let Ok((stream, _)) = listener.accept() {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    drop(stream);
+                }
+            });
+            let agent = ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_millis(50))
+                .build();
+            let err = agent
+                .get(&format!("http://{addr}/board"))
+                .call()
+                .unwrap_err();
+            assert_eq!(classify_ureq_error(&err), BoardLoadError::Timeout);
+            let _ = handle.join();
+        }
+
+        #[test]
+        fn load_data_remote_names_a_non_2xx_status_as_the_cause() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            respond_once(
+                listener,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+
+            let data = load_data_remote(&format!("http://{addr}"), None);
+            assert_eq!(
+                data.load_error.as_deref(),
+                Some("board unreachable: HTTP 500"),
+                "a non-2xx /board response must be named, not silently swallowed \
+                 into an empty BoardData"
+            );
+            assert!(data.machines.is_empty());
+        }
+
+        #[test]
+        fn load_data_remote_names_a_json_parse_failure_as_the_cause() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = "not json";
+            let raw = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(raw.as_bytes());
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            });
+
+            let data = load_data_remote(&format!("http://{addr}"), None);
+            let msg = data.load_error.expect("a bad JSON body must be named");
+            assert!(
+                msg.starts_with("board unreachable: bad response"),
+                "expected a ParseError-shaped message, got {msg:?}"
+            );
+        }
+    }
 
     fn health_response(check_id: &str, severity: &str, headroom: &str) -> serde_json::Value {
         serde_json::json!({

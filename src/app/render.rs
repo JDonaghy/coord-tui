@@ -319,8 +319,16 @@ impl ShellApp for CoordApp {
                     // painter renders from `scroll_offset` verbatim, so resolve
                     // the offset that keeps the active tab on-screen before
                     // drawing. The click hit-test below derives the same offset.
-                    tab_bar.scroll_offset =
-                        backend.tab_bar_layout(tab_rect, &tab_bar).correct_scroll_offset;
+                    // `Backend::tab_bar_layout` only returns the deprecated
+                    // `TabBarHits`; no `Backend` method returns the
+                    // replacement `TabBarLayout` yet, so this can't migrate
+                    // from here. See quadraui#823 and
+                    // `quadraui/src/backend.rs:1456`.
+                    #[allow(deprecated)]
+                    {
+                        tab_bar.scroll_offset =
+                            backend.tab_bar_layout(tab_rect, &tab_bar).correct_scroll_offset;
+                    }
                     backend.draw_tab_bar(tab_rect, &tab_bar, None);
 
                     // #818: helper — draw the compact read-only stage strip

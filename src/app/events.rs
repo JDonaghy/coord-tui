@@ -6961,6 +6961,11 @@ pub(crate) fn resolve_tab_bar_click(
     let probe = Rect::new(0.0, 0.0, bar_rect.width, bar_rect.height);
     let hits = backend.tab_bar_layout(probe, bar);
     let click = (click_x - bar_rect.x) as f64;
+    // `Backend::tab_bar_layout` only returns the deprecated `TabBarHits`; no
+    // `Backend` method returns the replacement `TabBarLayout` yet, so this
+    // can't migrate from here. See quadraui#823 and
+    // `quadraui/src/backend.rs:1456`.
+    #[allow(deprecated)]
     for (idx, &(start, end)) in hits.slot_positions.iter().enumerate() {
         // `(0.0, 0.0)` is the sentinel for a tab scrolled (or clipped) out
         // of view — `end <= start` catches it without special-casing, and

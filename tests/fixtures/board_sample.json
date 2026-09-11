@@ -240,6 +240,9 @@
   "drive_queue": [
     {
       "after_json": [],
+      "apply_verdict": "",
+      "apply_verdict_at": null,
+      "apply_verdict_reason": "",
       "attempts": 0,
       "deferrals": 0,
       "enqueued_at": 1000001200.0,
@@ -256,6 +259,7 @@
       "machine": null,
       "max_fix_rounds": null,
       "no_acceptance": 0,
+      "plan_destructive": 0,
       "position": 0,
       "reason_at": null,
       "repo_name": "claude-coordinator",
@@ -269,6 +273,9 @@
       "after_json": [
         "claude-coordinator#748"
       ],
+      "apply_verdict": "",
+      "apply_verdict_at": null,
+      "apply_verdict_reason": "",
       "attempts": 1,
       "deferrals": 2,
       "enqueued_at": 1000001250.0,
@@ -285,6 +292,7 @@
       "machine": "dellserver",
       "max_fix_rounds": null,
       "no_acceptance": 0,
+      "plan_destructive": 0,
       "position": 1,
       "reason_at": null,
       "repo_name": "claude-coordinator",

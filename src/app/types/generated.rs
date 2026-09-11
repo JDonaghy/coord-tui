@@ -753,4 +753,20 @@ pub(crate) struct BoardDriveQueueEntry {
     #[allow(dead_code)]
     #[serde(default)]
     pub(crate) no_acceptance: i64,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) plan_destructive: i64,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) apply_verdict: String,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) apply_verdict_reason: String,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) apply_verdict_at: Option<f64>,
 }

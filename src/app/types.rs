@@ -2467,17 +2467,25 @@ pub struct BoardData {
     /// #2532: mirrors `BoardPayload::approved_submissions` — portal
     /// submissions ready for decomposition. Empty on daemons older than #2532.
     pub(crate) approved_submissions: Vec<ApprovedSubmission>,
-    /// #2895: a **hard, permanent** board-load error — today the single case
-    /// "no board service is configured at all", which is now fatal to reading
-    /// a board (coord-tui no longer opens `coord.db` itself). `None` on every
-    /// healthy load.
+    /// #2895 / #90: a board-load fault, human-readable and named. Two kinds:
     ///
-    /// Deliberately NOT set for transient failures (daemon down, timeout,
-    /// bad JSON): those keep returning a bare `BoardData::default()` so
-    /// `apply_pending_data`'s #620 degraded-tick guard still recognises them
-    /// and preserves the last good board. A `Some` here means the opposite —
-    /// there is nothing to retry into, so the tick is applied and the message
-    /// is pinned in the status bar until the operator fixes the config.
+    /// - **Permanent**: "no board service is configured at all"
+    ///   (`NO_BOARD_SERVICE_ERROR`) — fatal to reading a board at all
+    ///   (coord-tui no longer opens `coord.db` itself). Nothing to retry
+    ///   into; stays until the operator fixes the config.
+    /// - **Transient**: a named `BoardLoadError` (`app/data.rs`) from a
+    ///   failed `/board` fetch — timeout, connect failure, non-2xx, or a
+    ///   JSON parse mismatch. The refresh loop keeps retrying unchanged; this
+    ///   is just naming the cause instead of returning a silently-empty
+    ///   `BoardData::default()` (#90 — that silence once cost hours of
+    ///   misdiagnosis of a merely-slow daemon as an unreachable one).
+    ///
+    /// `None` on every healthy load. `apply_pending_data` (`app/mod.rs`)
+    /// treats a `Some` differently depending on whether a good board is
+    /// already showing: on cold start (nothing to preserve) the tick is
+    /// applied and the message pinned; on a warm tick the last good board is
+    /// preserved (#620) and only this field is refreshed, so a stale board
+    /// keeps saying it is stale for as long as the failure persists.
     pub(crate) load_error: Option<String>,
 }
 

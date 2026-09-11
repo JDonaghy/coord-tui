@@ -5986,34 +5986,40 @@ impl CoordApp {
             Ok(data) => {
                 // #620: a refresh tick that comes back completely empty is
                 // almost always a transient fetch FAILURE, not a genuinely
-                // empty board.  `load_data_remote` returns `BoardData::default()`
-                // on any connect/timeout/parse error (thin clients poll the
-                // dellserver daemon over Tailscale, so an 8s timeout or a blip
-                // yields an empty payload), and the local SQLite path returns it
-                // when the DB is briefly locked.  Wholesale-applying that empty
-                // payload wiped the Pipeline tree, recomputed an empty
-                // `live_keys`, and `retain`-ed every live embedded terminal out
-                // of existence — bouncing the operator out of an attended
-                // session every couple of minutes and losing selection +
-                // tree-expansion state.  Guard: if we ALREADY have data and the
-                // incoming tick has no machines, no issues, AND no assignments,
-                // treat it as a degraded tick — keep the last good data, surface
-                // a soft self-clearing warning, and skip the apply.  (A real
-                // first load from an empty board has empty CURRENT data, so the
-                // guard is inert and the empty state still applies; machines come
-                // from coordinator.yml and never legitimately drop to zero on a
-                // configured board, making the all-three-empty check a reliable
-                // proxy for the default sentinel.)
+                // empty board.  `load_data_remote` returns a `BoardLoadError`-
+                // carrying `BoardData` (#90) on any connect/timeout/non-2xx/
+                // parse error (thin clients poll the dellserver daemon over
+                // Tailscale, so an 8s timeout or a blip yields an empty
+                // payload).  Wholesale-applying that empty payload wiped the
+                // Pipeline tree, recomputed an empty `live_keys`, and
+                // `retain`-ed every live embedded terminal out of existence —
+                // bouncing the operator out of an attended session every
+                // couple of minutes and losing selection + tree-expansion
+                // state.  Guard: if we ALREADY have data and the incoming
+                // tick has no machines, no issues, AND no assignments, treat
+                // it as a degraded tick — keep the last good data, surface a
+                // warning, and skip the apply.  (A real first load from an
+                // empty board has empty CURRENT data, so the guard is inert
+                // and the empty state still applies; machines come from
+                // coordinator.yml and never legitimately drop to zero on a
+                // configured board, making the all-three-empty check a
+                // reliable proxy for the default sentinel.)
                 //
-                // #2895: `data.load_error` is the one empty tick that is NOT
-                // degraded — it means "there is no board service to retry
-                // into", a permanent config fault with a named remedy. Such a
-                // tick must be applied so `status_bar` can pin the message;
-                // treating it as degraded would instead show the transient
-                // "refresh failed" warning on a loop, forever. Conversely a
-                // board whose only content IS that error counts as `have_data`
-                // — otherwise the very next empty tick would silently clear
-                // the message and leave a blank board with no explanation.
+                // #2895 / #90: `data.load_error` is the one empty tick that is
+                // NOT degraded in the cold-start sense — whether it's "there
+                // is no board service to retry into" (a permanent config
+                // fault) or a named transient `BoardLoadError` (the daemon IS
+                // configured but this attempt failed), a tick with no prior
+                // good data must be applied so `status_bar` can pin the
+                // message; treating it as degraded would instead show a
+                // "refresh failed" warning while leaving the machines list
+                // looking like a successful empty result. Conversely a board
+                // whose only content IS that error counts as `have_data` —
+                // otherwise the very next empty tick would silently clear the
+                // message and leave a blank board with no explanation. On a
+                // WARM tick (we already have real data) a named cause instead
+                // keeps the last good board and only refreshes the pinned
+                // message — see the branch below.
                 let incoming_empty = data.machines.is_empty()
                     && data.open_issues.is_empty()
                     && data.assignments.is_empty();
@@ -6021,8 +6027,30 @@ impl CoordApp {
                     || !self.data.open_issues.is_empty()
                     || !self.data.assignments.is_empty()
                     || self.data.load_error.is_some();
-                if incoming_empty && have_data && data.load_error.is_none() {
-                    // Consume the receiver but do NOT replace self.data; leave
+                if incoming_empty && have_data {
+                    // #90: a WARM tick (we already have a good board) that
+                    // came back empty with a NAMED cause — `load_data_remote`
+                    // failed with a typed `BoardLoadError` (timeout / connect
+                    // failure / non-2xx / parse error; see its doc comment).
+                    // Keep the #620 behaviour of preserving the last good
+                    // board (do NOT replace self.data below), but pin the
+                    // cause onto it via the SAME `load_error` field
+                    // `status_bar` already renders as a non-expiring banner
+                    // for the cold-start config fault — a stale board must
+                    // keep saying it is stale for as long as the failure
+                    // persists, not just for the 10s the softer untyped
+                    // warning below self-clears after. The next healthy tick
+                    // replaces self.data wholesale (data.load_error is None
+                    // on a real success) and the message clears on its own.
+                    if let Some(msg) = &data.load_error {
+                        self.pending_data = None;
+                        self.data.load_error = Some(msg.clone());
+                        return true;
+                    }
+                    // Untyped empty tick (no named cause — e.g. the
+                    // test-support sentinel `start_data_load` sends so
+                    // seeded fixtures survive a driven refresh). Consume the
+                    // receiver but do NOT replace self.data; leave
                     // refreshed_at alone so the "Xs ago" indicator keeps aging
                     // (honest: this tick didn't land).  The next healthy tick
                     // clears the warning and updates normally.
@@ -9660,13 +9688,22 @@ impl CoordApp {
                 action_id: None,
             },
         ];
-        // #2895: a hard board-load fault (today: no board service configured
-        // anywhere — see `NO_BOARD_SERVICE_ERROR`). Pushed FIRST, ahead of
-        // every advisory badge, because the board behind it is empty and
-        // every other segment is describing that emptiness rather than
-        // explaining it. Unlike `fetch_error` further down it does NOT
-        // self-clear after 10s: nothing the running process does will fix it,
-        // so it stays until the operator does.
+        // #2895 / #90: a board-load fault — either the permanent "no board
+        // service configured anywhere" config fault (see
+        // `NO_BOARD_SERVICE_ERROR`) or a named, retryable `BoardLoadError`
+        // ("board unreachable: timed out" / "connection failed (...)" /
+        // "HTTP 500" / "bad response (...)" — see that type's doc comment in
+        // `app/data.rs`) surfaced from `apply_pending_data`. Pushed FIRST,
+        // ahead of every advisory badge, because the board behind it may be
+        // empty or stale and every other segment is describing that state
+        // rather than explaining it. Unlike `fetch_error` further down it
+        // does NOT self-clear after 10s: on cold start nothing the running
+        // process does will fix a permanent config fault, and on a warm tick
+        // `apply_pending_data` keeps refreshing this message for as long as
+        // the failure persists — a stale board must keep saying it is stale,
+        // not fall silent after 10s while still unreachable. It clears the
+        // instant a tick actually succeeds (`data.load_error` is `None` on a
+        // real load).
         if let Some(msg) = &self.data.load_error {
             left.push(StatusBarSegment {
                 text: format!(" ⚠ {} ", msg),

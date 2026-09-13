@@ -55423,6 +55423,61 @@ Milestone tracking issue.
         );
     }
 
+    /// #96: the bucket width is read off the rows' own `bucket_start`
+    /// delta, never a client-side range→width table — a 6-hour delta
+    /// between the first two buckets renders as `"6h"`.
+    #[test]
+    fn trend_bucket_width_label_derives_from_bucket_start_delta() {
+        let rows = r#"[
+                {"bucket_start": 1700000000.0, "merged": 2, "cost_per_issue": 12.5, "legs_per_issue": 1.0},
+                {"bucket_start": 1700021600.0, "merged": 1, "cost_per_issue": 9.0, "legs_per_issue": 1.0},
+                {"bucket_start": 1700043200.0, "merged": 4, "cost_per_issue": 7.25, "legs_per_issue": 1.2}
+            ]"#;
+        let result: crate::app::types::ReportResult =
+            serde_json::from_str(&trend_result_json(rows, "n")).expect("#96: fixture parses");
+        assert_eq!(
+            CoordApp::trend_bucket_width_label(&result),
+            Some("6h".to_string()),
+            "#96: a 21600s delta between the first two buckets is a whole \
+                 number of hours and must render as the compact \"6h\", not \
+                 \"21600s\" or a hardcoded range→width guess"
+        );
+    }
+
+    /// A delta that doesn't divide evenly into a bigger unit still renders
+    /// exactly, in whole seconds — no rounding to a wrong unit.
+    #[test]
+    fn trend_bucket_width_label_falls_back_to_seconds_when_not_a_round_unit() {
+        let rows = r#"[
+                {"bucket_start": 0.0, "merged": 0, "cost_per_issue": null, "legs_per_issue": null},
+                {"bucket_start": 90.0, "merged": 0, "cost_per_issue": null, "legs_per_issue": null}
+            ]"#;
+        let result: crate::app::types::ReportResult =
+            serde_json::from_str(&trend_result_json(rows, "n")).expect("#96: fixture parses");
+        assert_eq!(
+            CoordApp::trend_bucket_width_label(&result),
+            Some("90s".to_string()),
+            "#96: a delta that isn't a round minute/hour/day must still \
+                 render exactly, in seconds"
+        );
+    }
+
+    /// Fewer than two rows means no delta to read — the caption and axis
+    /// legend must degrade to "no bucket width known" rather than panicking
+    /// or fabricating one.
+    #[test]
+    fn trend_bucket_width_label_is_none_with_a_single_row() {
+        let rows = r#"[
+                {"bucket_start": 1.0, "merged": 1, "cost_per_issue": 5.0, "legs_per_issue": 1.0}
+            ]"#;
+        let result: crate::app::types::ReportResult =
+            serde_json::from_str(&trend_result_json(rows, "n")).expect("#96: fixture parses");
+        assert!(
+            CoordApp::trend_bucket_width_label(&result).is_none(),
+            "#96: a single-bucket window has no delta to read"
+        );
+    }
+
     /// The full render path: two captioned charts, never the generic
     /// `DataTable` (whose `Bucket` column header this report's rows would
     /// otherwise trigger).
@@ -55464,6 +55519,58 @@ Milestone tracking issue.
             efficiency_y > throughput_y,
             "#2827: chart A (throughput) must sit above chart B \
                  (efficiency):\n{screen}"
+        );
+
+        // #96: both captions must name the window (the `reports_window_label`
+        // "<start> → <end>" shape, checked here via its stable "→"
+        // separator rather than the exact relative-time text, which shifts
+        // with wall-clock time), and the throughput caption must additionally
+        // name the bucket width — a 1.0s `bucket_start` delta between these
+        // rows' first two buckets renders as "1s", never a hardcoded
+        // range→width guess.
+        let throughput_line = screen
+            .lines()
+            .find(|l| l.contains("Throughput"))
+            .expect("#96: throughput caption renders");
+        assert!(
+            throughput_line.contains("per 1s bucket"),
+            "#96: the throughput caption must name the bucket width \
+                 derived from the rows' own `bucket_start` delta:\n{screen}"
+        );
+        assert!(
+            throughput_line.contains('→'),
+            "#96: the throughput caption must name the window:\n{screen}"
+        );
+        let efficiency_line = screen
+            .lines()
+            .find(|l| l.contains("Efficiency"))
+            .expect("#96: efficiency caption renders");
+        assert!(
+            efficiency_line.contains('→'),
+            "#96: the efficiency caption must name the window too — one \
+                 window covers both charts:\n{screen}"
+        );
+
+        // #96: the x-axis legend belongs to the bottom (efficiency) chart
+        // only — one shared legend under the stacked pair, not two.
+        assert_eq!(
+            screen.matches("← older").count(),
+            1,
+            "#96: the axis legend must be painted exactly once — under the \
+                 bottom chart, not duplicated under the top one:\n{screen}"
+        );
+        let (_, legend_y) = driver
+            .find("← older")
+            .expect("#96: the axis legend renders");
+        assert!(
+            legend_y > efficiency_y,
+            "#96: the axis legend must sit under the bottom (efficiency) \
+                 chart, below its caption:\n{screen}"
+        );
+        assert!(
+            screen.contains("1s buckets"),
+            "#96: the axis legend must name the same bucket width as the \
+                 throughput caption:\n{screen}"
         );
     }
 

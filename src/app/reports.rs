@@ -1640,6 +1640,50 @@ impl CoordApp {
     /// `REPORTS_CHART_MIN_PANEL_ROWS` for the single-chart case.
     const TREND_CHART_MIN_PANEL_ROWS: f32 = 10.0;
 
+    /// The bucket width in seconds, derived from the first two rows'
+    /// `bucket_start` delta — never a client-side range→width table.
+    /// `coord/reports.py`'s `_TREND_RANGES` is the one place that mapping
+    /// lives; a copy here would silently drift the moment the server's
+    /// table changes (#96). `None` when there are fewer than two rows (a
+    /// single-bucket window has no delta to read) or the delta isn't a
+    /// genuine forward step (a malformed/unsorted `bucket_start` column).
+    pub(crate) fn trend_bucket_seconds(result: &ReportResult) -> Option<f64> {
+        let a = Self::reports_chart_value(result.rows.first()?, "bucket_start")?;
+        let b = Self::reports_chart_value(result.rows.get(1)?, "bucket_start")?;
+        let delta = b - a;
+        (delta > 0.0).then_some(delta)
+    }
+
+    /// A bucket-width delta in seconds → a short unit label (`"6h"`,
+    /// `"3d"`, `"45m"`, `"90s"`). Picks the largest unit that divides the
+    /// delta evenly rather than a fixed h/m/s breakdown — every width the
+    /// server actually emits (#96, `_TREND_RANGES`: hourly/3-hourly/
+    /// 6-hourly/daily) is a whole number of one unit, so this never prints
+    /// a busier `"6h00m"` for what is honestly just `"6h"`. A delta that
+    /// doesn't divide evenly (a daemon change this binary predates) still
+    /// renders exactly, in whole seconds, rather than rounding to a wrong
+    /// unit.
+    pub(crate) fn format_bucket_width(secs: f64) -> String {
+        let secs = secs.round().max(0.0) as u64;
+        if secs != 0 && secs % 86400 == 0 {
+            format!("{}d", secs / 86400)
+        } else if secs != 0 && secs % 3600 == 0 {
+            format!("{}h", secs / 3600)
+        } else if secs != 0 && secs % 60 == 0 {
+            format!("{}m", secs / 60)
+        } else {
+            format!("{secs}s")
+        }
+    }
+
+    /// [`Self::trend_bucket_seconds`] rendered through
+    /// [`Self::format_bucket_width`], or `None` under the same conditions —
+    /// the one call site both captions and the x-axis legend share, so the
+    /// three pieces of on-screen text can never disagree with each other.
+    pub(crate) fn trend_bucket_width_label(result: &ReportResult) -> Option<String> {
+        Self::trend_bucket_seconds(result).map(Self::format_bucket_width)
+    }
+
     /// The Trend report's main-panel body: two stacked charts, each with a
     /// one-row caption, sharing `rect`'s full width. Takes `result`
     /// explicitly (rather than re-reading `self.reports_result`) because
@@ -1695,17 +1739,35 @@ impl CoordApp {
             (rect.y + rect.height - bottom_chart_y).max(0.0),
         );
 
+        // #96: name the window and the bucket width in both captions —
+        // today's fixed strings said nothing about what time range or
+        // bucket size was on screen. `window_suffix` is shared by both
+        // captions verbatim (one window covers both charts); the bucket
+        // width additionally qualifies "bucket" in the throughput caption,
+        // since that's the caption that says the word "bucket" at all.
+        let window_suffix = match Self::reports_window_label(result) {
+            Some(window) => format!(" · {window}"),
+            None => String::new(),
+        };
+        let bucket_label = Self::trend_bucket_width_label(result);
+        let bucket_phrase = match &bucket_label {
+            Some(width) => format!("per {width} bucket"),
+            None => "per bucket".to_string(),
+        };
+
         backend.draw_list(
             top_caption,
             &Self::reports_caption_list(
                 "trend-throughput-title",
-                "  Throughput — merges per bucket",
+                &format!("  Throughput — merges {bucket_phrase}{window_suffix}"),
             ),
         );
         let merged_chart = Chart {
             id: WidgetId::new("trend-chart-merged"),
             kind: ChartKind::Bar,
             series: vec![Self::trend_merged_series(result)],
+            // No x-axis legend on the top chart — one shared legend under
+            // the stacked pair (the bottom chart's), not two.
             x_label: None,
             y_label: Some("Merged".to_string()),
             y_range: None,
@@ -1724,16 +1786,26 @@ impl CoordApp {
             bottom_caption,
             &Self::reports_caption_list(
                 "trend-efficiency-title",
-                "  Efficiency — $/issue (trailing mean)",
+                &format!("  Efficiency — $/issue (trailing mean){window_suffix}"),
             ),
         );
+        // #96: which end is "now" isn't obvious from the plot alone, so
+        // the bottom chart carries the one x-axis legend for the pair
+        // (quadraui already paints a single centred `x_label` below the
+        // plot, `tui/chart.rs:427`, against the pinned rev — no upstream
+        // change needed). Real per-tick time labels need quadraui#975;
+        // this is the stopgap that needs none of that.
+        let x_label = Some(match &bucket_label {
+            Some(width) => format!("← older · {width} buckets · newer →"),
+            None => "← older · newer →".to_string(),
+        });
         match Self::trend_cost_series(result) {
             Some(series) => {
                 let cost_chart = Chart {
                     id: WidgetId::new("trend-chart-cost"),
                     kind: ChartKind::Line,
                     series: vec![series],
-                    x_label: None,
+                    x_label,
                     y_label: Some("$/Issue".to_string()),
                     y_range: None,
                     x_range: None,

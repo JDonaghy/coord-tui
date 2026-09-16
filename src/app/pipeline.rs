@@ -3949,7 +3949,7 @@ impl CoordApp {
         }
 
         let total = items.len();
-        backend.draw_list(rect, &ListView {
+        let list = ListView {
             id: WidgetId::new("mergequeue-list"),
             title: Some(StyledText::plain(" MERGE QUEUE ")),
             items,
@@ -3960,7 +3960,11 @@ impl CoordApp {
             h_scroll: 0,
             max_content_width: None,
             show_v_scrollbar: total > 10,
-        });
+        };
+        backend.draw_list(rect, &list);
+        // #79: PR numbers, branch names, and block reasons in this list all
+        // need to be copyable without retyping.
+        register_list_text(backend, "mergequeue-list", rect, &list);
     }
 
     // ── #777: Ranked plan panel ───────────────────────────────────────────────
@@ -4122,7 +4126,7 @@ impl CoordApp {
         }
 
         let total = items.len();
-        backend.draw_list(rect, &ListView {
+        let list = ListView {
             id: WidgetId::new("mergequeue-list"),
             title: Some(StyledText::plain(" MERGE QUEUE — order = next coord merge run ")),
             items,
@@ -4133,7 +4137,11 @@ impl CoordApp {
             h_scroll: 0,
             max_content_width: None,
             show_v_scrollbar: total > 10,
-        });
+        };
+        backend.draw_list(rect, &list);
+        // #79: PR numbers, branch names, and block reasons in this list all
+        // need to be copyable without retyping.
+        register_list_text(backend, "mergequeue-list", rect, &list);
     }
 
     // ── #737 / #780: Merge Queue per-entry actions ───────────────────────────

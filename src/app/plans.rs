@@ -817,21 +817,22 @@ impl CoordApp {
         }
 
         let total = items.len();
-        backend.draw_list(
-            list_rect,
-            &ListView {
-                id: WidgetId::new("plans-list"),
-                title: Some(StyledText::plain(" PLANS ")),
-                items,
-                selected_idx,
-                scroll_offset: 0,
-                has_focus: true,
-                bordered: true,
-                h_scroll: 0,
-                max_content_width: None,
-                show_v_scrollbar: total > 10,
-            },
-        );
+        let list = ListView {
+            id: WidgetId::new("plans-list"),
+            title: Some(StyledText::plain(" PLANS ")),
+            items,
+            selected_idx,
+            scroll_offset: 0,
+            has_focus: true,
+            bordered: true,
+            h_scroll: 0,
+            max_content_width: None,
+            show_v_scrollbar: total > 10,
+        };
+        backend.draw_list(list_rect, &list);
+        // #79: milestone/epic titles and issue ids here need to be copyable
+        // without retyping.
+        register_list_text(backend, "plans-list", list_rect, &list);
     }
 
     // ─── #1122: in-app plan detail pane ───────────────────────────────────
@@ -1127,25 +1128,26 @@ impl CoordApp {
         let (items, _kinds) = self.plan_detail_items(&entry);
         let total = items.len();
         let selected_idx = self.plans_detail_sel.min(total.saturating_sub(1));
-        backend.draw_list(
-            rect,
-            &ListView {
-                id: WidgetId::new("plans-detail"),
-                title: Some(StyledText::plain(format!(
-                    " #{} {} ",
-                    entry.milestone_number,
-                    trunc(&entry.title, 60),
-                ))),
-                items,
-                selected_idx,
-                scroll_offset: self.plans_detail_scroll,
-                has_focus: true,
-                bordered: true,
-                h_scroll: 0,
-                max_content_width: None,
-                show_v_scrollbar: total > 10,
-            },
-        );
+        let list = ListView {
+            id: WidgetId::new("plans-detail"),
+            title: Some(StyledText::plain(format!(
+                " #{} {} ",
+                entry.milestone_number,
+                trunc(&entry.title, 60),
+            ))),
+            items,
+            selected_idx,
+            scroll_offset: self.plans_detail_scroll,
+            has_focus: true,
+            bordered: true,
+            h_scroll: 0,
+            max_content_width: None,
+            show_v_scrollbar: total > 10,
+        };
+        backend.draw_list(rect, &list);
+        // #79: the work-order body carries branch names, PR URLs, and
+        // command snippets the operator needs to copy without retyping.
+        register_list_text(backend, "plans-detail", rect, &list);
     }
 
     /// Hit-test a click in the detail pane's actions row(s) (contract §3d)

@@ -1416,6 +1416,37 @@ fn kv_item(key: &str, val: &str, val_color: Option<Color>) -> ListItem {
     }
 }
 
+/// #79: register a just-painted `ListView`'s rows as a selectable
+/// `TextRegion` so click-drag highlights the range and Ctrl-C copies it
+/// (OSC52 + system clipboard) — the same mechanism `render.rs`'s Pipeline
+/// Log tab has used alone since #312.
+///
+/// Call this immediately after the matching `backend.draw_list(rect, list)`
+/// (same `rect`, same `list`) for every **read-only** content pane that
+/// shows identifiers, URLs, commands, or log text — the TUI backend hit-tests
+/// `TextRegion`s to start a selection drag, so a pane with no registered
+/// region has nothing for a click-drag to find.
+///
+/// Flattens each `ListItem.text`'s spans into one `String` per row for
+/// `lines` — GTK/macOS extract the copied substring from these (they can't
+/// read it back from what was painted); the TUI backend ignores `lines`
+/// entirely and reads the selected range off its own ratatui cell buffer, so
+/// this is a no-cost no-op there. `detail` (the right-aligned secondary
+/// column some rows carry) is intentionally left out, matching the
+/// pre-existing pipeline-log convention this helper generalizes.
+fn register_list_text(backend: &mut dyn Backend, id: &str, rect: Rect, list: &ListView) {
+    let lines: Vec<String> = list
+        .items
+        .iter()
+        .map(|it| it.text.spans.iter().map(|s| s.text.as_str()).collect())
+        .collect();
+    backend.register_text_region(TextRegion {
+        id: WidgetId::new(id),
+        bounds: rect,
+        lines,
+    });
+}
+
 /// #44: presentational label + colour for one `MachineJobHistoryEntry`'s
 /// `status` string, as rendered in the Machines panel's JOB HISTORY list.
 /// This is display tint only — it does NOT feed the completed/failed

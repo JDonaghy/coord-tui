@@ -1130,6 +1130,8 @@ pub fn make_assignment_typed(
         verdict_source_reason: None,
         stop_reason: None,
         num_turns: None,
+        premise_rechecked_at: None,
+        premise_rechecked_reason: None,
     }
 }
 

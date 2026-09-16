@@ -126,7 +126,11 @@ pub struct Assignment {
     pub(crate) exit_code: Option<i32>,
     /// #803: fix-round counter — 0 on the original work assignment, N on the
     /// N-th fix.  Used to compute the next iteration's escalated model via
-    /// [`fix_model_for_iteration`]: `next_iteration = review_iteration + 1`.
+    /// [`fix_model_for_iteration`].  #3322: the next iteration is the MAX
+    /// `review_iteration` over every work-like row on the same (repo, issue,
+    /// branch), plus one — not this row's own value plus one.  The coordinator
+    /// owns that computation (`coord.auto_loop.next_fix_iteration`); read this
+    /// field as the round a row belongs to, never as a base to increment.
     #[serde(default)]
     pub(crate) review_iteration: i64,
     /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
@@ -374,6 +378,14 @@ pub struct Assignment {
     #[allow(dead_code)]
     #[serde(default)]
     pub(crate) num_turns: Option<i64>,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) premise_rechecked_at: Option<f64>,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) premise_rechecked_reason: Option<String>,
     /// #1337: true when the daemon bounded `review_findings` on the /board
     /// wire (the collection carries a preview; the full body lives on
     /// `GET /assignment/{id}`).  Absent (→ false) on pre-#1337 daemons and

@@ -411,7 +411,13 @@ impl ShellApp for CoordApp {
                             // `drive_queue.rs:1534` / `dialogs.rs:1545`.
                             self.last_stage_content_cols
                                 .set((meta_rect.width / backend.char_width().max(1.0)) as usize);
-                            backend.draw_list(meta_rect, &self.pipeline_tab_body_list());
+                            // #79: the operator-reported pane — Uat Run/Preview
+                            // rows, review findings, test guidance, and the
+                            // merge-block reason all land here, and until now
+                            // nothing on this pane was selectable.
+                            let tab_body_list = self.pipeline_tab_body_list();
+                            backend.draw_list(meta_rect, &tab_body_list);
+                            register_list_text(backend, "pipeline-tab-body", meta_rect, &tab_body_list);
                         }
                         PipelineDetailTab::Issue => {
                             // #818: pinned stage strip above the issue body.
@@ -422,7 +428,14 @@ impl ShellApp for CoordApp {
                             // see the matching comment on `last_stage_content_cols` above.
                             self.last_issue_panel_cols
                                 .set((body_rect.width / backend.char_width().max(1.0)) as usize);
-                            backend.draw_list(body_rect, &self.pipeline_issue_body_list());
+                            let issue_body_list = self.pipeline_issue_body_list();
+                            backend.draw_list(body_rect, &issue_body_list);
+                            // #79: issue body carries the raw GitHub issue
+                            // text — ids, URLs, commands the operator needs
+                            // to copy out. Id matches `pipeline_issue_body_list`'s
+                            // own `ListView.id` ("pipeline-issue-body"), same
+                            // convention as the other panes registered here.
+                            register_list_text(backend, "pipeline-issue-body", body_rect, &issue_body_list);
                         }
                         PipelineDetailTab::Log => {
                             // #818: pinned stage strip above the log.
@@ -492,24 +505,15 @@ impl ShellApp for CoordApp {
                                 None
                             };
 
-                            // Collect the visible text for pixel-based backends
-                            // (GTK/macOS).  The TUI backend ignores `lines` and
-                            // reads selection directly from its ratatui cell
-                            // buffer, so this is a no-cost no-op for TUI users.
-                            let lines: Vec<String> = log_list
-                                .items
-                                .iter()
-                                .map(|it| it.text.spans.iter().map(|s| s.text.as_str()).collect())
-                                .collect();
                             backend.draw_list(list_rect, &log_list);
-                            // #312: register as a selectable TextRegion so the
-                            // quadraui runtime handles click-drag line selection
-                            // and Ctrl-C copy (OSC52 + arboard) automatically.
-                            backend.register_text_region(TextRegion {
-                                id: WidgetId::new("pipeline-log"),
-                                bounds: list_rect,
-                                lines,
-                            });
+                            // #312/#79: register as a selectable TextRegion so
+                            // the quadraui runtime handles click-drag line
+                            // selection and Ctrl-C copy (OSC52 + arboard)
+                            // automatically. `register_list_text` derives
+                            // `lines` from `log_list` the same way this call
+                            // site used to inline it before #79 generalized
+                            // the pattern to every other read-only pane.
+                            register_list_text(backend, "pipeline-log", list_rect, &log_list);
                         }
                         PipelineDetailTab::Summary => {
                             // #818: pinned stage strip above the summary.
@@ -518,6 +522,9 @@ impl ShellApp for CoordApp {
                             // the in-memory board.
                             let summary_list = self.pipeline_summary_list();
                             backend.draw_list(summary_body, &summary_list);
+                            // #79: session-history rows carry assignment ids
+                            // and machine hostnames the operator needs to copy.
+                            register_list_text(backend, "pipeline-summary", summary_body, &summary_list);
                         }
                         PipelineDetailTab::Terminal => {
                             // #818: pinned stage strip above the terminal.
@@ -664,7 +671,11 @@ impl ShellApp for CoordApp {
             // #1032: Sessions panel — detail view of the selected session
             // leaf (assignment id, issue/repo, machine, type, status).
             SidebarView::Sessions => {
-                backend.draw_list(m, &self.sessions_detail_list());
+                let sessions_detail = self.sessions_detail_list();
+                backend.draw_list(m, &sessions_detail);
+                // #79: assignment ids and machine hostnames here need to be
+                // copyable without retyping.
+                register_list_text(backend, "sessions-detail", m, &sessions_detail);
             }
             // #1039: Audit panel — newest-first entry list, with an inline
             // detail split when `audit_detail_open`.

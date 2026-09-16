@@ -62984,3 +62984,153 @@ Milestone tracking issue.
             "the Toggle must mirror `settings.nerd_font_icons`",
         );
     }
+
+    // ── #79: read-only content panes are click-drag selectable ─────────────
+    //
+    // Before this fix, `register_text_region` was called exactly once in the
+    // whole crate (the Pipeline Log tab, #312) — every other read-only pane
+    // painted text but registered nothing, so a click-drag had no
+    // `TextRegion` to hit-test and never started a selection. These pin the
+    // fix on two panes in two different source files (`render.rs` and
+    // `pipeline.rs`) so the pattern can't silently regress back to a single
+    // call site.
+    //
+    // The TUI backend paints an active selection by swapping each covered
+    // cell's fg/bg (`TuiBackend::apply_selection_highlight`) rather than
+    // setting a style modifier, so the assertion below drags across a known
+    // cell and checks its fg/bg literally inverted — the same signal a human
+    // eye reads as "highlighted".
+
+    /// #79 (priority pane): the Pipeline Overview tab body —
+    /// `pipeline_tab_body_list` / `WidgetId::new("pipeline-tab-body")` in
+    /// `render.rs` — is the operator-reported pane (Uat Run/Preview rows,
+    /// review findings, test guidance, merge-block reason all land here) and
+    /// must be click-drag selectable.
+    #[test]
+    fn pipeline_tab_body_pane_text_is_selectable() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+        app.pipeline_detail_tab = PipelineDetailTab::Overview;
+        app.pipeline_sel = Some(0);
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        let screen = driver.screen();
+        let bounds = driver
+            .find_bounds("Local")
+            .unwrap_or_else(|| panic!("Overview pane must render #42's 'Local' row:\n{screen}"));
+        // #79 review: anchor exactly at `bounds.x`/`bounds.y` (both already
+        // whole cell numbers) rather than `find`'s cell-center coordinates
+        // (`bounds.x/.y + 0.5`) — `text_selection_line_range` rounds a drag's
+        // coordinates to the nearest cell for buffer indexing, and Rust's
+        // `f32::round` rounds a `.5` AWAY FROM ZERO, so a center-of-cell
+        // anchor silently excludes the very cell (or lands one row below
+        // the one) `find` pointed at. A real mouse click never produces a
+        // fractional cell coordinate, so this is purely a synthetic-test
+        // concern, not a bug in the fix under test.
+        let x = bounds.x;
+        let y = bounds.y;
+        let (px, py) = (x as u16, y as u16);
+        let before = driver
+            .style_at(px, py)
+            .expect("the 'Local' row's first cell must be in-bounds");
+
+        driver.drag(x, y, x + 20.0, y);
+        driver.render();
+
+        let after = driver
+            .style_at(px, py)
+            .expect("the 'Local' row's first cell must still be in-bounds");
+        assert_eq!(
+            (after.fg, after.bg),
+            (before.bg, before.fg),
+            "#79: drag-selecting across the Overview pane's 'Local' row must \
+             invert fg/bg to paint the selection highlight — this only \
+             happens if `pipeline-tab-body` is registered as a TextRegion \
+             for `dispatch_click` to hit-test the drag against. before={before:?} after={after:?}:\n{}",
+            driver.screen(),
+        );
+
+        // Ctrl-C must not panic — same copy path #312 already exercised for
+        // the Log tab, now reachable from this pane too.
+        driver.ctrl_char('c');
+    }
+
+    /// #79 (pattern spread): the Merge Queue panel's entry list —
+    /// `WidgetId::new("mergequeue-list")` in `pipeline.rs` — carries PR
+    /// numbers and block reasons operators need to copy, and lives in a
+    /// different source file than the Pipeline Overview pane above: proof
+    /// the fix is a reusable helper (`register_list_text`), not one more
+    /// one-off call site.
+    #[test]
+    fn mergequeue_list_pane_text_is_selectable() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_test_app(BoardData {
+            pipeline_repos: vec![("api".to_string(), "acme/api".to_string())],
+            merge_queue: vec![MergeQueueEntry {
+                assignment_id: "w1".to_string(),
+                issue_number: Some(42),
+                state: "merged".to_string(),
+                pr_number: Some(101),
+                pr_url: None,
+                repo_github: "acme/api".to_string(),
+                target_branch: None,
+                error: None,
+                branch: None,
+                milestone_title: None,
+                last_attempt: None,
+                id: None,
+                repo_name: String::new(),
+                issue_title: String::new(),
+                size: None,
+                enqueued_at: None,
+                assignment_type: None,
+                required_gates: None,
+                ci_infra_reruns: 0,
+                ci_stale_reruns: 0,
+                ci_flaky_reruns: 0,
+                ci_flaky_pending: String::new(),
+                ci_unreadable_reruns: 0,
+                ci_fix_dispatches: 0,
+            }],
+            ..BoardData::default()
+        });
+        app.active_view = SidebarView::MergeQueue;
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+
+        let screen = driver.screen();
+        // #79 review: see the matching comment in
+        // `pipeline_tab_body_pane_text_is_selectable` — anchor exactly at
+        // `bounds.x`/`bounds.y` (whole cell numbers), not `find`'s
+        // cell-center coordinates, or `f32::round`'s away-from-zero
+        // rounding excludes this exact probe cell from the selection.
+        let bounds = driver.find_bounds("#101").unwrap_or_else(|| {
+            panic!("Merge Queue panel must render the seeded entry's PR number:\n{screen}")
+        });
+        let x = bounds.x;
+        let y = bounds.y;
+        let (px, py) = (x as u16, y as u16);
+        let before = driver
+            .style_at(px, py)
+            .expect("the '#101' cell must be in-bounds");
+
+        driver.drag(x, y, x + 10.0, y);
+        driver.render();
+
+        let after = driver
+            .style_at(px, py)
+            .expect("the '#101' cell must still be in-bounds");
+        assert_eq!(
+            (after.fg, after.bg),
+            (before.bg, before.fg),
+            "#79: drag-selecting across the merge-queue row must invert \
+             fg/bg to paint the selection highlight — this only happens if \
+             `mergequeue-list` is registered as a TextRegion. \
+             before={before:?} after={after:?}:\n{}",
+            driver.screen(),
+        );
+
+        driver.ctrl_char('c');
+    }

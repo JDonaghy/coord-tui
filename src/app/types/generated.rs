@@ -386,6 +386,10 @@ pub struct Assignment {
     #[allow(dead_code)]
     #[serde(default)]
     pub(crate) premise_rechecked_reason: Option<String>,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) test_confirmation: Option<String>,
     /// #1337: true when the daemon bounded `review_findings` on the /board
     /// wire (the collection carries a preview; the full body lives on
     /// `GET /assignment/{id}`).  Absent (→ false) on pre-#1337 daemons and
@@ -580,6 +584,10 @@ pub(crate) struct OpenIssue {
     /// #406: GitHub milestone title (e.g. "v0.5").  `None` when no milestone.
     #[serde(default)]
     pub(crate) milestone_title: Option<String>,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) state_reason: String,
     /// #2497: true when the `/board` wire bounded `body`. Set for every
     /// NON-EPIC issue, closed or open: `board_wire.bound_issue_row` drops a
     /// closed body to 0 chars (#1791) and an open one to its machine-parsed

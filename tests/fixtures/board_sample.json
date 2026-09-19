@@ -61,6 +61,7 @@
       "status": "running",
       "stop_reason": null,
       "test_base_sha": null,
+      "test_confirmation": null,
       "test_head_sha": null,
       "test_patch_id": null,
       "test_plan": null,
@@ -136,6 +137,7 @@
       "status": "done",
       "stop_reason": null,
       "test_base_sha": null,
+      "test_confirmation": null,
       "test_head_sha": null,
       "test_patch_id": null,
       "test_plan": null,
@@ -214,6 +216,7 @@
       "status": "done",
       "stop_reason": null,
       "test_base_sha": null,
+      "test_confirmation": null,
       "test_head_sha": null,
       "test_patch_id": null,
       "test_plan": {
@@ -322,6 +325,7 @@
       "number": 748,
       "repo_name": "claude-coordinator",
       "state": "open",
+      "state_reason": "",
       "synced_at": 1000001100.0,
       "title": "seam: golden /board fixture + CI round-trip parse test"
     }

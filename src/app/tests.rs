@@ -55922,8 +55922,8 @@ Milestone tracking issue.
         let driver = queue_driver(queue_fixture_json(), 200, 30);
         let screen = driver.screen();
         for title in [
-            "Issue", "Title", "State", "Machine", "#Work", "#Smoke", "#Review", "After", "Hold",
-            "Reason",
+            "Epic", "Issue", "Title", "State", "Machine", "#Work", "#Smoke", "#Review", "After",
+            "Hold", "Reason",
         ] {
             assert!(
                 screen.contains(title),
@@ -56944,9 +56944,11 @@ Milestone tracking issue.
                  "state": "waiting"}]"#,
         );
         let rows = app.queue_rows();
-        assert_eq!(rows[0].cells[2], "TITLE-FROM-ASSIGNMENTS");
+        // #99: Title shifted from cells[2] to cells[3] when the Epic column
+        // was inserted at index 1.
+        assert_eq!(rows[0].cells[3], "TITLE-FROM-ASSIGNMENTS");
         assert_eq!(
-            rows[1].cells[2], QUEUE_EMPTY_CELL,
+            rows[1].cells[3], QUEUE_EMPTY_CELL,
             "#1866: an unknown title must render as an em dash — a blank \
              cell and a failed paint look identical"
         );
@@ -58730,9 +58732,10 @@ Milestone tracking issue.
                  "position": 3, "state": "waiting"}
             ]"#,
         );
-        // Column 1 is "Issue" (`CoordApp::QUEUE_COLUMNS[1]`).
+        // Column 2 is "Issue" (`CoordApp::QUEUE_COLUMNS[2]`) — #99 shifted it
+        // one slot right when the Epic column was inserted at index 1.
         assert!(
-            app.queue_sort_by_column(1),
+            app.queue_sort_by_column(2),
             "sorting the Issue column must apply"
         );
         let repos: Vec<String> = app

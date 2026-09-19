@@ -1353,6 +1353,7 @@ mod pure_tests {
             body_len: None,
             // #1941: fields added to the generated wire DTO; not exercised by this test.
             synced_at: None,
+            state_reason: String::new(),
         }
     }
 
@@ -1443,6 +1444,7 @@ mod pure_tests {
             num_turns: None,
             premise_rechecked_at: None,
             premise_rechecked_reason: None,
+            test_confirmation: None,
         }
     }
 

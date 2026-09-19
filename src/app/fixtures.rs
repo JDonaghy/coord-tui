@@ -1041,6 +1041,7 @@ pub fn make_app_with_one_completed_issue() -> CoordApp {
         body_len: None,
         // #1941: fields added to the generated wire DTO; not exercised by this test.
         synced_at: None,
+        state_reason: String::new(),
     });
     app.rebuild_board_sidebar();
     app
@@ -1132,6 +1133,7 @@ pub fn make_assignment_typed(
         num_turns: None,
         premise_rechecked_at: None,
         premise_rechecked_reason: None,
+        test_confirmation: None,
     }
 }
 

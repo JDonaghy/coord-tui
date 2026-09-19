@@ -2774,6 +2774,7 @@ mod tests {
                 body_len: None,
                 // #1941: fields added to the generated wire DTO; not exercised by this test.
                 synced_at: None,
+                state_reason: String::new(),
             }],
             ..BoardData::default()
         };
@@ -2805,6 +2806,7 @@ mod tests {
                     body_len: None,
                     // #1941: fields added to the generated wire DTO; not exercised by this test.
                     synced_at: None,
+                    state_reason: String::new(),
                 })
                 .collect(),
             pipeline_repos: vec![(
@@ -2860,6 +2862,7 @@ mod tests {
                 body_len: None,
                 // #1941: fields added to the generated wire DTO; not exercised by this test.
                 synced_at: None,
+                state_reason: String::new(),
             }],
             pipeline_repos: vec![(
                 "claude-coordinator".to_string(),

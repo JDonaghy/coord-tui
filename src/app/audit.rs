@@ -519,14 +519,21 @@ impl CoordApp {
     /// `DataTableLayout::drag_divider` (quadraui) replaces all of that: it
     /// converts the incoming viewport-space `pos.x` to content space
     /// internally (`content_x`, quadraui#550), pins every column at its
-    /// currently-resolved width before adjusting, holds the dragged pair's
-    /// combined width constant (so it moves width **only** between the
-    /// divider's two columns — a visible behaviour change from before, see
-    /// the #70 PR description), clamps both halves against
-    /// `AUDIT_MIN_COLUMN_WIDTH`, and returns the input unchanged when
-    /// `col + 1 >= columns.len()` (no column to hand width back to on the
-    /// last divider). Same call shape `reports_update_resize_drag` already
-    /// uses.
+    /// currently-resolved width before adjusting, clamps both the dragged
+    /// column and `AUDIT_MIN_COLUMN_WIDTH`, and returns the input unchanged
+    /// when `col + 1 >= columns.len()` (no column to hand width back to on
+    /// the last divider). Same call shape `reports_update_resize_drag`
+    /// already uses.
+    ///
+    /// #104/quadraui#1031: **last-absorbs, not pair.** Widening/narrowing
+    /// `col` takes its slack from the table's *last* column (Summary), not
+    /// `col + 1` — every column strictly between the two keeps its
+    /// currently-resolved width untouched. This superseded #70's "moves
+    /// width only between the divider's two columns" pair invariant: once
+    /// Summary bottoms out at `AUDIT_MIN_COLUMN_WIDTH` the table is allowed
+    /// to overflow (and scroll horizontally) instead of refusing the drag.
+    /// See `DataTableLayout::drag_divider`'s own doc comment for the full
+    /// model and why it replaced the pair rule.
     ///
     /// Returns `true` (redraw needed) only while a drag is actually in
     /// progress against a table that is still on screen.

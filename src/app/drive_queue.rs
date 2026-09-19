@@ -1890,7 +1890,7 @@ impl CoordApp {
     }
 
     /// #68: continue an in-progress Queue-grid column-resize drag, storing
-    /// the new pair of widths into `queue_column_overrides`. Returns
+    /// the new column widths into `queue_column_overrides`. Returns
     /// whether anything changed (i.e. whether a redraw is warranted).
     ///
     /// Same shape as `reports_update_resize_drag`, not Audit's
@@ -1898,14 +1898,27 @@ impl CoordApp {
     /// main panel's origin, so the divider's viewport-space x is taken from
     /// the cached `(rect, layout)` in `queue_table_layout` — the same cache
     /// `queue_table_hit` reads — rather than a `main_b` argument. And
-    /// `drag_divider` does the pair-resize arithmetic (quadraui#521)
+    /// `drag_divider` does the resize arithmetic (quadraui#521/#1031)
     /// instead of Audit's local `pointer_x - column.x`, so an untouched
-    /// column can't be reshuffled mid-drag and the table's total content
-    /// width stays invariant.
+    /// intermediate column can't be reshuffled mid-drag.
     ///
-    /// #2043: this is also the only table in the crate that drives
-    /// `h_scroll` != 0. `drag_divider` reads `pointer_x` in *viewport*
-    /// space and `hit_test` is already h_scroll-aware (quadraui#550), so
+    /// #104/quadraui#1031: **last-absorbs, not pair.** Widening/narrowing
+    /// `col` takes its slack from the table's *last* column, not `col + 1`
+    /// — every column strictly between the two is frozen at its
+    /// currently-resolved width. Once the last column bottoms out at
+    /// `QUEUE_MIN_COLUMN_WIDTH` the table is allowed to overflow instead of
+    /// refusing the drag, which is new territory for THIS table
+    /// specifically: Queue is already the one grid that drives
+    /// `queue_h_scroll` != 0 (#2043), so a divider drag can now be the
+    /// thing that *creates* overflow mid-gesture, not just something that
+    /// reads an already-overflowing layout. `drag_divider` itself derives
+    /// `content_width`/`h_scrolling` from the resolved columns
+    /// (`DataTable::layout`), so no separate wiring is needed here for that
+    /// — see `queue_h_scroll_recreated_by_a_divider_drag` for the
+    /// black-box proof.
+    ///
+    /// #2043: `drag_divider` reads `pointer_x` in *viewport* space and
+    /// `hit_test` is already h_scroll-aware (quadraui#550), so
     /// `pos.x - rect.x` is passed through unadjusted — no separate
     /// h_scroll correction needed, and `queue_h_scroll` itself is never
     /// touched by a resize.

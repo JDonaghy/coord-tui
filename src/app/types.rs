@@ -112,6 +112,25 @@ pub(crate) struct TableState {
     /// (started by a `MouseDown` on a `DataTableHit::HeaderDivider`,
     /// released on `MouseUp`), or `None` when no resize is in progress.
     pub(crate) resize_col: Option<usize>,
+    /// The table layout as it stood at the *start* of the in-progress
+    /// resize gesture (lazily captured by [`Self::update_resize_drag`] the
+    /// first time it runs with `resize_col` set, cleared the moment
+    /// `resize_col` goes back to `None`). #104/quadraui#1031:
+    /// `DataTableLayout::drag_divider` computes the last column's new width
+    /// as `pair - target`, where `pair` comes from `self.columns[col].width
+    /// + self.columns[last].width` on the layout it's called against — that
+    /// sum is only the *true* pre-drag pair the first time it's called.
+    /// `update_resize_drag` re-fetches `layout` (above) from the last
+    /// paint, and once the last column has bottomed out and the table has
+    /// overflowed, that cache already reflects this same gesture's own
+    /// prior output — feeding it back in loses how far past the floor the
+    /// drag went, so retracing the drag would not return the last column to
+    /// its original width. Anchoring the `pair` arithmetic to this snapshot
+    /// instead (mirrors quadraui's own `data_table_app.rs`'s `resize_base`)
+    /// keeps every column's pre-drag width — including the last one's —
+    /// fixed for the whole gesture, which is what makes the drag reversible
+    /// by construction.
+    pub(crate) resize_base: Option<DataTableLayout>,
     /// First visible row.
     pub(crate) scroll: usize,
     /// Horizontal scroll offset, in the same units as
@@ -141,28 +160,60 @@ impl TableState {
     }
 
     /// Continue an in-progress column-resize drag (`resize_col` set by the
-    /// caller's `MouseDown` handling), storing the new pair of widths into
+    /// caller's `MouseDown` handling), storing the new column widths into
     /// `column_overrides`. Returns whether anything changed — the caller's
     /// redraw signal. A no-op when no drag is in progress, no table is on
     /// screen, or the cached layout's column count doesn't match
     /// `column_overrides`' (a stale cache from a differently-shaped table —
     /// see `reports_active_overrides` for the one table that can hit this).
+    ///
+    /// #104/quadraui#1031: **last-absorbs, not pair.** Widening/narrowing
+    /// `col` takes its slack from the table's *last* column, not `col + 1`
+    /// — every column strictly between the two keeps its currently-resolved
+    /// width. Once the last column bottoms out at `min_width` the table is
+    /// allowed to overflow (and scroll horizontally) instead of refusing
+    /// the drag; dragging back the other way reclaims that overflow before
+    /// the dragged column itself narrows. See `DataTableLayout::drag_divider`'s
+    /// doc comment (quadraui) for the full model and why it replaced #521's
+    /// pair invariant.
+    ///
+    /// Called on every `MouseMoved` while a drag may be in progress (not
+    /// just while one is), so `resize_base` is captured lazily here, on the
+    /// first call after `resize_col` goes from `None` to `Some` — there is
+    /// no separate "drag started" hook to snapshot from. It is cleared as
+    /// soon as `resize_col` reads back `None` (the drag ended, via
+    /// `MouseUp`, elsewhere), so the next drag starts from a fresh
+    /// snapshot rather than the previous gesture's.
     pub(crate) fn update_resize_drag(&mut self, pos: Point, min_width: f32) -> bool {
         let Some(col) = self.resize_col else {
+            self.resize_base = None;
             return false;
         };
-        let next = {
+        if self.resize_base.is_none() {
             let cache = self.layout.borrow();
-            let Some((rect, layout)) = cache.as_ref() else {
+            let Some((_, layout)) = cache.as_ref() else {
                 return false;
             };
+            self.resize_base = Some(layout.clone());
+        }
+        let next = {
+            let cache = self.layout.borrow();
+            let Some((rect, _)) = cache.as_ref() else {
+                return false;
+            };
+            // `resize_base` was just populated above if it wasn't already
+            // set, so this is always `Some` here.
+            let base = self
+                .resize_base
+                .as_ref()
+                .expect("resize_base populated above");
             // A divider only exists between two columns; a `col` past the
             // end means the cached layout is from a differently-shaped
             // table.
-            if col + 1 >= layout.columns.len() {
+            if col + 1 >= base.columns.len() {
                 return false;
             }
-            layout.drag_divider(&self.column_overrides, col, pos.x - rect.x, min_width)
+            base.drag_divider(&self.column_overrides, col, pos.x - rect.x, min_width)
         };
         if next.len() != self.column_overrides.len() {
             return false;

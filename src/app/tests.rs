@@ -56116,6 +56116,11 @@ Milestone tracking issue.
     /// reason that outlived the CI failure it described by ~3 hours while
     /// the real, later blocker went unmentioned. The Queue panel must show
     /// the reason's age so it can never read as a live diagnosis.
+    ///
+    /// #101: the age used to be a suffix glued onto the `Reason` cell
+    /// itself (`"... (3h ago)"`); it now lives in its own `Age` column, so
+    /// this asserts the two are on screen independently rather than as one
+    /// concatenated string.
     #[test]
     fn tuidriver_queue_panel_age_stamps_a_stale_reason() {
         let now = std::time::SystemTime::now()
@@ -56141,15 +56146,20 @@ Milestone tracking issue.
             "the reason text itself must still be legible:\n{screen}"
         );
         assert!(
-            screen.contains("(3h ago)"),
-            "#2133: a stale `last_reason` must carry its age so it is never \
-             mistaken for a current diagnosis:\n{screen}"
+            screen.contains("3h ago"),
+            "#2133/#101: a stale `last_reason` must carry its age — now in \
+             its own `Age` column — so it is never mistaken for a current \
+             diagnosis:\n{screen}"
         );
     }
 
     /// A `reason_at`-less row (predates #2133's migration, or a fixture that
-    /// never set it) renders the bare reason — no fabricated age, and no
-    /// crash on the missing field.
+    /// never set it) renders the bare reason and a distinct `Age` marker —
+    /// no fabricated duration, and no crash on the missing field.
+    ///
+    /// #101: that marker must also read as visibly different from a fresh
+    /// row's duration (e.g. `"3s ago"`) — #2133's whole point was that
+    /// "unknown" must never look like "current".
     #[test]
     fn tuidriver_queue_panel_omits_age_when_reason_at_is_unknown() {
         let driver = queue_driver(queue_fixture_json(), 160, 30);
@@ -56160,8 +56170,193 @@ Milestone tracking issue.
         );
         assert!(
             !screen.contains("REASON-BLOCKED ("),
-            "#2133: no `reason_at` means no age can be computed — the cell \
-             must not invent one:\n{screen}"
+            "#101: the `Reason` cell must never grow a parenthesised suffix \
+             again — that's the exact truncation trap this issue closes:\n\
+             {screen}"
+        );
+        assert!(
+            screen.contains("unknown"),
+            "#101: a reason with no `reason_at` must show a distinct \
+             'unknown' age marker, not a bare dash or a fabricated \
+             duration:\n{screen}"
+        );
+    }
+
+    /// #101: the real, 72-character reason quoted in the issue —
+    /// `repo vimcode at its limit (1/1)...` — was the exact string whose
+    /// trailing `(43m ago)` suffix got right-truncated away when the age
+    /// lived inside `Reason` (`Flex(4.0)`, the widest AND last column). At
+    /// a realistic terminal width the reason itself still truncates (it's
+    /// long — that's the point), but the age must now survive in its own
+    /// `Age` column regardless.
+    #[test]
+    fn tuidriver_queue_panel_age_survives_truncated_long_reason() {
+        let long_reason =
+            "repo vimcode at its limit (1/1) — deferring so a different repo can launch";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        // 43 minutes ago — the exact staleness from the issue's incident.
+        let reason_at = now - 43.0 * 60.0;
+        let fixture = format!(
+            r#"[
+                {{"repo_name": "myrepo", "issue_number": 706, "position": 0,
+                 "state": "blocked", "attempts": 1,
+                 "last_reason": {long_reason:?},
+                 "reason_at": {reason_at}}}
+            ]"#
+        );
+        let driver = queue_driver(&fixture, QUEUE_WIDE_COLS, 30);
+        let screen = driver.screen();
+        assert!(
+            !screen.contains(long_reason),
+            "sanity: at a realistic terminal width this 72-char reason must \
+             actually be long enough to truncate — otherwise this test \
+             isn't exercising truncation at all:\n{screen}"
+        );
+        assert!(
+            screen.contains("repo vimcode at its"),
+            "the reason's visible prefix must still render (only the tail \
+             should be lost to truncation):\n{screen}"
+        );
+        assert!(
+            screen.contains("43m ago"),
+            "#101: the staleness stamp must survive even though the reason \
+             text it used to be glued onto was truncated away:\n{screen}"
+        );
+    }
+
+    /// #101 acceptance: a fresh row and a stale row sharing the exact same
+    /// long `last_reason` text must still render distinguishably — the
+    /// `Age` column, not the `Reason` text, is what tells them apart.
+    #[test]
+    fn tuidriver_queue_panel_fresh_and_stale_same_reason_are_distinguishable() {
+        let shared_reason =
+            "repo vimcode at its limit (1/1) — deferring so a different repo can launch";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let fresh_at = now - 5.0; // comfortably inside the "Ns ago" bucket
+        let stale_at = now - 43.0 * 60.0;
+        let fixture = format!(
+            r#"[
+                {{"repo_name": "myrepo", "issue_number": 710, "position": 0,
+                 "state": "blocked", "attempts": 1,
+                 "last_reason": {shared_reason:?}, "reason_at": {fresh_at}}},
+                {{"repo_name": "myrepo", "issue_number": 711, "position": 1,
+                 "state": "blocked", "attempts": 1,
+                 "last_reason": {shared_reason:?}, "reason_at": {stale_at}}}
+            ]"#
+        );
+        let driver = queue_driver(&fixture, QUEUE_WIDE_COLS, 30);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("5s ago"),
+            "the fresh row's age must render:\n{screen}"
+        );
+        assert!(
+            screen.contains("43m ago"),
+            "the stale row's age must render:\n{screen}"
+        );
+    }
+
+    /// #101 acceptance: a row with no `reason_at` at all must be visually
+    /// distinct from a fresh row — #2133's whole point was that "unknown"
+    /// must never be mistaken for "current".
+    #[test]
+    fn tuidriver_queue_panel_unknown_age_differs_from_fresh_age() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let fresh_at = now - 5.0;
+        let fixture = format!(
+            r#"[
+                {{"repo_name": "myrepo", "issue_number": 720, "position": 0,
+                 "state": "blocked", "attempts": 1,
+                 "last_reason": "unstamped legacy reason"}},
+                {{"repo_name": "myrepo", "issue_number": 721, "position": 1,
+                 "state": "blocked", "attempts": 1,
+                 "last_reason": "fresh reason", "reason_at": {fresh_at}}}
+            ]"#
+        );
+        let driver = queue_driver(&fixture, QUEUE_WIDE_COLS, 30);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("unknown"),
+            "the `reason_at`-less row must show the distinct 'unknown' \
+             marker:\n{screen}"
+        );
+        assert!(
+            screen.contains("5s ago"),
+            "the fresh row's real age must still render:\n{screen}"
+        );
+    }
+
+    /// #101 regression pin: the age marker must survive at the narrowest
+    /// width the grid allows before #2043's `min_total_width` floor
+    /// (`CoordApp::QUEUE_MIN_WIDTH_CHARS`) gives up on squeezing and starts
+    /// scrolling horizontally instead. Found empirically by shrinking from
+    /// the known no-scroll width (`QUEUE_WIDE_COLS`) one column at a time,
+    /// rather than re-deriving the shell's sidebar/activity-bar chrome
+    /// width by hand — that boundary IS "the narrowest width the grid
+    /// allows" the issue's acceptance bar asks for.
+    #[test]
+    fn tuidriver_queue_panel_age_survives_at_narrowest_pre_scroll_width() {
+        let long_reason =
+            "repo vimcode at its limit (1/1) — deferring so a different repo can launch";
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let reason_at = now - 43.0 * 60.0;
+        let fixture = format!(
+            r#"[
+                {{"repo_name": "myrepo", "issue_number": 730, "position": 0,
+                 "state": "blocked", "attempts": 1,
+                 "last_reason": {long_reason:?},
+                 "reason_at": {reason_at}}}
+            ]"#
+        );
+
+        let is_h_scrolling = |w: u16| -> bool {
+            let driver = queue_driver(&fixture, w, 30);
+            let screen = driver.screen();
+            let (_sep_x, sep_y) = find_queue_separator(&driver);
+            hscrollbar_track_in_row(&screen, 0, sep_y as usize).is_some()
+        };
+
+        assert!(
+            !is_h_scrolling(QUEUE_WIDE_COLS),
+            "sanity: {QUEUE_WIDE_COLS} columns is the crate's own \
+             documented no-scroll width — it must not already be scrolling"
+        );
+        let mut narrowest_no_scroll = QUEUE_WIDE_COLS;
+        let mut w = QUEUE_WIDE_COLS;
+        while w > QUEUE_NARROW_COLS {
+            w -= 1;
+            if is_h_scrolling(w) {
+                break;
+            }
+            narrowest_no_scroll = w;
+        }
+        assert!(
+            narrowest_no_scroll > QUEUE_NARROW_COLS,
+            "sanity: the scan must find a boundary strictly between the \
+             crate's own documented narrow (scrolling) and wide \
+             (non-scrolling) widths"
+        );
+
+        let driver = queue_driver(&fixture, narrowest_no_scroll, 30);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("43m ago"),
+            "#101: the age marker must still be on screen at \
+             {narrowest_no_scroll} columns — the narrowest width the grid \
+             allows before it would otherwise switch to horizontal \
+             scrolling:\n{screen}"
         );
     }
 

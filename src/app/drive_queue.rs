@@ -1075,22 +1075,43 @@ impl CoordApp {
     /// heaviest weight on purpose: on a stalled entry `last_reason` is the
     /// whole story, and a column too narrow to read it turns the panel back
     /// into "go and run the CLI".
-    pub(crate) const QUEUE_COLUMNS: &'static [(&'static str, f32, ColumnAlign)] = &[
-        ("#", 0.5, ColumnAlign::Right),
+    ///
+    /// `Age` (#101) is `Fixed`, not `Flex` — deliberately exempt from the
+    /// squeeze the rest of the row takes as the grid narrows. Before #101 the
+    /// staleness stamp `queue_reason_cell` computes was a trailing suffix
+    /// glued onto `Reason` (`Flex(4.0)`, the widest AND last column), so it
+    /// was the first text dropped the moment a reason was long — which,
+    /// per #101's own report, is the common case, not the edge case. Giving
+    /// `Age` its own reserved width means the two truncate independently: a
+    /// long `Reason` can still lose its tail to `…`, but the age sitting
+    /// next to it never does.
+    pub(crate) const QUEUE_COLUMNS: &'static [(&'static str, ColumnWidth, ColumnAlign)] = &[
+        ("#", ColumnWidth::Flex(0.5), ColumnAlign::Right),
         // #99: the epic (tracking issue) this row's issue is a child of, or
         // blank when it belongs to no epic — see `queue_row`'s cell
         // construction for why this is deliberately never `or_dash`'d.
-        ("Epic", 1.6, ColumnAlign::Left),
-        ("Issue", 1.6, ColumnAlign::Left),
-        ("Title", 3.0, ColumnAlign::Left),
-        ("State", 1.0, ColumnAlign::Left),
-        ("Machine", 1.2, ColumnAlign::Left),
-        ("#Work", 0.7, ColumnAlign::Right),
-        ("#Smoke", 0.8, ColumnAlign::Right),
-        ("#Review", 0.9, ColumnAlign::Right),
-        ("After", 1.4, ColumnAlign::Left),
-        ("Hold", 0.9, ColumnAlign::Left),
-        ("Reason", 4.0, ColumnAlign::Left),
+        ("Epic", ColumnWidth::Flex(1.6), ColumnAlign::Left),
+        ("Issue", ColumnWidth::Flex(1.6), ColumnAlign::Left),
+        ("Title", ColumnWidth::Flex(3.0), ColumnAlign::Left),
+        // #101: bumped from 1.0 — `Age`'s new `Fixed` width (below) comes
+        // out of the flex pool every OTHER flex column draws from, and at
+        // 1.0 the resulting sliver was just enough to round `State`'s own
+        // column below the width `"failed"` (the longest state word) needs,
+        // truncating it to `"fail…"`. The bump restores that headroom
+        // without touching `Reason`'s own weight, which stays at its
+        // pre-#101 value on purpose (see `Reason`'s entry below).
+        ("State", ColumnWidth::Flex(1.3), ColumnAlign::Left),
+        ("Machine", ColumnWidth::Flex(1.2), ColumnAlign::Left),
+        ("#Work", ColumnWidth::Flex(0.7), ColumnAlign::Right),
+        ("#Smoke", ColumnWidth::Flex(0.8), ColumnAlign::Right),
+        ("#Review", ColumnWidth::Flex(0.9), ColumnAlign::Right),
+        ("After", ColumnWidth::Flex(1.4), ColumnAlign::Left),
+        ("Hold", ColumnWidth::Flex(0.9), ColumnAlign::Left),
+        ("Reason", ColumnWidth::Flex(4.0), ColumnAlign::Left),
+        // #101: 9 chars fits the longest realistic `format_age` output
+        // ("999d ago", 8) plus one to breathe — see `queue_reason_age_cell`'s
+        // doc comment for why this is its own column instead of a suffix.
+        ("Age", ColumnWidth::Fixed(9.0), ColumnAlign::Left),
     ];
 
     /// #2043: the Queue grid never squeezes its columns below this many
@@ -1131,9 +1152,9 @@ impl CoordApp {
     fn queue_columns() -> Vec<Column> {
         Self::QUEUE_COLUMNS
             .iter()
-            .map(|(title, weight, align)| Column {
+            .map(|(title, width, align)| Column {
                 title: (*title).to_string(),
-                width: ColumnWidth::Flex(*weight),
+                width: *width,
                 align: *align,
             })
             .collect()
@@ -1217,6 +1238,13 @@ impl CoordApp {
                 ),
                 queue_hold_cell(e),
                 or_dash(queue_reason_cell(e)),
+                // #101: deliberately NOT `or_dash` — `queue_reason_age_cell`
+                // already returns `QUEUE_EMPTY_CELL` for "no reason at all"
+                // and a different, non-dash string ("unknown") for "reason
+                // present but unstamped", so wrapping it here would collapse
+                // that second case into the first and erase the exact
+                // distinction #101 exists to preserve.
+                queue_reason_age_cell(e),
             ],
         }
     }
@@ -2412,23 +2440,42 @@ fn queue_hold_cell(e: &BoardDriveQueueEntry) -> String {
     }
 }
 
-/// The `Reason` cell for one entry — `last_reason` age-stamped with
-/// `reason_at` (#2133).
+/// The `Reason` cell for one entry — `last_reason` verbatim.
 ///
-/// `last_reason` is a snapshot the tick (or a guard) wrote the instant it
-/// observed the condition, never re-validated afterwards. Rendering it bare
-/// lets an hours-old, no-longer-true observation read as a live diagnosis —
-/// the #2104 incident this closes: `checks_failed` was still shown roughly
-/// three hours after the named checks had gone green, while the actual
-/// blocker (a later `request-changes` review) was nowhere in the panel.
-/// Appending the age doesn't make the reason current, but it stops it from
-/// being silently mistaken for current. No suffix when `reason_at` is
-/// `None` — a row predating #2133's migration, or built without going
-/// through `update_drive_queue_entry` — rather than guessing an age it
-/// doesn't have.
+/// #2133 originally age-stamped this cell by appending `(Nm ago)` as a
+/// trailing suffix. #101 splits that stamp out into its own `Age` column
+/// instead (see `queue_reason_age_cell` below): `Reason` is `Flex(4.0)`, the
+/// widest AND last column in [`CoordApp::QUEUE_COLUMNS`], so a suffix living
+/// inside it was the first text a long reason's right-truncation dropped —
+/// silently discarding exactly the marker #2133 added to stop a stale reason
+/// from being mistaken for current (the #2104 incident: `checks_failed`
+/// still shown ~3h after the named checks had gone green). See
+/// `queue_reason_age_cell` for where the stamp lives now.
 fn queue_reason_cell(e: &BoardDriveQueueEntry) -> String {
+    e.last_reason.clone()
+}
+
+/// The `Age` cell for one entry (#101) — how long ago `last_reason` was
+/// observed, rendered in its own column so it can never be truncated away
+/// along with `Reason`'s text (see `queue_reason_cell`'s doc comment for the
+/// truncation bug this replaces).
+///
+/// Three distinct outputs, deliberately never conflated:
+/// - `last_reason` empty → [`QUEUE_EMPTY_CELL`] — there is no reason, so
+///   there is nothing to age.
+/// - `last_reason` set, `reason_at` unusable — either `None` (a row
+///   predating #2133's migration, or built without going through
+///   `update_drive_queue_entry`) or a non-positive timestamp `format_age`
+///   itself treats as absent → `"unknown"`. Rendering no age here would put
+///   a bare dash next to a real reason, indistinguishable from the "no
+///   reason at all" case above; rendering a duration would guess an age the
+///   entry doesn't have. `"unknown"` is neither, and — per #101's acceptance
+///   bar — reads as visibly different from both a dash and a fresh
+///   duration, so it can never be mistaken for "current".
+/// - otherwise → `format_age`'s `"Nm ago"`-style string.
+fn queue_reason_age_cell(e: &BoardDriveQueueEntry) -> String {
     if e.last_reason.is_empty() {
-        return String::new();
+        return QUEUE_EMPTY_CELL.to_string();
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2436,9 +2483,9 @@ fn queue_reason_cell(e: &BoardDriveQueueEntry) -> String {
         .as_secs_f64();
     let age = format_age(e.reason_at, now);
     if age.is_empty() {
-        e.last_reason.clone()
+        "unknown".to_string()
     } else {
-        format!("{} ({})", e.last_reason, age)
+        age
     }
 }
 

@@ -2940,7 +2940,7 @@ pub struct CoordApp {
     /// that isn't on screen.
     queue_table_layout: std::cell::RefCell<Option<(Rect, DataTableLayout)>>,
     /// #68: per-column width overrides from a user's header-divider drag on
-    /// the Queue `DataTable`. Always length-`QUEUE_COLUMNS.len()` (11),
+    /// the Queue `DataTable`. Always length-`QUEUE_COLUMNS.len()` (13),
     /// mirroring `audit_column_overrides`'s flat-`Vec` shape rather than
     /// Reports' keyed one — the Queue grid's columns are a fixed const set
     /// (`QUEUE_COLUMNS`), so a bare `Vec<Option<f32>>` can never mean the

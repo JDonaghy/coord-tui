@@ -37563,12 +37563,13 @@
 
     /// #72: the Completed grid is the proof the `TableState` extraction
     /// actually works — before this issue it was the one `DataTable` in the
-    /// crate with no column resize at all. Same drag-only-moves-its-own-pair
-    /// invariant `tuidriver_queue_divider_drag_resizes_only_its_own_pair` /
-    /// `reports_divider_drag_resizes_only_its_own_pair` assert, reusing
-    /// their exact helpers — the whole point of sharing `TableState` is that
-    /// a fourth table's resize needs no fourth copy of this test's logic
-    /// either, just a fourth fixture.
+    /// crate with no column resize at all. Same last-absorbs invariant
+    /// `tuidriver_queue_divider_drag_resizes_only_its_own_pair` /
+    /// `reports_divider_drag_resizes_only_its_own_pair` assert (#104:
+    /// updated from #521's pair model to quadraui#1031's last-absorbs
+    /// model), reusing their exact helpers — the whole point of sharing
+    /// `TableState` is that a fourth table's resize needs no fourth copy of
+    /// this test's logic either, just a fourth fixture.
     #[test]
     fn tuidriver_completed_divider_drag_resizes_only_its_own_pair() {
         use quadraui::tui::testing::driver_with_shell;
@@ -37598,22 +37599,102 @@
             after[1],
             driver.screen()
         );
-        // The pair-only invariant: everything after the dragged pair is
-        // untouched.
-        assert_eq!(
-            before[2], after[2],
-            "#72: a divider drag must move width between its own two \
-             columns only — STARTED (one column right of the drag) moved \
-             from {} to {}:\n{}",
+        // #104: last-absorbs, not pair. TITLE and STARTED (the two columns
+        // strictly between the drag and the table's last column) keep
+        // their own WIDTH, but neither is exempt from shifting — each
+        // sits right after a column that just grew, so both move right by
+        // the same ~3 cells. Only the table's actual last column (ENDED)
+        // absorbs the slack by shrinking, which is why ENDED's position
+        // shifts by ~3 too but the grid's total content width — the sum
+        // ENDED's start + width — is unaffected.
+        assert!(
+            (after[2] - (before[2] + 3.0)).abs() <= 1.0,
+            "#104: STARTED's own width is untouched by this drag, but it \
+             must shift by the same ~3 cells TITLE grew by — STARTED \
+             moved from {} to {}:\n{}",
             before[2],
             after[2],
             driver.screen()
         );
-        assert_eq!(
-            before[3], after[3],
-            "#72: ENDED (two columns right of the drag) must also be \
-             untouched:\n{}",
+        assert!(
+            (after[3] - (before[3] + 3.0)).abs() <= 1.0,
+            "#104: ENDED (the table's actual last column) is the one that \
+             absorbs the slack — its start position shifts by the same ~3 \
+             cells as every column before it, while its WIDTH shrinks by \
+             ~3 to keep the grid's total content width unchanged. ENDED \
+             moved from {} to {}:\n{}",
+            before[3],
+            after[3],
             driver.screen()
+        );
+    }
+
+    /// #104/quadraui#1031: the overflow-then-retrace reversibility case.
+    /// `TableState::update_resize_drag` re-derives `layout.drag_divider`'s
+    /// `pair` from the last-painted layout on every `MouseMoved` — once
+    /// the last column (`ENDED`) has bottomed out and the table has
+    /// overflowed, that cache already reflects THIS gesture's own prior
+    /// output. Feeding it back in loses how far past the floor the drag
+    /// went, so retracing to the original pointer position would leave
+    /// `ENDED` (and therefore the whole table) at the wrong width — this
+    /// is exactly the failure mode `resize_base` (`TableState`'s
+    /// drag-start snapshot, mirroring quadraui's own
+    /// `data_table_app.rs`) exists to prevent.
+    ///
+    /// Drives the drag as two separate `mouse_move` calls (not one big
+    /// jump, unlike this file's other divider tests) — `TuiDriver::
+    /// dispatch` repaints after each one when the handler returns
+    /// `Redraw`, so this is what actually exercises the cache re-fetch a
+    /// single-move test cannot reach.
+    #[test]
+    fn tuidriver_completed_divider_drag_overflow_is_reversible() {
+        use quadraui::tui::testing::driver_with_shell;
+        let mut driver = driver_with_shell(
+            make_completed_app(),
+            CoordApp::shell_config(),
+            REPORTS_RESIZE_COLS,
+            REPORTS_RESIZE_ROWS,
+        );
+        let before = reports_header_xs(&driver, &["ISSUE", "TITLE", "STARTED", "ENDED"]);
+        let (title_x, header_y) = driver
+            .find("TITLE")
+            .unwrap_or_else(|| panic!("TITLE column header must render:\n{}", driver.screen()));
+        let divider_x = title_x - 0.5;
+
+        driver.mouse_down(divider_x, header_y);
+        // Far enough right to run ISSUE's growth past ENDED's floor and
+        // well into overflow — see the doc comment above for why this must
+        // be a *separate* `mouse_move` from the retrace below.
+        driver.mouse_move(divider_x + 60.0, header_y);
+        let mid_screen = driver.screen();
+        assert!(
+            mid_screen.contains('▄') || mid_screen.contains('▁'),
+            "#104: dragging ISSUE wide enough to bottom out ENDED must \
+             overflow the table into its own horizontal scrollbar instead \
+             of refusing the drag:\n{mid_screen}"
+        );
+
+        // Retrace to the exact pointer position the drag started at.
+        driver.mouse_move(divider_x, header_y);
+        driver.mouse_up(divider_x, header_y);
+        driver.render();
+
+        let after = reports_header_xs(&driver, &["ISSUE", "TITLE", "STARTED", "ENDED"]);
+        assert!(
+            before
+                .iter()
+                .zip(&after)
+                .all(|(b, a)| (a - b).abs() <= 1.0),
+            "#104: dragging out past the overflow point and back to the \
+             original pointer position must restore every column to its \
+             original width — before {before:?}, after {after:?}:\n{}",
+            driver.screen()
+        );
+        let end_screen = driver.screen();
+        assert!(
+            !end_screen.contains('▄') && !end_screen.contains('▁'),
+            "#104: retracing the drag all the way back must also clear the \
+             overflow-induced horizontal scrollbar:\n{end_screen}"
         );
     }
 
@@ -50186,17 +50267,14 @@ Milestone tracking issue.
         driver.mouse_up(divider_x + 4.0, header_y);
         driver.render();
 
-        // #70: post-fix, a divider drag moves width *only* between the two
-        // columns it separates (`DataTableLayout::drag_divider`), pinning
-        // Category's combined width with Time constant rather than letting
-        // Category sit untouched while Flex columns elsewhere redistribute
-        // (the pre-#70 behaviour). So widening Time by 4 shrinks Category
-        // by 4 too — from `Fixed(9)` to 5 — which is now too narrow to show
-        // the full 8-character "Category" title. Search for the truncated
-        // "Cate" prefix instead; it still resolves to the header row (the
-        // first on-screen occurrence) rather than the "Category: all"
-        // filter line lower in the sidebar.
-        let (category_x_after, _) = driver.find("Cate").unwrap_or_else(|| {
+        // #104/quadraui#1031 last-absorbs: a divider drag takes its slack
+        // from the table's LAST column (Summary), not the dragged column's
+        // immediate neighbour — Category stays `Fixed(9)`, frozen exactly
+        // at its pre-drag width, only its on-screen position shifts right
+        // by however much Time grew. Its full 8-character title still fits
+        // (unlike the old #70 pair model, which shrank Category by the
+        // same 4 cells and truncated it to "Cate").
+        let (category_x_after, _) = driver.find("Category").unwrap_or_else(|| {
             panic!(
                 "Category column header not rendered after resize:\n{}",
                 driver.screen()
@@ -50210,19 +50288,25 @@ Milestone tracking issue.
             driver.screen()
         );
 
-        // #70 acceptance: a column on the far side of the dragged pair
-        // (Actor, two columns over) must keep its resolved position —
-        // the pair's *combined* width is conserved, so nothing past
-        // Category shifts.
+        // #104: Actor (two columns over, and every column between the
+        // dragged divider and the last one) is frozen at its own pre-drag
+        // WIDTH, but it is not exempt from shifting — it sits right after
+        // Category, which just moved right by 4, so Actor's start moves
+        // right by 4 too. Under the old pair model this stayed put because
+        // Category *shrank* to absorb Time's growth; under last-absorbs
+        // nothing shrinks until the table's last column (Summary), so the
+        // shift propagates through every untouched column in between.
         let (actor_x_after, _) = driver.find("Actor").unwrap_or_else(|| {
             panic!("Actor column header not rendered after resize:\n{}", driver.screen())
         });
         assert_eq!(
             actor_x_after,
-            time_x + 11.0 + 9.0,
-            "#70: Actor (untouched by this drag) must stay at Time+Category's \
-             original combined width — the dragged pair's combined width is \
-             conserved, not redistributed among later columns:\n{}",
+            time_x + 11.0 + 9.0 + 4.0,
+            "#104: Actor's own width is untouched by this drag, but its \
+             position must shift by the same 4 cells Time grew by — only \
+             the table's last column (Summary) absorbs slack, so nothing \
+             before it stays put the way the old pair model kept Actor \
+             fixed:\n{}",
             driver.screen()
         );
     }
@@ -50350,36 +50434,61 @@ Milestone tracking issue.
 
     #[test]
     fn audit_resize_drag_preserves_total_content_width() {
-        // #70 acceptance: "the table's total content width is unchanged by
-        // a resize" — compare `content_width` before/after re-resolving
-        // the layout with the drag's resulting overrides applied.
+        // #104/quadraui#1031: as long as the drag doesn't bottom out the
+        // table's LAST column, the total content width is still preserved
+        // (last-absorbs redistributes between the dragged column and the
+        // last column, same as the old pair model would have, just with a
+        // different partner) — but the intermediate column between them
+        // (Repo#Issue) must be frozen at its pre-drag width, not resized,
+        // and the last column (Summary), not Repo#Issue, is the one that
+        // actually changed.
         let mut app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
         let n_cols = CoordApp::audit_columns().len();
         let (rect, layout) = audit_table_layout_for_test(vec![None; n_cols]);
         let content_width_before = layout.content_width;
+        let repo_issue_width_before = layout.columns[3].width;
+        let summary_width_before = layout.columns[4].width;
         *app.audit_table_layout.borrow_mut() = Some((rect, layout));
 
         app.audit_resize_col = Some(2); // Actor/Repo#Issue divider
         assert!(app.audit_update_resize_drag(Point::new(30.0, 0.0)));
 
-        let (rect2, layout2) = audit_table_layout_for_test(app.audit_column_overrides.clone());
+        let overrides = app.audit_column_overrides.clone();
+        assert_eq!(
+            overrides[3],
+            Some(repo_issue_width_before),
+            "#104: Repo#Issue (the dragged divider's immediate neighbour) \
+             must be frozen at its pre-drag width — last-absorbs takes \
+             slack from the table's last column instead: {overrides:?}"
+        );
+        assert_ne!(
+            overrides[4],
+            Some(summary_width_before),
+            "#104: the table's last column (Summary) must absorb the \
+             slack instead of the dragged column's immediate neighbour: \
+             {overrides:?}"
+        );
+
+        let (rect2, layout2) = audit_table_layout_for_test(overrides);
         *app.audit_table_layout.borrow_mut() = Some((rect2, layout2.clone()));
         assert_eq!(
             content_width_before, layout2.content_width,
-            "#70: a column resize must never change the table's total \
-             content width — only redistribute it between the dragged pair"
+            "#104: a column resize that doesn't bottom out the last \
+             column must still leave the table's total content width \
+             unchanged — only which column absorbed the slack changed"
         );
     }
 
     #[test]
     fn audit_resize_drag_neither_half_collapses_below_minimum() {
-        // #70 acceptance: "neither half of the dragged pair collapses
-        // below `AUDIT_MIN_COLUMN_WIDTH`" — drag far enough past either
-        // end that a naive (unclamped) computation would go negative or
-        // zero, and confirm both halves stay at/above the floor.
+        // #104/quadraui#1031: the floor guarantee still holds, but "neither
+        // half" is now the dragged column and the table's LAST column
+        // (Summary) — not the dragged column's immediate neighbour
+        // (Category), which last-absorbs never touches at all.
         let mut app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
         let n_cols = CoordApp::audit_columns().len();
         let (rect, layout) = audit_table_layout_for_test(vec![None; n_cols]);
+        let category_width_before = layout.columns[1].width;
         *app.audit_table_layout.borrow_mut() = Some((rect, layout));
 
         app.audit_resize_col = Some(0);
@@ -50392,9 +50501,12 @@ Milestone tracking issue.
             Some(CoordApp::AUDIT_MIN_COLUMN_WIDTH),
             "column 0 must clamp at the minimum, not go negative: {overrides:?}"
         );
-        assert!(
-            overrides[1].unwrap_or(0.0) >= CoordApp::AUDIT_MIN_COLUMN_WIDTH,
-            "column 1 must not be squeezed below the minimum either: {overrides:?}"
+        assert_eq!(
+            overrides[1],
+            Some(category_width_before),
+            "#104: Category (two columns from the last one, and never the \
+             slack recipient) must be frozen at its pre-drag width, not \
+             squeezed: {overrides:?}"
         );
 
         // Refresh the cached layout from the new overrides (mirrors a
@@ -50409,9 +50521,17 @@ Milestone tracking issue.
             "column 0 must not be squeezed below the minimum: {overrides:?}"
         );
         assert_eq!(
-            overrides[1],
+            overrides[4],
             Some(CoordApp::AUDIT_MIN_COLUMN_WIDTH),
-            "column 1 must clamp at the minimum, not go negative: {overrides:?}"
+            "#104: the table's LAST column (Summary) must absorb the slack \
+             and clamp at the minimum, not an intermediate column: \
+             {overrides:?}"
+        );
+        assert_eq!(
+            overrides[1],
+            Some(category_width_before),
+            "#104: Category must still be untouched after the second \
+             drag: {overrides:?}"
         );
     }
 
@@ -54013,6 +54133,12 @@ Milestone tracking issue.
 
     #[test]
     fn reports_divider_drag_resizes_only_its_own_pair() {
+        // #104/quadraui#1031: despite the name (kept for continuity with
+        // the pre-#1031 test), the invariant under test is last-absorbs,
+        // not pair — see the assertions below. This fixture's columns are
+        // Issue, Title, Started, Machines, Fixes — dragging the
+        // Title|Started divider now takes its slack from `Fixes` (the
+        // table's actual last column), not from `Started`'s own shrinking.
         let mut driver = reports_driver(
             &reports_result_json_meta(),
             REPORTS_RESIZE_COLS,
@@ -54038,16 +54164,21 @@ Milestone tracking issue.
             after[1],
             driver.screen()
         );
-        // The pair-only invariant, and the reason this feature does not
-        // reopen the pinned `h_scroll`: `drag_divider` holds the dragged
-        // pair's combined width constant, so every column after the pair —
-        // and therefore the table's total content width — is untouched. A
-        // resize can never newly force horizontal scrolling.
-        assert_eq!(
-            before[2], after[2],
-            "#1853: a divider drag must move width between its own two \
-                 columns only — `Machines` (two columns right of the drag) \
-                 moved from {} to {}:\n{}",
+        // #104: last-absorbs, not pair — `Machines` (two columns right of
+        // the drag) keeps its own WIDTH, but it is not exempt from
+        // shifting: it sits right after `Started`, which just moved by
+        // ~8, so `Machines` moves by the same ~8. Only the table's actual
+        // last column (`Fixes`), not `Machines`, absorbs the slack and
+        // keeps the table's total content width — and therefore
+        // `h_scroll` — unaffected by this drag.
+        assert!(
+            (after[2] - (before[2] + 8.0)).abs() <= 1.0,
+            "#104: `Machines`' own width is untouched by this drag, but it \
+                 must shift by the same ~8 cells `Started` grew by — under \
+                 the old pair model it stayed put because `Started` shrank \
+                 to compensate; under last-absorbs nothing shrinks until \
+                 the table's last column (`Fixes`) — `Machines` moved from \
+                 {} to {}:\n{}",
             before[2],
             after[2],
             driver.screen()
@@ -54101,9 +54232,17 @@ Milestone tracking issue.
             after[1],
             driver.screen()
         );
-        assert_eq!(
-            before[2], after[2],
-            "#1853: …and still only move its own pair:\n{}",
+        // #104: last-absorbs, not pair — `Tokens` (the column between the
+        // drag and the table's actual last column, `Spend`) keeps its own
+        // width but shifts by the same ~7 cells `Calls` grew by; `Spend`
+        // is the one that absorbs the slack.
+        assert!(
+            (after[2] - (before[2] + 7.0)).abs() <= 1.0,
+            "#104: `Tokens` must shift with `Calls` (only `Spend`, the \
+                 table's last column, absorbs the slack) — moved from {} \
+                 to {}:\n{}",
+            before[2],
+            after[2],
             driver.screen()
         );
     }
@@ -54363,6 +54502,16 @@ Milestone tracking issue.
         // whatever view happened to be active (or nothing at all).
         let mut app = make_test_app(BoardData::default());
         app.active_view = SidebarView::Board;
+        // `on_shell_event_ctx` (quadraui#617) is the non-deprecated hook,
+        // but it takes a `&ShellContext` that only `ShellAdapter` can
+        // construct — this test drives a bare `CoordApp` directly, with no
+        // driver/adapter in the loop, so there is no `ShellContext` to
+        // hand it. `CoordApp` doesn't override `on_shell_event_ctx` itself,
+        // so the default impl just forwards to this deprecated method
+        // anyway (see quadraui's own `#[allow(deprecated)]` forwarding
+        // wrapper) — calling it directly here is equivalent and the only
+        // option available without a live shell.
+        #[allow(deprecated)]
         app.on_shell_event(&quadraui::AppShellEvent::PanelChanged {
             panel_id: WidgetId::new("panel:usage"),
         });
@@ -56052,6 +56201,10 @@ Milestone tracking issue.
         // truncated label rather than proving anything about the resize. 3
         // cells keeps `State` at ~7 — comfortably above its label length —
         // while still being an unambiguous, assertable move.
+        //
+        // #104/quadraui#1031: despite the name (kept for continuity with
+        // the pre-#1031 test this mirrors), the invariant under test is now
+        // last-absorbs, not pair — see the assertions below.
         let mut driver = queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
         let before = reports_header_xs(&driver, &["Title", "State", "Machine"]);
 
@@ -56073,16 +56226,59 @@ Milestone tracking issue.
             after[1],
             driver.screen()
         );
-        // The pair-only invariant: everything after the dragged pair,
-        // hence the table's total content width, is untouched.
-        assert_eq!(
-            before[2], after[2],
-            "#68: a divider drag must move width between its own two \
-             columns only — `Machine` (one column right of the drag) \
-             moved from {} to {}:\n{}",
+        // #104: last-absorbs, not pair — `Machine` (one column right of the
+        // drag) keeps its own WIDTH, but its slack no longer comes from
+        // shrinking, so it is not exempt from shifting either: it sits
+        // right after `State`, which just moved by ~3, so `Machine` moves
+        // by the same ~3. Only the table's actual last column (`Age`) —
+        // nowhere near this divider — absorbs the slack and keeps the
+        // grid's total content width unchanged, which is what keeps this
+        // drag from turning on `queue_h_scroll` (`REPORTS_RESIZE_COLS` is
+        // comfortably above `QUEUE_MIN_WIDTH_CHARS`).
+        assert!(
+            (after[2] - (before[2] + 3.0)).abs() <= 1.0,
+            "#104: `Machine`'s own width is untouched by this drag, but it \
+             must shift by the same ~3 cells `State` grew by — under the \
+             old pair model it stayed put because `State` shrank to \
+             compensate; under last-absorbs nothing shrinks until the \
+             table's last column (`Age`) — `Machine` moved from {} to {}:\n{}",
             before[2],
             after[2],
             driver.screen()
+        );
+    }
+
+    #[test]
+    fn queue_h_scroll_recreated_by_a_divider_drag() {
+        // #104/quadraui#1031: a Queue-grid divider drag can now be the
+        // thing that *creates* horizontal overflow mid-gesture, not just
+        // something that reads an already-overflowing layout — new
+        // territory because Queue is the one grid that drives
+        // `queue_h_scroll` (#2043). Narrow the viewport down near
+        // `QUEUE_MIN_WIDTH_CHARS` so there is little slack left, then drag
+        // hard enough that the table's last column (`Age`) bottoms out at
+        // `QUEUE_MIN_COLUMN_WIDTH` and the table has nowhere left to
+        // absorb the widened column except by overflowing.
+        let mut driver = queue_driver(queue_fixture_json(), 160, REPORTS_RESIZE_ROWS);
+        let (title_x, header_y) = driver
+            .find("Title")
+            .unwrap_or_else(|| panic!("Title column header must render:\n{}", driver.screen()));
+        let divider_x = title_x - 0.5;
+
+        driver.mouse_down(divider_x, header_y);
+        // Far enough right to exhaust every column's slack and push the
+        // table past its own width — an ordinary drag distance would just
+        // reshuffle within the existing content width.
+        driver.mouse_move(divider_x + 80.0, header_y);
+        driver.mouse_up(divider_x + 80.0, header_y);
+        driver.render();
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains('▄') || screen.contains('▁'),
+            "#104: once the last column (`Age`) bottoms out, the grid must \
+             grow its own horizontal scrollbar instead of refusing the \
+             drag:\n{screen}"
         );
     }
 
@@ -58782,16 +58978,20 @@ Milestone tracking issue.
 
     #[test]
     fn tuidriver_queue_divider_drag_cannot_collapse_either_column_below_the_floor() {
-        // "Neither half of the dragged pair can be collapsed below the
-        // minimum width" (#68 acceptance) — enforced by
-        // `DataTableLayout::drag_divider` itself (quadraui#521), not by
-        // app code, so this proves the app wires the floor through rather
-        // than re-deriving the arithmetic.
+        // "The dragged column can't be collapsed below the minimum width"
+        // (#68 acceptance) — enforced by `DataTableLayout::drag_divider`
+        // itself (quadraui#521/#1031), not by app code, so this proves the
+        // app wires the floor through rather than re-deriving the
+        // arithmetic.
         let mut driver = queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
         let before = reports_header_xs(&driver, &["Title", "State", "Machine"]);
         let title_x_before = before[0];
         let title_width_before = before[1] - before[0];
-        let pair_total_before = before[2] - before[0];
+        // #104: last-absorbs, not pair — `State` (the dragged divider's
+        // immediate neighbour) is frozen at this WIDTH for the whole drag;
+        // it's the table's actual last column (`Age`, off-screen at this
+        // width) that grows to compensate for `Title`'s shrink.
+        let state_width_before = before[2] - before[1];
 
         // A large left drag — trying to shrink `Title` (width ~30 here)
         // well past its floor. -40 (rather than some even more extreme
@@ -58814,7 +59014,7 @@ Milestone tracking issue.
         reports_drag_divider(&mut driver, "State", -40.0);
         let after = reports_header_xs(&driver, &["State", "Machine"]);
         let title_width_after = after[0] - title_x_before;
-        let pair_total_after = after[1] - title_x_before;
+        let state_width_after = after[1] - after[0];
 
         assert!(
             title_width_after < title_width_before,
@@ -58829,10 +59029,11 @@ Milestone tracking issue.
             driver.screen()
         );
         assert!(
-            (pair_total_before - pair_total_after).abs() <= 1.0,
-            "#68: the Title+State pair's combined width (and so the \
-             table's total content width) must be conserved even at the \
-             floor — before={pair_total_before}, after={pair_total_after}:\n{}",
+            (state_width_before - state_width_after).abs() <= 1.0,
+            "#104: `State` (frozen, not the slack recipient under \
+             last-absorbs) must keep its own width even while `Title` \
+             collapses to the floor — before={state_width_before}, \
+             after={state_width_after}:\n{}",
             driver.screen()
         );
     }
@@ -58908,10 +59109,20 @@ Milestone tracking issue.
             after[1],
             driver.screen()
         );
-        assert_eq!(
-            scrolled[2], after[2],
-            "#68: `Reason` (one column right of the drag) must be \
-             untouched:\n{}",
+        // #104: last-absorbs, not pair — `Reason` (two columns right of
+        // the drag, still short of the table's actual last column, `Age`)
+        // keeps its own width, but that no longer means it stays put: it
+        // sits right after `Hold`, which is itself frozen and just shifted
+        // left by the same ~3 cells `After` shrank by, so `Reason` shifts
+        // by that same ~3 too.
+        assert!(
+            (after[2] - (scrolled[2] - 3.0)).abs() <= 1.0,
+            "#104: `Reason`'s own width is untouched by this drag, but it \
+             must shift left by the same ~3 cells `After` shrank by — only \
+             `Age` (the table's actual last column) absorbs the slack: \
+             moved from {} to {}:\n{}",
+            scrolled[2],
+            after[2],
             driver.screen()
         );
         // The `queue_h_scroll`-untouched half of the acceptance bar: a

@@ -1934,9 +1934,13 @@ impl CoordApp {
     /// loses how far past the floor the drag went, and retracing the drag
     /// would not restore the original widths. `queue_resize_base` snapshots
     /// the layout once, on the first call after `queue_resize_col` goes from
-    /// `None` to `Some`, and is cleared as soon as `queue_resize_col` reads
-    /// back `None` — mirrors `TableState::resize_base` (`types.rs`) and
-    /// `audit_resize_base`.
+    /// `None` to `Some`, and is cleared on `MouseUp` alongside
+    /// `queue_resize_col.take()` (`events.rs`) so the *next* gesture starts
+    /// from a fresh snapshot rather than this one's pre-drag widths — the
+    /// `else` branch below is only a backstop, since this function runs
+    /// solely on a `MouseMoved` with the left button held and so never
+    /// observes the gap between gestures (#104). Mirrors
+    /// `TableState::resize_base` (`types.rs`) and `audit_resize_base`.
     pub(crate) fn queue_update_resize_drag(&mut self, pos: Point) -> bool {
         let Some(col) = self.queue_resize_col else {
             self.queue_resize_base = None;

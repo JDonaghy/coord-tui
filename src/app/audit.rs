@@ -547,10 +547,13 @@ impl CoordApp {
     /// drag went and retracing the drag would not restore the original
     /// widths. `audit_resize_base` snapshots the layout once, the first call
     /// after `audit_resize_col` goes from `None` to `Some` (there is no
-    /// separate "drag started" hook to snapshot from), and is cleared as
-    /// soon as `audit_resize_col` reads back `None` — mirrors
-    /// `TableState::resize_base` (`types.rs`) and quadraui's own
-    /// `data_table_app.rs` `resize_base`.
+    /// separate "drag started" hook to snapshot from). It is cleared by
+    /// `MouseUp` alongside `audit_resize_col.take()` (`events.rs`) — the
+    /// `else` branch below is only a belt-and-braces backstop, because this
+    /// function runs solely on a `MouseMoved` with the left button held and
+    /// so cannot observe the gap between one gesture's `MouseUp` and the
+    /// next one's `MouseDown` (#104). Mirrors `TableState::resize_base`
+    /// (`types.rs`) and quadraui's own `data_table_app.rs` `resize_base`.
     ///
     /// Returns `true` (redraw needed) only while a drag is actually in
     /// progress against a table that is still on screen.

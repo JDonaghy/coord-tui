@@ -2156,8 +2156,12 @@ impl CoordApp {
     /// loses how far past the floor the drag went and retracing the drag
     /// would not restore the original widths. `reports_resize_base`
     /// snapshots the layout once, the first call after `reports_resize_col`
-    /// goes from `None` to `Some`, and is cleared as soon as
-    /// `reports_resize_col` reads back `None` — mirrors
+    /// goes from `None` to `Some`, and is cleared on `MouseUp` alongside
+    /// `reports_resize_col.take()` (`events.rs`) so the *next* gesture
+    /// starts from a fresh snapshot rather than this one's pre-drag widths
+    /// — the `else` branch below is only a backstop, since this function
+    /// runs solely on a `MouseMoved` with the left button held and so never
+    /// observes the gap between gestures (#104). Mirrors
     /// `TableState::resize_base` (`types.rs`) and `audit_resize_base`.
     ///
     /// Returns `true` (redraw needed) only while a drag is actually in

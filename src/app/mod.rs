@@ -2956,9 +2956,9 @@ pub struct CoordApp {
     /// `reports_resize_col`.
     queue_resize_col: Option<usize>,
     /// #104/quadraui#1031: the Queue grid's layout as it stood at the
-    /// *start* of the in-progress resize gesture. Same lazy-capture/clear
-    /// lifecycle as `audit_resize_base`, mirroring `TableState::resize_base`
-    /// (`types.rs`).
+    /// *start* of the in-progress resize gesture. Same lazy-capture /
+    /// clear-on-`MouseUp` lifecycle as `audit_resize_base`, mirroring
+    /// `TableState::resize_base` (`types.rs`).
     queue_resize_base: Option<DataTableLayout>,
     /// #1867 (Q-2): vertical scroll offset into the selected row's issue
     /// body, rendered in the bottom ~40% of the Queue panel. Stepped by
@@ -3994,8 +3994,11 @@ pub struct CoordApp {
     /// #104/quadraui#1031: the Audit table's layout as it stood at the
     /// *start* of the in-progress resize gesture, captured lazily by
     /// `audit_update_resize_drag` the first time it runs after
-    /// `audit_resize_col` goes from `None` to `Some`, and cleared the moment
-    /// `audit_resize_col` reads back `None`. Mirrors `TableState::resize_base`
+    /// `audit_resize_col` goes from `None` to `Some`, and cleared on
+    /// `MouseUp` alongside `audit_resize_col.take()` (#104 — clearing it
+    /// only from inside `audit_update_resize_drag` leaked the snapshot
+    /// across gesture boundaries, since that function never runs between a
+    /// `MouseUp` and the next `MouseDown`). Mirrors `TableState::resize_base`
     /// (`types.rs`) — see its doc comment for why re-deriving the layout from
     /// the last paint on every mouse move is exactly the pattern that made a
     /// last-absorbs drag irreversible once the last column overflows.
@@ -4119,8 +4122,9 @@ pub struct CoordApp {
     /// no resize drag is in progress. Mirrors `audit_resize_col`.
     reports_resize_col: Option<usize>,
     /// #104/quadraui#1031: the Reports result-table layout as it stood at
-    /// the *start* of the in-progress resize gesture. Same lazy-capture/clear
-    /// lifecycle as `audit_resize_base`, mirroring `TableState::resize_base`
+    /// the *start* of the in-progress resize gesture. Same lazy-capture /
+    /// clear-on-`MouseUp` lifecycle as `audit_resize_base`, mirroring
+    /// `TableState::resize_base`
     /// (`types.rs`). Not part of `reports_column_overrides`'s key — it only
     /// needs to outlive a single drag gesture against a single on-screen
     /// result, and is cleared before a differently-shaped result could ever

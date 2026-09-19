@@ -114,8 +114,8 @@ pub(crate) struct TableState {
     pub(crate) resize_col: Option<usize>,
     /// The table layout as it stood at the *start* of the in-progress
     /// resize gesture (lazily captured by [`Self::update_resize_drag`] the
-    /// first time it runs with `resize_col` set, cleared the moment
-    /// `resize_col` goes back to `None`). #104/quadraui#1031:
+    /// first time it runs with `resize_col` set, cleared by
+    /// [`Self::end_resize_drag`] on `MouseUp`). #104/quadraui#1031:
     /// `DataTableLayout::drag_divider` computes the last column's new width
     /// as `pair - target`, where `pair` comes from `self.columns[col].width
     /// + self.columns[last].width` on the layout it's called against — that
@@ -180,10 +180,12 @@ impl TableState {
     /// Called on every `MouseMoved` while a drag may be in progress (not
     /// just while one is), so `resize_base` is captured lazily here, on the
     /// first call after `resize_col` goes from `None` to `Some` — there is
-    /// no separate "drag started" hook to snapshot from. It is cleared as
-    /// soon as `resize_col` reads back `None` (the drag ended, via
-    /// `MouseUp`, elsewhere), so the next drag starts from a fresh
-    /// snapshot rather than the previous gesture's.
+    /// no separate "drag started" hook to snapshot from. It is cleared by
+    /// [`Self::end_resize_drag`] on `MouseUp`, so the next drag starts from
+    /// a fresh snapshot rather than the previous gesture's; the
+    /// `resize_col == None` branch below is only a backstop, because this
+    /// function runs solely on a `MouseMoved` with the left button held and
+    /// so never observes the gap between two gestures (#104).
     pub(crate) fn update_resize_drag(&mut self, pos: Point, min_width: f32) -> bool {
         let Some(col) = self.resize_col else {
             self.resize_base = None;
@@ -220,6 +222,26 @@ impl TableState {
         }
         self.column_overrides = next;
         true
+    }
+
+    /// End an in-progress column-resize drag, returning whether one was
+    /// actually in progress (the caller's "I consumed this `MouseUp`"
+    /// signal).
+    ///
+    /// #104: clearing `resize_base` here — and not only in
+    /// [`Self::update_resize_drag`]'s `resize_col == None` branch — is what
+    /// makes the *next* gesture start from a fresh snapshot.
+    /// `update_resize_drag` only ever runs on a `MouseMoved` with the left
+    /// button held, so once `MouseUp` releases the button the reset branch
+    /// is never reached: the next `MouseDown` puts `resize_col` straight
+    /// back to `Some(new_col)` before any `MouseMoved` is seen, and the
+    /// lazy capture then finds `resize_base` still holding the *previous*
+    /// gesture's pre-drag layout. `drag_divider` would compute `pair` and
+    /// the dragged column's origin from those stale widths, so the second
+    /// and every later drag in a session would jump.
+    pub(crate) fn end_resize_drag(&mut self) -> bool {
+        self.resize_base = None;
+        self.resize_col.take().is_some()
     }
 
     /// Click a column header: `None → first → !first → None` for that

@@ -4800,20 +4800,38 @@ impl CoordApp {
                 // was active would leave a later one latched, and the next
                 // unrelated mouse-move would resume resizing a column (or
                 // scrolling) nobody grabbed.
+                // #104: every `resize_col.take()` below is paired with
+                // clearing that table's `*_resize_base` drag-start layout
+                // snapshot. `*_update_resize_drag` does reset the snapshot
+                // itself, but only on the branch where it is *called* with
+                // `resize_col` already `None` — and it is only ever called
+                // from `MouseMoved` with the left button held, which stops
+                // firing the instant this `MouseUp` lands. The next
+                // `MouseDown` sets `resize_col` from `None` straight to
+                // `Some(new_col)`, so without the clear here the next
+                // gesture's lazy capture would find the *previous*
+                // gesture's pre-drag layout still there and feed
+                // `drag_divider` a stale `pair`/origin — a visible jump on
+                // the second and every later divider drag in a session.
                 if btn == MouseButton::Left {
                     let mut released = self.audit_resize_col.take().is_some();
+                    self.audit_resize_base = None;
                     released |= self.audit_scrollbar_drag.take().is_some();
                     released |= self.reports_resize_col.take().is_some();
+                    self.reports_resize_base = None;
                     released |= std::mem::take(&mut self.reports_vscroll_drag);
                     released |= self.queue_resize_col.take().is_some();
+                    self.queue_resize_base = None;
                     released |= std::mem::take(&mut self.queue_split_drag);
                     released |= std::mem::take(&mut self.queue_vscroll_drag);
                     released |= std::mem::take(&mut self.queue_hscroll_drag);
                     released |= std::mem::take(&mut self.queue_detail_vscroll_drag);
                     // #72: end an in-progress Completed-grid column-resize
                     // drag, same shape as Audit/Reports/Queue's own
-                    // `resize_col`s just above.
-                    released |= self.completed_grid.table.resize_col.take().is_some();
+                    // `resize_col`s just above. #104: `end_resize_drag`
+                    // takes `resize_col` *and* clears `resize_base`, for
+                    // the reason spelled out above this block.
+                    released |= self.completed_grid.table.end_resize_drag();
                     // #64: end a Pipeline Log tab vertical-scrollbar-track drag.
                     released |= std::mem::take(&mut self.pipeline_log_scrollbar_drag);
                     // #2288 (ms-65 §9): end a Board pane divider drag.

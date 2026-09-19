@@ -37698,6 +37698,97 @@
         );
     }
 
+    /// #104 (fix-iteration-2): the *gesture-boundary* half of the
+    /// `resize_base` story, which the overflow-reversibility tests above
+    /// structurally cannot reach — each of those drives exactly one
+    /// continuous `mouse_down`/`mouse_move`/`mouse_up`.
+    ///
+    /// `resize_base` is captured lazily inside `update_resize_drag`, which
+    /// only ever runs on a `MouseMoved` with the left button held. Its
+    /// `resize_col == None` branch therefore never executes between one
+    /// gesture's `MouseUp` and the next gesture's `MouseDown` (that
+    /// `MouseDown` puts `resize_col` straight from `None` back to
+    /// `Some(new_col)` before any move is seen). So unless `MouseUp`
+    /// clears the snapshot itself, drag 2 reuses drag 1's *pre-drag*
+    /// layout — and `drag_divider` computes `target = pointer_x -
+    /// base.columns[col].x` from those stale origins, jumping the table on
+    /// the very first `MouseMoved` of every drag after the first.
+    ///
+    /// Modeled as: drag divider A somewhere, release, then grab a
+    /// *different* divider B and move the pointer nowhere at all. A
+    /// zero-distance drag is a no-op only if the base agrees with what is
+    /// currently on screen; against drag 1's stale base it re-derives B's
+    /// width from B's old origin and shifts everything right of it by
+    /// drag 1's distance.
+    ///
+    /// B must sit to the *right* of A (this test and its Audit / Queue /
+    /// Reports siblings all do): only then did drag 1 move B's left
+    /// column's origin, which is the `base.columns[col].x` the stale
+    /// snapshot gets wrong. Pick B to A's left and the stale base is
+    /// accidentally right about the origin, and the test cannot fail.
+    #[test]
+    fn tuidriver_completed_second_divider_drag_uses_a_fresh_base() {
+        use quadraui::tui::testing::driver_with_shell;
+        const LABELS: [&str; 4] = ["ISSUE", "TITLE", "STARTED", "ENDED"];
+        let mut driver = driver_with_shell(
+            make_completed_app(),
+            CoordApp::shell_config(),
+            REPORTS_RESIZE_COLS,
+            REPORTS_RESIZE_ROWS,
+        );
+
+        // Gesture 1: widen ISSUE by 8 via the ISSUE|TITLE divider.
+        let (title_x, header_y) = driver
+            .find("TITLE")
+            .unwrap_or_else(|| panic!("TITLE column header must render:\n{}", driver.screen()));
+        driver.mouse_down(title_x - 0.5, header_y);
+        driver.mouse_move(title_x - 0.5 + 8.0, header_y);
+        driver.mouse_up(title_x - 0.5 + 8.0, header_y);
+        driver.render();
+        let after_first = reports_header_xs(&driver, &LABELS);
+        assert!(
+            (after_first[1] - (title_x + 8.0)).abs() <= 1.0,
+            "#104 precondition: drag 1 must actually have moved the \
+             ISSUE|TITLE divider by 8 — TITLE went {title_x} -> {}:\n{}",
+            after_first[1],
+            driver.screen()
+        );
+
+        // Gesture 2: a *different* divider (TITLE|STARTED), grabbed at its
+        // current position and never moved.
+        let started_x = after_first[2];
+        driver.mouse_down(started_x - 0.5, header_y);
+        driver.mouse_move(started_x - 0.5, header_y);
+        driver.mouse_up(started_x - 0.5, header_y);
+        driver.render();
+
+        // Checked before reading positions back: against a stale base the
+        // jump is large enough to push the last column off the table
+        // entirely, and a bare "header must render" panic from
+        // `reports_header_xs` would not say why.
+        let screen = driver.screen();
+        for label in LABELS {
+            assert!(
+                screen.contains(label),
+                "#104: a zero-distance second drag must not disturb the \
+                 table at all, but {label} is no longer on screen — drag 2 \
+                 measured from drag 1's stale pre-drag base:\n{screen}"
+            );
+        }
+        let after_second = reports_header_xs(&driver, &LABELS);
+        assert!(
+            after_first
+                .iter()
+                .zip(&after_second)
+                .all(|(a, b)| (b - a).abs() <= 1.0),
+            "#104: a second, independent divider drag must measure from the \
+             layout drag 1 actually left on screen, not from the pre-drag-1 \
+             snapshot — a zero-distance drag moved the columns from \
+             {after_first:?} to {after_second:?}:\n{}",
+            driver.screen()
+        );
+    }
+
     /// Clicking a row opens that issue's Overview content — meta rows and
     /// stage content — with NO Work/Test/Review/Merge stage strip.
     #[test]
@@ -50644,6 +50735,72 @@ Milestone tracking issue.
         );
     }
 
+    /// #104 (fix-iteration-2): the Audit table's gesture-boundary case —
+    /// same shape and same reasoning as
+    /// `tuidriver_completed_second_divider_drag_uses_a_fresh_base`, which
+    /// carries the full explanation. `audit_resize_base` is now cleared by
+    /// `MouseUp` (`events.rs`) alongside `audit_resize_col.take()`, not
+    /// only by `audit_update_resize_drag`'s own `None` branch — which
+    /// never runs between two gestures.
+    #[test]
+    fn audit_second_divider_drag_uses_a_fresh_base() {
+        use quadraui::tui::testing::driver_with_shell;
+        const LABELS: [&str; 5] = ["Time", "Category", "Actor", "Repo#Issue", "Summary"];
+
+        let app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 220, 40);
+        click_activity_icon(&mut driver, "§");
+        driver.render();
+
+        // Gesture 1: widen Time by 10 via the Time|Category divider.
+        let (category_x, header_y) = driver
+            .find("Category")
+            .unwrap_or_else(|| panic!("Category header must render:\n{}", driver.screen()));
+        driver.mouse_down(category_x - 0.5, header_y);
+        driver.mouse_move(category_x - 0.5 + 10.0, header_y);
+        driver.mouse_up(category_x - 0.5 + 10.0, header_y);
+        driver.render();
+        let after_first = reports_header_xs(&driver, &LABELS);
+        assert!(
+            (after_first[1] - (category_x + 10.0)).abs() <= 1.0,
+            "#104 precondition: drag 1 must actually have moved the \
+             Time|Category divider by 10 — Category went {category_x} -> \
+             {}:\n{}",
+            after_first[1],
+            driver.screen()
+        );
+
+        // Gesture 2: a *different* divider (Actor|Repo#Issue), grabbed at
+        // its current position and never moved.
+        let repo_x = after_first[3];
+        driver.mouse_down(repo_x - 0.5, header_y);
+        driver.mouse_move(repo_x - 0.5, header_y);
+        driver.mouse_up(repo_x - 0.5, header_y);
+        driver.render();
+
+        let screen = driver.screen();
+        for label in LABELS {
+            assert!(
+                screen.contains(label),
+                "#104: a zero-distance second drag must not disturb the \
+                 table at all, but {label} is no longer on screen — drag 2 \
+                 measured from drag 1's stale pre-drag base:\n{screen}"
+            );
+        }
+        let after_second = reports_header_xs(&driver, &LABELS);
+        assert!(
+            after_first
+                .iter()
+                .zip(&after_second)
+                .all(|(a, b)| (b - a).abs() <= 1.0),
+            "#104: a second, independent divider drag must measure from the \
+             layout drag 1 actually left on screen, not from the pre-drag-1 \
+             snapshot — a zero-distance drag moved the columns from \
+             {after_first:?} to {after_second:?}:\n{}",
+            driver.screen()
+        );
+    }
+
     #[test]
     fn audit_table_engages_h_scrollbar_below_min_width() {
         use quadraui::tui::testing::driver_with_shell;
@@ -54334,6 +54491,76 @@ Milestone tracking issue.
         );
     }
 
+    /// #104 (fix-iteration-2): the Reports result table's gesture-boundary
+    /// case — same shape and same reasoning as
+    /// `tuidriver_completed_second_divider_drag_uses_a_fresh_base`, which
+    /// carries the full explanation. `reports_resize_base` is now cleared
+    /// by `MouseUp` (`events.rs`) alongside `reports_resize_col.take()`,
+    /// not only by `reports_update_resize_drag`'s own `None` branch —
+    /// which never runs between two gestures.
+    #[test]
+    fn reports_second_divider_drag_uses_a_fresh_base() {
+        const LABELS: [&str; 4] = ["Issue", "Title", "Started", "Machines"];
+        let mut driver = reports_driver(
+            &reports_result_json_meta(),
+            REPORTS_RESIZE_COLS,
+            REPORTS_RESIZE_ROWS,
+        );
+
+        // Gesture 1: widen Issue by 10 via the Issue|Title divider.
+        //
+        // Drag 2 below must be on a divider whose LEFT column's origin
+        // drag 1 actually moved, otherwise the stale base is accidentally
+        // still correct for the `target = pointer_x - base.columns[col].x`
+        // arithmetic and the test cannot fail: drag 1 goes first (leftmost
+        // divider), drag 2 second (a divider to its right).
+        let (title_x, header_y) = driver
+            .find("Title")
+            .unwrap_or_else(|| panic!("Title column header must render:\n{}", driver.screen()));
+        driver.mouse_down(title_x - 0.5, header_y);
+        driver.mouse_move(title_x - 0.5 + 10.0, header_y);
+        driver.mouse_up(title_x - 0.5 + 10.0, header_y);
+        driver.render();
+        let after_first = reports_header_xs(&driver, &LABELS);
+        assert!(
+            (after_first[1] - (title_x + 10.0)).abs() <= 1.0,
+            "#104 precondition: drag 1 must actually have moved the \
+             Issue|Title divider by 10 — Title went {title_x} -> {}:\n{}",
+            after_first[1],
+            driver.screen()
+        );
+
+        // Gesture 2: a *different* divider (Title|Started), grabbed at its
+        // current position and never moved.
+        let started_x = after_first[2];
+        driver.mouse_down(started_x - 0.5, header_y);
+        driver.mouse_move(started_x - 0.5, header_y);
+        driver.mouse_up(started_x - 0.5, header_y);
+        driver.render();
+
+        let screen = driver.screen();
+        for label in LABELS {
+            assert!(
+                screen.contains(label),
+                "#104: a zero-distance second drag must not disturb the \
+                 table at all, but {label} is no longer on screen — drag 2 \
+                 measured from drag 1's stale pre-drag base:\n{screen}"
+            );
+        }
+        let after_second = reports_header_xs(&driver, &LABELS);
+        assert!(
+            after_first
+                .iter()
+                .zip(&after_second)
+                .all(|(a, b)| (b - a).abs() <= 1.0),
+            "#104: a second, independent divider drag must measure from the \
+             layout drag 1 actually left on screen, not from the pre-drag-1 \
+             snapshot — a zero-distance drag moved the columns from \
+             {after_first:?} to {after_second:?}:\n{}",
+            driver.screen()
+        );
+    }
+
     #[test]
     fn reports_divider_drag_survives_until_the_panel_changes_report() {
         // "the change persists while the panel stays open": the width must
@@ -56506,6 +56733,73 @@ Milestone tracking issue.
             !end_screen.contains('▄') && !end_screen.contains('▁'),
             "#104: retracing the drag all the way back must also clear the \
              overflow-induced horizontal scrollbar:\n{end_screen}"
+        );
+    }
+
+    /// #104 (fix-iteration-2): the Queue grid's gesture-boundary case —
+    /// same shape and same reasoning as
+    /// `tuidriver_completed_second_divider_drag_uses_a_fresh_base`, which
+    /// carries the full explanation. `queue_resize_base` is now cleared by
+    /// `MouseUp` (`events.rs`) alongside `queue_resize_col.take()`, not
+    /// only by `queue_update_resize_drag`'s own `None` branch — which
+    /// never runs between two gestures.
+    #[test]
+    fn queue_second_divider_drag_uses_a_fresh_base() {
+        // Deliberately stops short of the trailing `Age`/`Reason` columns:
+        // at this width they are the first to be truncated once drag 1
+        // takes 6 cells out of the last column, and this test is about the
+        // *positions* of the columns right of the second divider, not the
+        // tail. `queue_divider_drag_overflow_is_reversible` above covers
+        // the last column's own width.
+        const LABELS: [&str; 5] = ["Epic", "Issue", "Title", "State", "Machine"];
+        let mut driver =
+            queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
+
+        // Gesture 1: widen Issue by 10 via the Issue|Title divider.
+        let (title_x, header_y) = driver
+            .find("Title")
+            .unwrap_or_else(|| panic!("Title column header must render:\n{}", driver.screen()));
+        driver.mouse_down(title_x - 0.5, header_y);
+        driver.mouse_move(title_x - 0.5 + 6.0, header_y);
+        driver.mouse_up(title_x - 0.5 + 6.0, header_y);
+        driver.render();
+        let after_first = reports_header_xs(&driver, &LABELS);
+        assert!(
+            (after_first[2] - (title_x + 6.0)).abs() <= 1.0,
+            "#104 precondition: drag 1 must actually have moved the \
+             Issue|Title divider by 6 — Title went {title_x} -> {}:\n{}",
+            after_first[2],
+            driver.screen()
+        );
+
+        // Gesture 2: a *different* divider (State|Machine), grabbed at its
+        // current position and never moved.
+        let machine_x = after_first[4];
+        driver.mouse_down(machine_x - 0.5, header_y);
+        driver.mouse_move(machine_x - 0.5, header_y);
+        driver.mouse_up(machine_x - 0.5, header_y);
+        driver.render();
+
+        let screen = driver.screen();
+        for label in LABELS {
+            assert!(
+                screen.contains(label),
+                "#104: a zero-distance second drag must not disturb the \
+                 grid at all, but {label} is no longer on screen — drag 2 \
+                 measured from drag 1's stale pre-drag base:\n{screen}"
+            );
+        }
+        let after_second = reports_header_xs(&driver, &LABELS);
+        assert!(
+            after_first
+                .iter()
+                .zip(&after_second)
+                .all(|(a, b)| (b - a).abs() <= 1.0),
+            "#104: a second, independent divider drag must measure from the \
+             layout drag 1 actually left on screen, not from the pre-drag-1 \
+             snapshot — a zero-distance drag moved the columns from \
+             {after_first:?} to {after_second:?}:\n{}",
+            driver.screen()
         );
     }
 

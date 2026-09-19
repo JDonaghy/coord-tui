@@ -535,27 +535,58 @@ impl CoordApp {
     /// See `DataTableLayout::drag_divider`'s own doc comment for the full
     /// model and why it replaced the pair rule.
     ///
+    /// #104: `drag_divider` computes the last column's new width as `pair -
+    /// target`, where `pair` comes from `self.columns[col].width +
+    /// self.columns[last].width` on whatever layout it's called against —
+    /// that sum is only the *true* pre-drag pair the first time it runs.
+    /// This function used to re-fetch `audit_table_layout` (the last paint's
+    /// cache) on every call, which is exactly the pattern quadraui itself
+    /// had to abandon in #1031: once Summary has bottomed out and the table
+    /// has overflowed, that cache already reflects this same gesture's own
+    /// prior output, so feeding it back in loses how far past the floor the
+    /// drag went and retracing the drag would not restore the original
+    /// widths. `audit_resize_base` snapshots the layout once, the first call
+    /// after `audit_resize_col` goes from `None` to `Some` (there is no
+    /// separate "drag started" hook to snapshot from), and is cleared as
+    /// soon as `audit_resize_col` reads back `None` — mirrors
+    /// `TableState::resize_base` (`types.rs`) and quadraui's own
+    /// `data_table_app.rs` `resize_base`.
+    ///
     /// Returns `true` (redraw needed) only while a drag is actually in
     /// progress against a table that is still on screen.
     pub(crate) fn audit_update_resize_drag(&mut self, pos: Point) -> bool {
         let Some(col) = self.audit_resize_col else {
+            self.audit_resize_base = None;
             return false;
         };
-        let next = {
+        if self.audit_resize_base.is_none() {
             let layout_ref = self.audit_table_layout.borrow();
-            let Some((rect, layout)) = layout_ref.as_ref() else {
+            let Some((_, layout)) = layout_ref.as_ref() else {
                 return false;
             };
+            self.audit_resize_base = Some(layout.clone());
+        }
+        let next = {
+            let layout_ref = self.audit_table_layout.borrow();
+            let Some((rect, _)) = layout_ref.as_ref() else {
+                return false;
+            };
+            // `audit_resize_base` was just populated above if it wasn't
+            // already set, so this is always `Some` here.
+            let base = self
+                .audit_resize_base
+                .as_ref()
+                .expect("audit_resize_base populated above");
             // A divider only exists between two columns; `col + 1` past the
             // end (the last divider, or a stale drag against a layout that
             // no longer has this column) is a no-op — `drag_divider` itself
             // also guards this, but checking here lets a stale drag report
             // "no redraw needed" instead of overwriting the overrides with
             // an unchanged (but reallocated) vec every mouse-move.
-            if col + 1 >= layout.columns.len() {
+            if col + 1 >= base.columns.len() {
                 return false;
             }
-            layout.drag_divider(
+            base.drag_divider(
                 &self.audit_column_overrides,
                 col,
                 pos.x - rect.x,

@@ -50561,6 +50561,89 @@ Milestone tracking issue.
         );
     }
 
+    /// #104/quadraui#1031: the overflow-then-retrace reversibility case for
+    /// the Audit table — mirrors `tuidriver_completed_divider_drag_overflow_
+    /// is_reversible` exactly, since `audit_update_resize_drag` used to
+    /// share the exact bug that test proves is fixed on the Completed grid:
+    /// re-deriving `layout.drag_divider`'s `pair` from `audit_table_layout`
+    /// (the last paint's cache) on every `MouseMoved` loses how far past
+    /// `AUDIT_MIN_COLUMN_WIDTH` the last column (Summary) got dragged once
+    /// it bottoms out and the table overflows, so retracing to the original
+    /// pointer position would not restore Summary's original width. Fixed
+    /// by `audit_resize_base`, the drag-start snapshot mirroring
+    /// `TableState::resize_base` (`types.rs`).
+    ///
+    /// Drives the drag as two separate `mouse_move` calls (not one big
+    /// jump) so the driver repaints in between — the cache re-fetch this
+    /// guards against is only reachable across two `MouseMoved` events in
+    /// the same gesture, not a single one.
+    #[test]
+    fn audit_divider_drag_overflow_is_reversible() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = make_app_with_audit_json(BoardData::default(), &audit_page_json_two_entries());
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 220, 40);
+        click_activity_icon(&mut driver, "§");
+        driver.render();
+
+        let before = {
+            let mut xs = Vec::new();
+            for label in ["Time", "Category", "Actor", "Repo#Issue", "Summary"] {
+                let (x, _) = driver
+                    .find(label)
+                    .unwrap_or_else(|| panic!("{label} header must render:\n{}", driver.screen()));
+                xs.push(x);
+            }
+            xs
+        };
+        let (category_x, header_y) = driver
+            .find("Category")
+            .unwrap_or_else(|| panic!("Category header must render:\n{}", driver.screen()));
+        let divider_x = category_x - 0.5;
+
+        driver.mouse_down(divider_x, header_y);
+        // Far enough right to run Time's growth past Summary's floor and
+        // well into overflow — must be a *separate* `mouse_move` from the
+        // retrace below (see the doc comment above).
+        driver.mouse_move(divider_x + 150.0, header_y);
+        let mid_screen = driver.screen();
+        assert!(
+            mid_screen.contains('▄') || mid_screen.contains('▁'),
+            "#104: dragging Time wide enough to bottom out Summary must \
+             overflow the table into its own horizontal scrollbar instead \
+             of refusing the drag:\n{mid_screen}"
+        );
+
+        // Retrace to the exact pointer position the drag started at.
+        driver.mouse_move(divider_x, header_y);
+        driver.mouse_up(divider_x, header_y);
+        driver.render();
+
+        let after = {
+            let mut xs = Vec::new();
+            for label in ["Time", "Category", "Actor", "Repo#Issue", "Summary"] {
+                let (x, _) = driver.find(label).unwrap_or_else(|| {
+                    panic!("{label} header must render after retrace:\n{}", driver.screen())
+                });
+                xs.push(x);
+            }
+            xs
+        };
+        assert!(
+            before.iter().zip(&after).all(|(b, a)| (a - b).abs() <= 1.0),
+            "#104: dragging out past the overflow point and back to the \
+             original pointer position must restore every column to its \
+             original width — before {before:?}, after {after:?}:\n{}",
+            driver.screen()
+        );
+        let end_screen = driver.screen();
+        assert!(
+            !end_screen.contains('▄') && !end_screen.contains('▁'),
+            "#104: retracing the drag all the way back must also clear the \
+             overflow-induced horizontal scrollbar:\n{end_screen}"
+        );
+    }
+
     #[test]
     fn audit_table_engages_h_scrollbar_below_min_width() {
         use quadraui::tui::testing::driver_with_shell;
@@ -54185,6 +54268,72 @@ Milestone tracking issue.
         );
     }
 
+    /// #104/quadraui#1031: the overflow-then-retrace reversibility case for
+    /// the Reports result table — mirrors `tuidriver_completed_divider_drag_
+    /// overflow_is_reversible` (`types.rs`'s `TableState::resize_base`) and
+    /// `audit_divider_drag_overflow_is_reversible`/`queue_divider_drag_
+    /// overflow_is_reversible`. `reports_update_resize_drag` used to
+    /// re-derive `layout.drag_divider`'s `pair` from `reports_table_layout`
+    /// (the last paint's cache) on every `MouseMoved` — once `Fixes` (the
+    /// table's last column) bottoms out and the table overflows, that cache
+    /// already reflects this same gesture's own prior output, so retracing
+    /// to the original pointer position would not restore `Fixes`' original
+    /// width. Fixed by `reports_resize_base`.
+    ///
+    /// Drives the drag as two separate `mouse_move` calls (not one big
+    /// jump) so the driver repaints in between — the cache re-fetch this
+    /// guards against is only reachable across two `MouseMoved` events in
+    /// the same gesture, not a single one.
+    #[test]
+    fn reports_divider_drag_overflow_is_reversible() {
+        let mut driver = reports_driver(
+            &reports_result_json_meta(),
+            REPORTS_RESIZE_COLS,
+            REPORTS_RESIZE_ROWS,
+        );
+        let before = reports_header_xs(&driver, &["Issue", "Title", "Started", "Machines"]);
+        let (started_x, header_y) = driver
+            .find("Started")
+            .unwrap_or_else(|| panic!("Started column header must render:\n{}", driver.screen()));
+        let divider_x = started_x - 0.5;
+
+        driver.mouse_down(divider_x, header_y);
+        // Far enough right to run Title's growth past Fixes' floor and well
+        // into overflow — must be a *separate* `mouse_move` from the
+        // retrace below (see the doc comment above). Capped well inside the
+        // `REPORTS_RESIZE_COLS`-wide viewport: a target past the main
+        // panel's own right edge falls outside `ctx.in_main`, which would
+        // make the drag a no-op rather than an overflow.
+        driver.mouse_move(divider_x + 75.0, header_y);
+        let mid_screen = driver.screen();
+        assert!(
+            mid_screen.contains('▄') || mid_screen.contains('▁'),
+            "#104: dragging Title wide enough to bottom out Fixes must \
+             overflow the table into its own horizontal scrollbar instead \
+             of refusing the drag:\n{mid_screen}"
+        );
+
+        // Retrace to the exact pointer position the drag started at.
+        driver.mouse_move(divider_x, header_y);
+        driver.mouse_up(divider_x, header_y);
+        driver.render();
+
+        let after = reports_header_xs(&driver, &["Issue", "Title", "Started", "Machines"]);
+        assert!(
+            before.iter().zip(&after).all(|(b, a)| (a - b).abs() <= 1.0),
+            "#104: dragging out past the overflow point and back to the \
+             original pointer position must restore every column to its \
+             original width — before {before:?}, after {after:?}:\n{}",
+            driver.screen()
+        );
+        let end_screen = driver.screen();
+        assert!(
+            !end_screen.contains('▄') && !end_screen.contains('▁'),
+            "#104: retracing the drag all the way back must also clear the \
+             overflow-induced horizontal scrollbar:\n{end_screen}"
+        );
+    }
+
     #[test]
     fn reports_divider_drag_survives_until_the_panel_changes_report() {
         // "the change persists while the panel stays open": the width must
@@ -56279,6 +56428,84 @@ Milestone tracking issue.
             "#104: once the last column (`Age`) bottoms out, the grid must \
              grow its own horizontal scrollbar instead of refusing the \
              drag:\n{screen}"
+        );
+    }
+
+    /// #104/quadraui#1031: the overflow-then-retrace reversibility case for
+    /// the Queue grid — mirrors `tuidriver_completed_divider_drag_overflow_
+    /// is_reversible` (`types.rs`'s `TableState::resize_base`) and
+    /// `audit_divider_drag_overflow_is_reversible`.
+    /// `queue_h_scroll_recreated_by_a_divider_drag` (above) only drags one
+    /// way and proves overflow occurs; it never retraces, so it cannot
+    /// catch `queue_update_resize_drag` re-deriving `layout.drag_divider`'s
+    /// `pair` from `queue_table_layout` (the last paint's cache) on every
+    /// `MouseMoved` — once `Age` bottoms out and the table overflows, that
+    /// cache already reflects this same gesture's own prior output, so
+    /// retracing to the original pointer position would not restore `Age`'s
+    /// original width. Fixed by `queue_resize_base`.
+    ///
+    /// Drives the drag as two separate `mouse_move` calls (not one big
+    /// jump) so the driver repaints in between — the cache re-fetch this
+    /// guards against is only reachable across two `MouseMoved` events in
+    /// the same gesture, not a single one.
+    #[test]
+    fn queue_divider_drag_overflow_is_reversible() {
+        // #1866/#2043: 200 cols (`REPORTS_RESIZE_COLS`), not the 160
+        // `queue_h_scroll_recreated_by_a_divider_drag` uses above — that
+        // test only needs the scrollbar glyph to appear, but this one also
+        // reads back every header's position before and after, and at 160
+        // `Machine` is already truncated to `Machin` pre-drag (comfortably
+        // above `QUEUE_MIN_WIDTH_CHARS` isn't the same as comfortably above
+        // every column's own label length). The wider driver keeps every
+        // label intact before the drag; the drag distance below is scaled
+        // up to still bottom out `Age` and overflow at this width.
+        let mut driver = queue_driver(queue_fixture_json(), REPORTS_RESIZE_COLS, REPORTS_RESIZE_ROWS);
+        let before = reports_header_xs(
+            &driver,
+            &["Epic", "Issue", "Title", "State", "Machine", "Age"],
+        );
+        let (title_x, header_y) = driver
+            .find("Title")
+            .unwrap_or_else(|| panic!("Title column header must render:\n{}", driver.screen()));
+        let divider_x = title_x - 0.5;
+
+        driver.mouse_down(divider_x, header_y);
+        // Far enough right to exhaust every column's slack and push the
+        // table past its own width — must be a *separate* `mouse_move`
+        // from the retrace below (see the doc comment above). Capped well
+        // inside the `REPORTS_RESIZE_COLS`-wide viewport: a target past the
+        // main panel's own right edge falls outside `ctx.in_main`, which
+        // would make the drag a no-op rather than an overflow.
+        driver.mouse_move(divider_x + 100.0, header_y);
+        let mid_screen = driver.screen();
+        assert!(
+            mid_screen.contains('▄') || mid_screen.contains('▁'),
+            "#104: once the last column (`Age`) bottoms out, the grid must \
+             overflow into its own horizontal scrollbar instead of \
+             refusing the drag:\n{mid_screen}"
+        );
+
+        // Retrace to the exact pointer position the drag started at.
+        driver.mouse_move(divider_x, header_y);
+        driver.mouse_up(divider_x, header_y);
+        driver.render();
+
+        let after = reports_header_xs(
+            &driver,
+            &["Epic", "Issue", "Title", "State", "Machine", "Age"],
+        );
+        assert!(
+            before.iter().zip(&after).all(|(b, a)| (a - b).abs() <= 1.0),
+            "#104: dragging out past the overflow point and back to the \
+             original pointer position must restore every column to its \
+             original width — before {before:?}, after {after:?}:\n{}",
+            driver.screen()
+        );
+        let end_screen = driver.screen();
+        assert!(
+            !end_screen.contains('▄') && !end_screen.contains('▁'),
+            "#104: retracing the drag all the way back must also clear the \
+             overflow-induced horizontal scrollbar:\n{end_screen}"
         );
     }
 

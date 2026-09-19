@@ -176,6 +176,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         queue_table_layout: std::cell::RefCell::new(None),
         queue_column_overrides: vec![None; CoordApp::QUEUE_COLUMNS.len()],
         queue_resize_col: None,
+        queue_resize_base: None,
         queue_detail_scroll: 0,
         last_queue_detail_cols: std::cell::Cell::new(120),
         last_queue_detail_visible_rows: std::cell::Cell::new(10),
@@ -426,6 +427,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         audit_column_overrides: vec![None; CoordApp::audit_columns().len()],
         audit_table_layout: std::cell::RefCell::new(None),
         audit_resize_col: None,
+        audit_resize_base: None,
         audit_scroll: 0,
         audit_h_scroll: 0.0,
         audit_scrollbar_drag: None,
@@ -456,6 +458,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         // these are keyed.
         reports_column_overrides: None,
         reports_resize_col: None,
+        reports_resize_base: None,
         reports_vscroll_drag: false,
         reports_pending_export: None,
         reports_export_status: None,

@@ -2955,6 +2955,11 @@ pub struct CoordApp {
     /// resize drag is in progress. Mirrors `audit_resize_col` /
     /// `reports_resize_col`.
     queue_resize_col: Option<usize>,
+    /// #104/quadraui#1031: the Queue grid's layout as it stood at the
+    /// *start* of the in-progress resize gesture. Same lazy-capture/clear
+    /// lifecycle as `audit_resize_base`, mirroring `TableState::resize_base`
+    /// (`types.rs`).
+    queue_resize_base: Option<DataTableLayout>,
     /// #1867 (Q-2): vertical scroll offset into the selected row's issue
     /// body, rendered in the bottom ~40% of the Queue panel. Stepped by
     /// `scroll_focused_content` (keyboard, once focus has moved off the grid
@@ -3986,6 +3991,15 @@ pub struct CoordApp {
     /// `DataTableHit::HeaderDivider` and cleared on `MouseUp`. `None` when no
     /// resize drag is in progress.
     audit_resize_col: Option<usize>,
+    /// #104/quadraui#1031: the Audit table's layout as it stood at the
+    /// *start* of the in-progress resize gesture, captured lazily by
+    /// `audit_update_resize_drag` the first time it runs after
+    /// `audit_resize_col` goes from `None` to `Some`, and cleared the moment
+    /// `audit_resize_col` reads back `None`. Mirrors `TableState::resize_base`
+    /// (`types.rs`) — see its doc comment for why re-deriving the layout from
+    /// the last paint on every mouse move is exactly the pattern that made a
+    /// last-absorbs drag irreversible once the last column overflows.
+    audit_resize_base: Option<DataTableLayout>,
     /// #1094 fix (fix-iteration-1): vertical scroll offset (index of the
     /// first visible row) for the Audit `DataTable`. Was hardcoded to `0` in
     /// the initial #1094 landing — keyboard nav (`j`/`k`/`Home`/`End`) could
@@ -4104,6 +4118,15 @@ pub struct CoordApp {
     /// `DataTableHit::HeaderDivider` and cleared on `MouseUp`. `None` when
     /// no resize drag is in progress. Mirrors `audit_resize_col`.
     reports_resize_col: Option<usize>,
+    /// #104/quadraui#1031: the Reports result-table layout as it stood at
+    /// the *start* of the in-progress resize gesture. Same lazy-capture/clear
+    /// lifecycle as `audit_resize_base`, mirroring `TableState::resize_base`
+    /// (`types.rs`). Not part of `reports_column_overrides`'s key — it only
+    /// needs to outlive a single drag gesture against a single on-screen
+    /// result, and is cleared before a differently-shaped result could ever
+    /// read it back (`reports_resize_col` goes back to `None` on `MouseUp`
+    /// before another `MouseDown` could start a new drag against it).
+    reports_resize_base: Option<DataTableLayout>,
     /// #1910: whether a `MouseDown` landed on the result table's vertical
     /// scrollbar track and a drag is in progress, so subsequent `MouseMoved`
     /// events should keep scrubbing `reports_result_scroll` instead of doing
@@ -4461,6 +4484,7 @@ impl CoordApp {
             queue_table_layout: std::cell::RefCell::new(None),
             queue_column_overrides: vec![None; Self::QUEUE_COLUMNS.len()],
             queue_resize_col: None,
+            queue_resize_base: None,
             queue_detail_scroll: 0,
             last_queue_detail_cols: std::cell::Cell::new(120),
             last_queue_detail_visible_rows: std::cell::Cell::new(10),
@@ -4717,6 +4741,7 @@ impl CoordApp {
             audit_column_overrides: vec![None; Self::audit_columns().len()],
             audit_table_layout: std::cell::RefCell::new(None),
             audit_resize_col: None,
+            audit_resize_base: None,
             audit_scroll: 0,
             audit_h_scroll: 0.0,
             audit_scrollbar_drag: None,
@@ -4744,6 +4769,7 @@ impl CoordApp {
             reports_table_layout: std::cell::RefCell::new(None),
             reports_column_overrides: None,
             reports_resize_col: None,
+            reports_resize_base: None,
             reports_vscroll_drag: false,
             reports_pending_export: None,
             reports_export_status: None,

@@ -2128,19 +2128,43 @@ impl CoordApp {
     /// the hit is what keeps the dragged divider under the cursor.
     ///
     /// The arithmetic is quadraui's `DataTableLayout::drag_divider` rather
-    /// than a local `pointer_x - column.x`: it moves width strictly between
-    /// the divider's two columns with their combined width held constant,
-    /// and freezes every other column at its currently-resolved width so an
-    /// untouched `Flex` column can't be reshuffled by pass 2's
-    /// redistribution (quadraui#521). Two consequences matter here — an
-    /// unrelated column never moves under the user mid-drag, and the table's
-    /// total content width is invariant under a resize, which is why this
-    /// feature does not reopen the `h_scroll` question.
+    /// than a local `pointer_x - column.x`.
+    ///
+    /// #104/quadraui#1031: **last-absorbs, not pair.** Widening/narrowing
+    /// `col` takes its slack from the table's *last* column, not `col + 1`
+    /// — every column strictly between the two is frozen at its
+    /// currently-resolved width, same as before. What changed: the two
+    /// columns no longer hold a *combined* width constant between just
+    /// themselves, and the table's total content width is no longer
+    /// invariant under a resize — once the last column bottoms out at
+    /// `REPORTS_MIN_COLUMN_WIDTH` the table is allowed to overflow (and
+    /// scroll horizontally) instead of refusing the drag. An unrelated
+    /// *intermediate* column still never moves under the user mid-drag; the
+    /// last column does, because it is now the one absorbing the slack. See
+    /// `DataTableLayout::drag_divider`'s own doc comment for the full model
+    /// and why it replaced the pair rule.
+    ///
+    /// #104: `drag_divider` computes the last column's new width as `pair -
+    /// target`, where `pair` comes from `self.columns[col].width +
+    /// self.columns[last].width` on whatever layout it's called against —
+    /// that sum is only the *true* pre-drag pair the first time it runs.
+    /// This function used to re-fetch `reports_table_layout` (the last
+    /// paint's cache) on every call, which is exactly the pattern
+    /// quadraui#1031 itself had to abandon: once the last column has
+    /// bottomed out and the table has overflowed, that cache already
+    /// reflects this same gesture's own prior output, so feeding it back in
+    /// loses how far past the floor the drag went and retracing the drag
+    /// would not restore the original widths. `reports_resize_base`
+    /// snapshots the layout once, the first call after `reports_resize_col`
+    /// goes from `None` to `Some`, and is cleared as soon as
+    /// `reports_resize_col` reads back `None` — mirrors
+    /// `TableState::resize_base` (`types.rs`) and `audit_resize_base`.
     ///
     /// Returns `true` (redraw needed) only while a drag is actually in
     /// progress against a table that is still on screen.
     pub(crate) fn reports_update_resize_drag(&mut self, pos: Point) -> bool {
         let Some(col) = self.reports_resize_col else {
+            self.reports_resize_base = None;
             return false;
         };
         // Key and current widths are captured as owned values so the
@@ -2152,18 +2176,31 @@ impl CoordApp {
             ),
             None => return false,
         };
-        let next = {
+        if self.reports_resize_base.is_none() {
             let cache = self.reports_table_layout.borrow();
-            let Some((rect, layout)) = cache.as_ref() else {
+            let Some((_, layout)) = cache.as_ref() else {
                 return false;
             };
+            self.reports_resize_base = Some(layout.clone());
+        }
+        let next = {
+            let cache = self.reports_table_layout.borrow();
+            let Some((rect, _)) = cache.as_ref() else {
+                return false;
+            };
+            // `reports_resize_base` was just populated above if it wasn't
+            // already set, so this is always `Some` here.
+            let base = self
+                .reports_resize_base
+                .as_ref()
+                .expect("reports_resize_base populated above");
             // A divider only exists between two columns; a `col` past the
             // end means the cached layout is from a differently-shaped
             // result and this drag no longer refers to anything.
-            if col + 1 >= layout.columns.len() {
+            if col + 1 >= base.columns.len() {
                 return false;
             }
-            layout.drag_divider(
+            base.drag_divider(
                 &current,
                 col,
                 pos.x - rect.x,

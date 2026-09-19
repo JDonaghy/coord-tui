@@ -1922,24 +1922,53 @@ impl CoordApp {
     /// `pos.x - rect.x` is passed through unadjusted — no separate
     /// h_scroll correction needed, and `queue_h_scroll` itself is never
     /// touched by a resize.
+    ///
+    /// #104: like Audit's `audit_update_resize_drag`, this used to re-fetch
+    /// `queue_table_layout` (the last paint's cache) on every call — the
+    /// same self-referential pattern quadraui#1031 itself had to abandon,
+    /// because `drag_divider`'s `pair` arithmetic is only the true pre-drag
+    /// pair the first time it runs against a layout. Once the last column
+    /// bottoms out and the table overflows (newly reachable here per this
+    /// function's own doc note above about Queue being the table that can
+    /// *create* overflow mid-gesture), feeding that overflowed cache back in
+    /// loses how far past the floor the drag went, and retracing the drag
+    /// would not restore the original widths. `queue_resize_base` snapshots
+    /// the layout once, on the first call after `queue_resize_col` goes from
+    /// `None` to `Some`, and is cleared as soon as `queue_resize_col` reads
+    /// back `None` — mirrors `TableState::resize_base` (`types.rs`) and
+    /// `audit_resize_base`.
     pub(crate) fn queue_update_resize_drag(&mut self, pos: Point) -> bool {
         let Some(col) = self.queue_resize_col else {
+            self.queue_resize_base = None;
             return false;
         };
-        let next = {
+        if self.queue_resize_base.is_none() {
             let cache = self.queue_table_layout.borrow();
-            let Some((rect, layout)) = cache.as_ref() else {
+            let Some((_, layout)) = cache.as_ref() else {
                 return false;
             };
+            self.queue_resize_base = Some(layout.clone());
+        }
+        let next = {
+            let cache = self.queue_table_layout.borrow();
+            let Some((rect, _)) = cache.as_ref() else {
+                return false;
+            };
+            // `queue_resize_base` was just populated above if it wasn't
+            // already set, so this is always `Some` here.
+            let base = self
+                .queue_resize_base
+                .as_ref()
+                .expect("queue_resize_base populated above");
             // A divider only exists between two columns; a `col` past the
             // end would mean the cached layout no longer matches
             // `QUEUE_COLUMNS`, which can't happen (the column set is
             // const) but is guarded the same way Reports guards its
             // per-report column count.
-            if col + 1 >= layout.columns.len() {
+            if col + 1 >= base.columns.len() {
                 return false;
             }
-            layout.drag_divider(
+            base.drag_divider(
                 &self.queue_column_overrides,
                 col,
                 pos.x - rect.x,

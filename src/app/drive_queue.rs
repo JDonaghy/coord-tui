@@ -1077,6 +1077,10 @@ impl CoordApp {
     /// into "go and run the CLI".
     pub(crate) const QUEUE_COLUMNS: &'static [(&'static str, f32, ColumnAlign)] = &[
         ("#", 0.5, ColumnAlign::Right),
+        // #99: the epic (tracking issue) this row's issue is a child of, or
+        // blank when it belongs to no epic — see `queue_row`'s cell
+        // construction for why this is deliberately never `or_dash`'d.
+        ("Epic", 1.6, ColumnAlign::Left),
         ("Issue", 1.6, ColumnAlign::Left),
         ("Title", 3.0, ColumnAlign::Left),
         ("State", 1.0, ColumnAlign::Left),
@@ -1115,12 +1119,13 @@ impl CoordApp {
     /// the single `Tries` column (`e.attempts`, the daemon's own
     /// crash/relaunch counter — orthogonal to leg-dispatch counts; see
     /// `queue_assignment_count`'s doc comment) with three per-stage
-    /// dispatch counts.
-    pub(crate) const QUEUE_COL_WORK: usize = 5;
+    /// dispatch counts. #99 shifted this from `5` to `6` when the `Epic`
+    /// column was inserted at index 1.
+    pub(crate) const QUEUE_COL_WORK: usize = 6;
     /// Index of the `#Smoke` column — sorted numerically.
-    pub(crate) const QUEUE_COL_SMOKE: usize = 6;
+    pub(crate) const QUEUE_COL_SMOKE: usize = 7;
     /// Index of the `#Review` column — sorted numerically.
-    pub(crate) const QUEUE_COL_REVIEW: usize = 7;
+    pub(crate) const QUEUE_COL_REVIEW: usize = 8;
 
     /// `DataTable` columns from [`Self::QUEUE_COLUMNS`].
     fn queue_columns() -> Vec<Column> {
@@ -1189,6 +1194,13 @@ impl CoordApp {
             held: is_holding(e),
             cells: vec![
                 e.position.to_string(),
+                // #99: blank — deliberately NOT `or_dash` — when the issue is
+                // in no epic. "No epic" is the common, unremarkable case; a
+                // column of dashes down the middle of the grid would be
+                // visual noise competing with the epic keys it exists to
+                // make scannable. Do not "restore consistency" with the
+                // other `or_dash`-wrapped cells here.
+                self.queue_epic_cell(&e.repo_name, e.issue_number),
                 alias_queue_key(&e.key()),
                 or_dash(self.queue_issue_title(&e.repo_name, e.issue_number)),
                 or_dash(queue_state_cell(e)),
@@ -1235,6 +1247,35 @@ impl CoordApp {
             .filter(|a| a.repo == repo && a.issue_number == issue_number)
             .filter(|a| a.assignment_type.as_deref().unwrap_or("work") == atype)
             .count() as i64
+    }
+
+    /// #99: the `Epic` cell for one entry — the tracking issue of the epic
+    /// this row's issue is a `## Sub-issues` child of, rendered through the
+    /// same [`alias_queue_key`] the `Issue`/`After` cells use so `CC#1234`
+    /// is character-identical in every column. Empty string (never
+    /// [`QUEUE_EMPTY_CELL`]) when the issue is in no epic — see the caller's
+    /// comment for why this deliberately doesn't match the `or_dash`
+    /// convention the other cells use.
+    ///
+    /// A reverse lookup over `data.epic_children` — repo-scoped, like every
+    /// other consumer of this #1195 EP-1 seam
+    /// (`epic_children_for_repo_issue`), so an `EpicChildren` entry for a
+    /// DIFFERENT repo that happens to list the same issue number never
+    /// matches. `epic_children` is empty on daemons older than #1195, so
+    /// this simply finds nothing and every Epic cell renders blank — no
+    /// panic, no hidden rows.
+    fn queue_epic_cell(&self, repo: &str, issue_number: i64) -> String {
+        let Ok(issue_number) = u64::try_from(issue_number) else {
+            return String::new();
+        };
+        self.data
+            .epic_children
+            .iter()
+            .find(|ec| {
+                ec.repo_name == repo && ec.children.iter().any(|c| c.number == issue_number)
+            })
+            .map(|ec| alias_queue_key(&format!("{repo}#{}", ec.tracking_issue)))
+            .unwrap_or_default()
     }
 
     /// The machine actually running this entry's current leg, so `Machine`
@@ -3680,12 +3721,12 @@ mod tests {
             ..BoardData::default()
         });
         let rows = app.queue_rows();
-        // Hold is cells[9] post-#2524 (After/Hold/Reason each shifted two
-        // slots right when Tries became #Work/#Smoke/#Review).
+        // Hold is cells[10] post-#99 (shifted one more slot right when the
+        // Epic column was inserted at index 1; was cells[9] post-#2524).
         let cell_for = |issue: i64| {
             rows.iter()
                 .find(|r| r.issue_number == issue)
-                .map(|r| r.cells[9].clone())
+                .map(|r| r.cells[10].clone())
                 .unwrap_or_else(|| panic!("row {issue} not found"))
         };
         assert_eq!(cell_for(2146), "FIRED");
@@ -3831,7 +3872,7 @@ mod tests {
         assert_eq!(row.cells[CoordApp::QUEUE_COL_SMOKE], "1");
         assert_eq!(row.cells[CoordApp::QUEUE_COL_REVIEW], "0");
         assert_eq!(
-            row.cells[4], "bravo",
+            row.cells[5], "bravo",
             "Machine must show the currently-RUNNING leg's machine, not \
              stay blank or show a stale finished leg's machine"
         );
@@ -3854,7 +3895,7 @@ mod tests {
         assert_eq!(row.cells[CoordApp::QUEUE_COL_WORK], "0");
         assert_eq!(row.cells[CoordApp::QUEUE_COL_SMOKE], "0");
         assert_eq!(row.cells[CoordApp::QUEUE_COL_REVIEW], "0");
-        assert_eq!(row.cells[4], QUEUE_EMPTY_CELL);
+        assert_eq!(row.cells[5], QUEUE_EMPTY_CELL);
     }
 
     /// #2589: the pure classifier matches both pre-dispatch shapes (mirrors
@@ -3917,16 +3958,16 @@ mod tests {
         let row_2533 = rows.iter().find(|r| r.issue_number == 2533).unwrap();
 
         assert!(
-            row_2531.cells[3].ends_with(QUEUE_NEEDS_OPERATOR_SUFFIX),
+            row_2531.cells[4].ends_with(QUEUE_NEEDS_OPERATOR_SUFFIX),
             "cells: {:?}",
             row_2531.cells
         );
         assert!(
-            !row_2533.cells[3].ends_with(QUEUE_NEEDS_OPERATOR_SUFFIX),
+            !row_2533.cells[4].ends_with(QUEUE_NEEDS_OPERATOR_SUFFIX),
             "cells: {:?}",
             row_2533.cells
         );
-        assert_ne!(row_2531.cells[3], row_2533.cells[3]);
+        assert_ne!(row_2531.cells[4], row_2533.cells[4]);
 
         // Both rows are still, unambiguously, `blocked` on the wire — this
         // is presentation only. Sorting, `dq_state_colors`, and the row
@@ -3956,9 +3997,165 @@ mod tests {
         });
         let rows = app.queue_rows();
         assert_eq!(
-            rows[0].cells[4], "pinned-box",
+            rows[0].cells[5], "pinned-box",
             "no assignment is RUNNING, so the operator's own pin wins over \
              a finished leg's machine"
+        );
+    }
+
+    // ── #99: the Epic column ─────────────────────────────────────────────
+
+    /// A queue entry whose issue number appears in an `EpicChildren.children`
+    /// list renders that epic's `tracking_issue` in the Epic column, aliased
+    /// exactly like the `Issue` column (`M#` for `myrepo`).
+    #[test]
+    fn queue_epic_cell_renders_the_tracking_issue_for_a_child_issue() {
+        let app = make_test_app(BoardData {
+            drive_queue: vec![entry(101, 0, QUEUE_STATE_WAITING, &[])],
+            epic_children: vec![EpicChildren {
+                repo_name: "myrepo".to_string(),
+                tracking_issue: 50,
+                children: vec![EpicChild {
+                    number: 101,
+                    state: "open".to_string(),
+                }],
+            }],
+            ..BoardData::default()
+        });
+        let rows = app.queue_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cells[1], "M#50",
+            "the Epic column must render the tracking issue, aliased the \
+             same way the Issue column aliases `myrepo`"
+        );
+    }
+
+    /// A queue entry in no epic renders an EMPTY Epic cell — not
+    /// `QUEUE_EMPTY_CELL` (the dash every other absent-value cell uses).
+    /// "No epic" is the common case; a dash there would be noise.
+    #[test]
+    fn queue_epic_cell_is_blank_not_dashed_when_the_issue_has_no_epic() {
+        let app = make_test_app(BoardData {
+            drive_queue: vec![entry(102, 0, QUEUE_STATE_WAITING, &[])],
+            epic_children: vec![EpicChildren {
+                repo_name: "myrepo".to_string(),
+                tracking_issue: 50,
+                children: vec![EpicChild {
+                    number: 101,
+                    state: "open".to_string(),
+                }],
+            }],
+            ..BoardData::default()
+        });
+        let rows = app.queue_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cells[1],
+            "",
+            "no epic must render as an empty string, not {QUEUE_EMPTY_CELL:?}"
+        );
+    }
+
+    /// Matching is repo-scoped: an `EpicChildren` entry for a DIFFERENT
+    /// `repo_name` that happens to list the same issue NUMBER must not
+    /// populate the cell.
+    #[test]
+    fn queue_epic_cell_matching_is_repo_scoped() {
+        let app = make_test_app(BoardData {
+            drive_queue: vec![entry(101, 0, QUEUE_STATE_WAITING, &[])],
+            epic_children: vec![EpicChildren {
+                repo_name: "otherrepo".to_string(),
+                tracking_issue: 50,
+                children: vec![EpicChild {
+                    number: 101,
+                    state: "open".to_string(),
+                }],
+            }],
+            ..BoardData::default()
+        });
+        let rows = app.queue_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].cells[1], "",
+            "a same-numbered child in a DIFFERENT repo's epic must not \
+             populate this row's Epic cell"
+        );
+    }
+
+    /// `epic_children` empty (an older daemon, pre-#1195, or simply no epics
+    /// on this board) must render every Epic cell blank — never panic, and
+    /// never hide a row.
+    #[test]
+    fn queue_epic_cell_all_blank_when_epic_children_is_empty() {
+        let app = make_test_app(BoardData {
+            drive_queue: vec![
+                entry(101, 0, QUEUE_STATE_WAITING, &[]),
+                entry(102, 1, QUEUE_STATE_RUNNING, &[]),
+            ],
+            epic_children: Vec::new(),
+            ..BoardData::default()
+        });
+        let rows = app.queue_rows();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.cells[1], "");
+        }
+    }
+
+    /// TuiDriver acceptance: the Epic column sits immediately left of Issue
+    /// in the rendered header row — `# | Epic | Issue | Title | …`.
+    ///
+    /// The companion half of this issue's acceptance bullet — that the
+    /// numeric-sort columns still sort numerically after the index shift —
+    /// is covered by [`queue_sort_orders_numeric_columns_numerically`] and
+    /// [`queue_new_count_columns_sort_numerically_not_lexically`] below,
+    /// both of which now sort through the POST-#99 `QUEUE_COL_WORK`/
+    /// `QUEUE_COL_SMOKE`/`QUEUE_COL_REVIEW` constants. A mouse-driven header
+    /// click isn't used for that check here: `#Work`'s column is narrower
+    /// than `DataTableLayout::hit_test`'s own divider-drag grab zone, so a
+    /// click anywhere in it reliably lands on the resize divider rather than
+    /// the sort — the same reason every other narrow-numeric-column sort
+    /// test in this module drives `queue_sort_by_column` directly instead of
+    /// clicking.
+    #[test]
+    fn tuidriver_queue_header_carries_epic_immediately_left_of_issue() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_test_app(BoardData {
+            drive_queue: vec![entry(1, 0, QUEUE_STATE_WAITING, &[])],
+            epic_children: vec![EpicChildren {
+                repo_name: "myrepo".to_string(),
+                tracking_issue: 50,
+                children: vec![EpicChild {
+                    number: 1,
+                    state: "open".to_string(),
+                }],
+            }],
+            ..BoardData::default()
+        });
+        app.active_view = SidebarView::Queue;
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 200, 30);
+        let screen = driver.screen();
+
+        let (epic_x, header_y) = driver
+            .find("Epic")
+            .unwrap_or_else(|| panic!("Epic header must render:\n{screen}"));
+        let (issue_x, issue_y) = driver
+            .find("Issue")
+            .unwrap_or_else(|| panic!("Issue header must render:\n{screen}"));
+        assert!(
+            epic_x < issue_x,
+            "the Epic column header must sit LEFT of Issue:\n{screen}"
+        );
+        assert_eq!(
+            header_y, issue_y,
+            "Epic and Issue must be on the same header row"
+        );
+        assert!(
+            screen.contains("M#50"),
+            "the seeded row's epic must actually render on the grid, not \
+             just the header:\n{screen}"
         );
     }
 

@@ -1367,6 +1367,18 @@ impl CoordApp {
             // `PlansStub` target instead of `MilestoneHeader`, which offers
             // "Create work order / promote to epic…" (contract §4b) rather
             // than a silent no-op.
+            // #106: while the sidebar tree has a specific milestone/epic
+            // leaf selected, the main panel shows that epic's issue grid
+            // instead of the milestone roster — the menu target follows,
+            // resolving to the selected GRID row rather than the roster
+            // row `plans_selected()` would otherwise return.
+            SidebarView::Plans if self.plans_tree_selected_entry().is_some() => {
+                let entry = self.plans_tree_selected_entry()?;
+                self.plans_grid_selected_row().map(|row| ContextMenuTarget::PlansGridRow {
+                    repo_name: entry.repo.clone(),
+                    issue_number: row.issue_number,
+                })
+            }
             SidebarView::Plans => self.plans_selected().map(|e| match e.tracking_issue {
                 Some(tracking_issue) => ContextMenuTarget::MilestoneHeader {
                     repo_name: e.repo.clone(),
@@ -1509,6 +1521,12 @@ impl CoordApp {
             ContextMenuTarget::ApprovedRow { submission_id } => {
                 self.context_menu_items_for_approved_row(submission_id)
             }
+            // #106: right-click on a row of the Plans panel's per-epic
+            // issue grid.
+            ContextMenuTarget::PlansGridRow {
+                repo_name,
+                issue_number,
+            } => self.context_menu_items_for_plans_grid_row(repo_name, *issue_number),
         };
         if items.is_empty() {
             return false;
@@ -6844,6 +6862,10 @@ impl CoordApp {
                     // #…" isn't one of this menu's items, same rationale as
                     // MachineRow/TerminalRow above.
                     ContextMenuTarget::ApprovedRow { .. } => 0,
+                    // #106: a Plans-grid row's issue number — "Copy issue
+                    // #…" isn't one of this menu's items either, but the
+                    // number is right there if a future menu wants it.
+                    ContextMenuTarget::PlansGridRow { issue_number, .. } => *issue_number,
                 };
                 // #1374: the actual clipboard write happens in the two
                 // direct UI callers (`handle_context_menu_click` /
@@ -6921,13 +6943,25 @@ impl CoordApp {
             // seam — no direct DB access, same posture as every other TUI
             // action.
             "drive-queue-remove" => {
-                if let ContextMenuTarget::DriveQueueRow {
-                    repo_name,
-                    issue_number,
-                    ..
-                } = target
-                {
-                    self.dispatch_drive_queue_remove(repo_name, *issue_number);
+                match target {
+                    ContextMenuTarget::DriveQueueRow {
+                        repo_name,
+                        issue_number,
+                        ..
+                    } => {
+                        self.dispatch_drive_queue_remove(repo_name, *issue_number);
+                    }
+                    // #106: the Plans grid's own "Remove from queue" item —
+                    // same verb, different target shape (no cached
+                    // position/state to carry; `issue_number` here is
+                    // already a non-negative `u64`).
+                    ContextMenuTarget::PlansGridRow {
+                        repo_name,
+                        issue_number,
+                    } => {
+                        self.dispatch_drive_queue_remove(repo_name, *issue_number as i64);
+                    }
+                    _ => {}
                 }
                 true
             }
@@ -7003,6 +7037,19 @@ impl CoordApp {
                 }
                 true
             }
+            // #106: Plans-grid row → "Go to Board". Same shared
+            // `jump_to_board` body as the Queue/Reports rows above — the
+            // only difference is where the `(repo, issue)` came from.
+            "plans-grid-go-to-board" => {
+                if let ContextMenuTarget::PlansGridRow {
+                    repo_name,
+                    issue_number,
+                } = target
+                {
+                    self.jump_to_board(repo_name, *issue_number);
+                }
+                true
+            }
             // #2454: Reports result row → "View on Board". Same verb, same
             // shared body as the Queue row's above; the only difference is
             // where the `(repo, issue)` came from — a `ReportRow` target
@@ -7049,7 +7096,18 @@ impl CoordApp {
             // the action id (the `start-*-on:` precedent) because
             // `ContextMenuItem` carries no per-item payload.
             "drive-queue-add" => {
-                if let Some((repo, issue)) = self.pipeline_menu_repo_issue(target) {
+                // #106: the Plans grid's own row shape isn't one
+                // `pipeline_menu_repo_issue` (drive_queue.rs) knows about —
+                // resolved here instead of widening that match, since this
+                // is the only "Add to drive queue" caller with that shape.
+                let repo_issue = match target {
+                    ContextMenuTarget::PlansGridRow {
+                        repo_name,
+                        issue_number,
+                    } => Some((repo_name.clone(), *issue_number)),
+                    _ => self.pipeline_menu_repo_issue(target),
+                };
+                if let Some((repo, issue)) = repo_issue {
                     self.dispatch_drive_queue_add(&repo, issue, None, &[]);
                 }
                 true

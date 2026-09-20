@@ -402,6 +402,12 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         plans_tree_expanded: std::collections::HashMap::new(),
         plans_tree_selected: None,
         plans_tree_scroll: 0,
+        // #106: per-epic issue grid — same pre-sized `TableState` shape as
+        // the real constructor (`CoordApp::new`).
+        plans_grid_table: TableState {
+            column_overrides: vec![None; 4],
+            ..Default::default()
+        },
         // #1039: Audit panel — nothing seeded by default; use
         // `make_app_with_audit_json` to pre-populate `audit_page`.
         audit_page: None,

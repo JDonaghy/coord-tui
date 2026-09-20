@@ -47081,6 +47081,330 @@ Milestone tracking issue.
         );
     }
 
+    // ── #106: epic-keyed tree + issue grid ────────────────────────────────
+
+    fn plans_grid_open_issue(
+        repo: &str,
+        number: u64,
+        title: &str,
+        state: &str,
+        milestone_number: Option<i64>,
+    ) -> OpenIssue {
+        OpenIssue {
+            repo_name: repo.to_string(),
+            number,
+            title: title.to_string(),
+            body: String::new(),
+            state: state.to_string(),
+            labels: vec![],
+            milestone_number,
+            milestone_title: None,
+            body_truncated: false,
+            body_len: None,
+            synced_at: None,
+            state_reason: String::new(),
+        }
+    }
+
+    /// #106: a plan whose tracking epic is `closed` (per `data.open_issues`)
+    /// must not appear in the sidebar tree — even though it's still fully
+    /// present in the unfiltered roster (`plans_entries()`), matching
+    /// `coord.plans.aggregate_repo_plans`'s own posture on closed epics.
+    #[test]
+    fn plans_sidebar_tree_hides_plan_with_closed_tracking_epic() {
+        let data = BoardData {
+            pipeline_repos: vec![("api".to_string(), "acme/api".to_string())],
+            plan_roster_supported: true,
+            plan_roster: vec![PlanRosterEntry {
+                repo: "api".to_string(),
+                title: "Done Epic".to_string(),
+                milestone_number: 5,
+                tracking_issue: Some(500),
+                has_work_order: true,
+                ready_frontier: 0,
+                blocked: 0,
+                in_flight: 0,
+                done: 3,
+                total: 3,
+                needs_you: vec![],
+                outcome_run_number: None,
+                outcome_met: None,
+                outcome_partial: None,
+                outcome_gap: None,
+                outcome_bottom_line: None,
+                outcome_diff_summary: None,
+            }],
+            open_issues: vec![plans_grid_open_issue("api", 500, "Done Epic", "closed", Some(5))],
+            ..BoardData::default()
+        };
+        let app = make_test_app(data);
+        // Unfiltered roster still carries the plan (aggregation posture).
+        assert_eq!(app.plans_entries().len(), 1);
+        // But the sidebar tree's per-repo group must drop it.
+        let group = app.plans_tree_group_for_repo("api");
+        assert!(
+            group.is_empty(),
+            "#106: a plan with a closed tracking epic must not appear in \
+             the sidebar tree's per-repo group: {group:?}",
+        );
+        let (rows, _) = app.plans_tree_rows();
+        assert!(
+            !rows.iter().any(|r| r.text.spans.iter().any(|s| s.text.contains("Done Epic"))),
+            "#106: the closed-epic plan's title must not render in the tree",
+        );
+    }
+
+    /// #106: a milestone with NO tracking epic at all stays visible in the
+    /// tree, labelled `ms#N` (not a bare `#N`, which would read as an issue
+    /// reference) — distinct from `plans_sidebar_tree_hides_plan_with_
+    /// closed_tracking_epic` above, which is specifically about a CLOSED
+    /// epic, not a missing one.
+    #[test]
+    fn plans_sidebar_tree_labels_epicless_milestone_with_ms_prefix() {
+        let data = BoardData {
+            pipeline_repos: vec![("vimcode".to_string(), "acme/vimcode".to_string())],
+            plan_roster_supported: true,
+            plan_roster: vec![PlanRosterEntry {
+                repo: "vimcode".to_string(),
+                title: "Crate Extraction".to_string(),
+                milestone_number: 2,
+                tracking_issue: None,
+                has_work_order: false,
+                ready_frontier: 0,
+                blocked: 0,
+                in_flight: 0,
+                done: 0,
+                total: 0,
+                needs_you: vec!["no_work_order".to_string()],
+                outcome_run_number: None,
+                outcome_met: None,
+                outcome_partial: None,
+                outcome_gap: None,
+                outcome_bottom_line: None,
+                outcome_diff_summary: None,
+            }],
+            ..BoardData::default()
+        };
+        let mut app = make_test_app(data);
+        // Expand the repo node so the milestone leaf is actually painted
+        // (tree leaves are collapsed by default — see
+        // `plans_tree_repo_expanded`).
+        app.plans_tree_expanded.insert("vimcode".to_string(), true);
+        let (rows, _) = app.plans_tree_rows();
+        let label = rows
+            .iter()
+            .find_map(|r| {
+                let text: String = r.text.spans.iter().map(|s| s.text.as_str()).collect();
+                text.contains("Crate Extraction").then_some(text)
+            })
+            .unwrap_or_else(|| panic!("#106: no tree row for 'Crate Extraction'"));
+        assert!(
+            label.contains("ms#2"),
+            "#106: an epic-less milestone must be labelled `ms#<milestone>` \
+             (not a bare `#2`, which would read as an issue reference), got: {label:?}",
+        );
+    }
+
+    /// #106: with no `## Work order` block on the epic, the issue grid
+    /// still populates — from plain milestone membership
+    /// (`data.open_issues` filtered to the epic's `milestone_number`,
+    /// excluding the epic issue itself). This is the `vimcode`-today case
+    /// the issue body calls out (no epic has a parseable block).
+    #[test]
+    fn plans_grid_populates_from_milestone_membership_without_work_order() {
+        let data = BoardData {
+            pipeline_repos: vec![("vimcode".to_string(), "acme/vimcode".to_string())],
+            plan_roster_supported: true,
+            open_issues: vec![
+                // The tracking epic itself — no `## Work order` body — must
+                // be excluded from its own grid.
+                plans_grid_open_issue("vimcode", 1170, "Vim Conformance", "open", Some(1)),
+                plans_grid_open_issue("vimcode", 1171, "Fix motion parsing", "open", Some(1)),
+                plans_grid_open_issue("vimcode", 1172, "Add ex-command support", "open", Some(1)),
+                // A different milestone's issue must not leak in.
+                plans_grid_open_issue("vimcode", 1180, "Unrelated", "open", Some(2)),
+            ],
+            ..BoardData::default()
+        };
+        let app = make_test_app(data);
+        let entry = PlanRosterEntry {
+            repo: "vimcode".to_string(),
+            title: "Vim Conformance".to_string(),
+            milestone_number: 1,
+            tracking_issue: Some(1170),
+            has_work_order: false,
+            ready_frontier: 0,
+            blocked: 0,
+            in_flight: 0,
+            done: 0,
+            total: 0,
+            needs_you: vec![],
+            outcome_run_number: None,
+            outcome_met: None,
+            outcome_partial: None,
+            outcome_gap: None,
+            outcome_bottom_line: None,
+            outcome_diff_summary: None,
+        };
+        let rows = app.plans_grid_rows(&entry);
+        let numbers: Vec<u64> = rows.iter().map(|r| r.issue_number).collect();
+        assert_eq!(
+            numbers,
+            vec![1171, 1172],
+            "#106: the grid must list the milestone's member issues \
+             (excluding the epic itself and other milestones' issues), got: {rows:?}",
+        );
+    }
+
+    /// #106: status resolves to `in-progress` when the issue has a live row
+    /// in `data.assignments`, and to `pending` (with a 1-based position
+    /// among that repo's `waiting` `drive_queue` entries) when it's queued
+    /// instead.
+    #[test]
+    fn plans_grid_status_resolves_in_progress_and_pending_with_position() {
+        let data = BoardData {
+            pipeline_repos: vec![("api".to_string(), "acme/api".to_string())],
+            plan_roster_supported: true,
+            open_issues: vec![
+                plans_grid_open_issue("api", 500, "Substrate", "open", Some(5)),
+                plans_grid_open_issue("api", 501, "Being worked", "open", Some(5)),
+                plans_grid_open_issue("api", 502, "Waiting in queue", "open", Some(5)),
+            ],
+            assignments: vec![make_assignment_typed("work", 501, "api", Some("work"))],
+            drive_queue: vec![BoardDriveQueueEntry {
+                id: None,
+                repo_name: "api".to_string(),
+                issue_number: 502,
+                position: 0,
+                machine: None,
+                after: vec![],
+                state: "waiting".to_string(),
+                ..BoardDriveQueueEntry::default()
+            }],
+            ..BoardData::default()
+        };
+        let app = make_test_app(data);
+        let entry = PlanRosterEntry {
+            repo: "api".to_string(),
+            title: "Substrate".to_string(),
+            milestone_number: 5,
+            tracking_issue: Some(500),
+            has_work_order: false,
+            ready_frontier: 0,
+            blocked: 0,
+            in_flight: 0,
+            done: 0,
+            total: 0,
+            needs_you: vec![],
+            outcome_run_number: None,
+            outcome_met: None,
+            outcome_partial: None,
+            outcome_gap: None,
+            outcome_bottom_line: None,
+            outcome_diff_summary: None,
+        };
+        let rows = app.plans_grid_rows(&entry);
+        let worked = rows.iter().find(|r| r.issue_number == 501).unwrap();
+        assert_eq!(worked.status, "in-progress", "row: {worked:?}");
+        let waiting = rows.iter().find(|r| r.issue_number == 502).unwrap();
+        assert_eq!(waiting.status, "pending", "row: {waiting:?}");
+        assert_eq!(
+            waiting.order_text, "1",
+            "#106: a queued-but-not-ordered issue's Order column must show \
+             its 1-based position among the repo's waiting entries: {waiting:?}",
+        );
+    }
+
+    /// Black-box (#106): expanding the sidebar tree and clicking an epic
+    /// leaf swaps the main panel from the milestone roster to the per-epic
+    /// issue `DataTable` grid, and right-clicking a grid row offers "Go to
+    /// Board" plus a queue-state-gated "Add to drive queue" — driving the
+    /// whole tree→grid→context-menu path through the real
+    /// `event → handle → render` loop (`TuiDriver`), not direct method
+    /// calls.
+    #[test]
+    fn tuidriver_plans_epic_grid_opens_from_tree_and_offers_row_context_menu() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let data = BoardData {
+            pipeline_repos: vec![("api".to_string(), "acme/api".to_string())],
+            plan_roster_supported: true,
+            plan_roster: vec![PlanRosterEntry {
+                repo: "api".to_string(),
+                title: "Substrate".to_string(),
+                milestone_number: 5,
+                tracking_issue: Some(500),
+                has_work_order: false,
+                ready_frontier: 0,
+                blocked: 0,
+                in_flight: 0,
+                done: 0,
+                total: 0,
+                needs_you: vec![],
+                outcome_run_number: None,
+                outcome_met: None,
+                outcome_partial: None,
+                outcome_gap: None,
+                outcome_bottom_line: None,
+                outcome_diff_summary: None,
+            }],
+            open_issues: vec![
+                plans_grid_open_issue("api", 500, "Substrate", "open", Some(5)),
+                plans_grid_open_issue("api", 501, "Wire the substrate layer", "open", Some(5)),
+            ],
+            ..BoardData::default()
+        };
+        let app = make_test_app(data);
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        click_activity_icon(&mut driver, "◆");
+
+        // Expand the 'api' repo tree node so the epic leaf is painted.
+        let (rx, ry) = driver.find("◇ api").unwrap_or_else(|| {
+            panic!("#106: could not find the 'api' sidebar tree row:\n{}", driver.screen())
+        });
+        driver.click(rx, ry);
+
+        let (ex, ey) = driver.find("#500 Substrate").unwrap_or_else(|| {
+            panic!(
+                "#106: could not find the epic tree leaf '#500 Substrate':\n{}",
+                driver.screen()
+            )
+        });
+        driver.click(ex, ey);
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains("Wire the substrate layer"),
+            "#106: selecting the epic leaf must show its issue grid, \
+             listing the milestone's member issue:\n{screen}",
+        );
+        assert!(
+            screen.contains("Description") && screen.contains("Status") && screen.contains("Order"),
+            "#106: the grid's DataTable header must show the # / Description / \
+             Status / Order columns:\n{screen}",
+        );
+
+        let (mx, my) = driver.find("Wire the substrate layer").unwrap_or_else(|| {
+            panic!("#106: could not find the grid row to right-click:\n{screen}")
+        });
+        driver.dispatch(UiEvent::MouseDown {
+            widget: None,
+            button: MouseButton::Right,
+            position: Point::new(mx, my),
+            modifiers: Modifiers::default(),
+        });
+
+        let menu_screen = driver.screen();
+        assert!(
+            menu_screen.contains("Go to Board"),
+            "#106: right-clicking a grid row must offer 'Go to Board':\n{menu_screen}",
+        );
+        assert!(
+            menu_screen.contains("Add to drive queue"),
+            "#106: an unqueued grid row's menu must offer 'Add to drive queue':\n{menu_screen}",
+        );
+    }
+
     // ── #1001: repo grouping + severity-split attention badge ────────────
 
     /// `plans_needing_attention_count` — the shared basis for the sidebar

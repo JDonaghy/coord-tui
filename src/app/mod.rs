@@ -3898,6 +3898,14 @@ pub struct CoordApp {
     plans_tree_selected: Option<TreePath>,
     /// Scroll offset (in flattened tree rows) for the Plans sidebar tree.
     plans_tree_scroll: usize,
+    /// #106: geometry/interaction state (layout cache, column resize,
+    /// scroll, row selection) for the per-epic issue grid
+    /// (`plans.rs::render_plan_issue_grid`), shown in the Plans main panel
+    /// whenever the sidebar tree has a specific milestone/epic leaf
+    /// selected (`plans_tree_selected_entry`). A brand-new table, so it
+    /// goes straight onto the shared `TableState` (#72) rather than the
+    /// older per-field pattern Audit still uses.
+    plans_grid_table: TableState,
 
     // ── #1039: Audit ActivityBar panel ───────────────────────────────────────
     /// Cached first page of `/audit` (#1037), fetched by `spawn_audit_fetch`
@@ -4721,6 +4729,14 @@ impl CoordApp {
             plans_tree_expanded: std::collections::HashMap::new(),
             plans_tree_selected: None,
             plans_tree_scroll: 0,
+            // #106: per-epic issue grid — 4 columns (`plans_grid_columns`),
+            // pre-sized the same way `CompletedGrid`'s own `TableState`
+            // default is (a fixed column count forever, so a bare pre-sized
+            // `Vec` can never mean the wrong thing).
+            plans_grid_table: TableState {
+                column_overrides: vec![None; 4],
+                ..Default::default()
+            },
             // #1039: Audit panel — nothing fetched yet; the first tick with
             // active_view == Audit arms spawn_audit_fetch (settings_ui.rs).
             audit_page: None,

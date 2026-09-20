@@ -1182,6 +1182,19 @@ pub(crate) enum ContextMenuTarget {
     /// the mapping between right-click and click can't leave a stale
     /// enabled/disabled decision baked into the target.
     ApprovedRow { submission_id: String },
+    /// #106: right-click on a row of the Plans panel's per-epic issue grid
+    /// (`plans.rs::render_plan_issue_grid`). Carries only the row's
+    /// identity — the menu builder
+    /// (`CoordApp::context_menu_items_for_plans_grid_row`) re-resolves
+    /// queue/assignment state fresh from `self.data` at build time, same
+    /// posture as `ReportRow`/`ApprovedRow` above, so a `/board` poll
+    /// between right-click and click can't leave a stale enabled/disabled
+    /// decision baked into the target.
+    PlansGridRow {
+        /// Coord-local repo name (matches `coordinator.yml`).
+        repo_name: String,
+        issue_number: u64,
+    },
 }
 
 /// #262: lifecycle bucket for a Pipeline sidebar row at right-click

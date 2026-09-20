@@ -1798,6 +1798,25 @@ impl CoordApp {
                         self.plans_detail_scroll = 0;
                         needs_redraw = true;
                     }
+                    // #106: Esc while the per-epic issue grid is showing
+                    // (a specific milestone/epic leaf selected in the
+                    // sidebar tree) pops the tree selection back up to the
+                    // repo level — reverting the main panel to the
+                    // milestone roster — instead of falling through to the
+                    // unguarded catch-all below. Must precede it, same
+                    // reasoning as the #1122 detail-pane Esc arm above.
+                    Key::Named(NamedKey::Escape)
+                        if self.active_view == SidebarView::Plans
+                            && !self.plans_detail_open
+                            && self.plans_tree_selected_entry().is_some() =>
+                    {
+                        if let Some(path) = self.plans_tree_selected.clone() {
+                            if let Some(&repo_idx) = path.first() {
+                                self.plans_tree_selected = Some(vec![repo_idx]);
+                            }
+                        }
+                        needs_redraw = true;
+                    }
                     Key::Char('q') | Key::Named(NamedKey::Escape) => return Reaction::Exit,
 
                     // §3 (#782): numeric keys 1-7 used to switch sidebar views
@@ -1831,6 +1850,34 @@ impl CoordApp {
                         needs_redraw = true;
                     }
 
+                    // ── #106: per-epic issue grid keyboard nav ───────────
+                    // Guarded on `plans_tree_selected_entry().is_some()` —
+                    // a specific milestone/epic leaf selected in the
+                    // sidebar tree — so these take precedence over the
+                    // generic roster `j`/`k` arms just below, which apply
+                    // only to the "All repos"/repo-scoped roster view.
+                    Key::Char('j') | Key::Named(NamedKey::Down)
+                        if self.active_view == SidebarView::Plans
+                            && !self.plans_detail_open
+                            && self.plans_tree_selected_entry().is_some() =>
+                    {
+                        let n = self.plans_grid_row_count();
+                        if n > 0 {
+                            self.plans_grid_table.sel =
+                                (self.plans_grid_table.sel + 1).min(n - 1);
+                        }
+                        self.fix_plans_grid_scroll(content_visible_rows(ctx.main_bounds(), lh));
+                        needs_redraw = true;
+                    }
+                    Key::Char('k') | Key::Named(NamedKey::Up)
+                        if self.active_view == SidebarView::Plans
+                            && !self.plans_detail_open
+                            && self.plans_tree_selected_entry().is_some() =>
+                    {
+                        self.plans_grid_table.sel = self.plans_grid_table.sel.saturating_sub(1);
+                        self.fix_plans_grid_scroll(content_visible_rows(ctx.main_bounds(), lh));
+                        needs_redraw = true;
+                    }
                     // ── Plans panel keyboard nav (#975) ──────────────────
                     // #1001: `plans_sel` indexes into `plans_visible_entries()`
                     // — the currently-rendered rows — not the full roster, so
@@ -4346,6 +4393,23 @@ impl CoordApp {
                         // otherwise open.
                         let main_b = ctx.main_bounds();
                         let lh = backend.line_height();
+                        // #106: a specific milestone/epic leaf selected in
+                        // the sidebar tree replaces the roster with the
+                        // per-epic issue grid — right-click hit-tests THAT
+                        // instead of `plans_row_at`, and a miss is just a
+                        // no-op (unlike the roster's own miss case below,
+                        // there's no "New plan" stub to fall back to for a
+                        // specific issue row).
+                        if self.plans_tree_selected_entry().is_some() {
+                            if let Some(DataTableHit::Row { idx }) = self.plans_grid_hit(pos) {
+                                self.plans_grid_table.sel = idx;
+                                if let Some(target) = self.context_menu_target_for_selection() {
+                                    if self.open_context_menu(pos, target) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        } else {
                         // #1123 §4c: a right-click that misses every
                         // selectable row (the repo-header row, the "+N
                         // without a work order" summary line, or truly
@@ -4370,6 +4434,7 @@ impl CoordApp {
                             if self.open_context_menu(pos, target) {
                                 return true;
                             }
+                        }
                         }
                     }
                     // #454: Forward right-click Press to the embedded PTY when
@@ -4637,6 +4702,15 @@ impl CoordApp {
                     {
                         redraw |= self.completed_update_resize_drag(pos);
                     }
+                    // #106: continue an in-progress Plans-grid column-resize
+                    // drag, started by a `MouseDown` on a `DataTableHit::
+                    // HeaderDivider` (`mouse_main_click`) — same precedence
+                    // and shape as the Completed block just above.
+                    if self.active_view == SidebarView::Plans && buttons.left {
+                        redraw |= self
+                            .plans_grid_table
+                            .update_resize_drag(pos, Self::PLANS_GRID_MIN_COLUMN_WIDTH);
+                    }
                     // #2017: resize-cursor hover affordance over the
                     // separator — "should show a resize affordance on hover
                     // if the backend supports it". `set_cursor` no-ops on
@@ -4832,6 +4906,10 @@ impl CoordApp {
                     // takes `resize_col` *and* clears `resize_base`, for
                     // the reason spelled out above this block.
                     released |= self.completed_grid.table.end_resize_drag();
+                    // #106: end an in-progress Plans-grid column-resize
+                    // drag, same shape as Completed's own `TableState` just
+                    // above.
+                    released |= self.plans_grid_table.end_resize_drag();
                     // #64: end a Pipeline Log tab vertical-scrollbar-track drag.
                     released |= std::mem::take(&mut self.pipeline_log_scrollbar_drag);
                     // #2288 (ms-65 §9): end a Board pane divider drag.
@@ -5971,6 +6049,23 @@ impl CoordApp {
                     return true;
                 }
                 return false;
+            }
+            // #106: a specific milestone/epic leaf selected in the sidebar
+            // tree replaces the roster with the per-epic issue grid — hit
+            // test that `DataTable` instead of `plans_row_at` (which
+            // assumes the roster `ListView` is what's painted).
+            if self.plans_tree_selected_entry().is_some() {
+                return match self.plans_grid_hit(pos) {
+                    Some(DataTableHit::Row { idx }) => {
+                        self.plans_grid_table.sel = idx;
+                        true
+                    }
+                    Some(DataTableHit::HeaderDivider { col }) => {
+                        self.plans_grid_table.resize_col = Some(col);
+                        true
+                    }
+                    _ => false,
+                };
             }
             if let Some(idx) = self.plans_row_at(pos, main_b, lh) {
                 self.plans_sel = idx;

@@ -118,6 +118,24 @@ enum DetailRowKind {
 /// the already-formatted left-hand text (issue ref + title, or a bare
 /// count like `"3 done"`); `status_word` is the right-aligned state word
 /// rendered via `ListItem::detail`.
+/// One row of the #106 issue grid (`CoordApp::render_plan_issue_grid`),
+/// resolved from milestone membership (`data.open_issues`) and, when the
+/// epic has a parseable `## Work order` block, overlaid with the
+/// work-order DAG's declared order / blocked state
+/// (`milestone_dag::milestones_with_work_orders`).
+#[derive(Clone, Debug)]
+pub(crate) struct PlanGridRow {
+    pub(crate) issue_number: u64,
+    pub(crate) title: String,
+    pub(crate) status: String,
+    pub(crate) status_color: Color,
+    /// Work-order position (1-based) when the epic has a parsed order,
+    /// this repo's waiting-queue position (1-based) when the issue is
+    /// queued-but-not-ordered, a "blocked (after #N, ...)" note, or
+    /// empty when none of those apply.
+    pub(crate) order_text: String,
+}
+
 struct DetailWorkOrderRow {
     glyph: char,
     label: String,
@@ -334,20 +352,98 @@ impl CoordApp {
         *self.plans_tree_expanded.get(repo).unwrap_or(&false)
     }
 
+    /// #106: true when `entry` carries a tracking epic AND that epic's
+    /// `OpenIssue` row (looked up by `(repo, tracking_issue)`) reports
+    /// `state == "closed"`. A plan whose epic hasn't synced into
+    /// `open_issues` at all (stale cache, or a daemon that hasn't refreshed
+    /// since the epic was created) is treated as NOT closed — fails open,
+    /// same posture `plan_epic_is_closed`'s callers rely on elsewhere in
+    /// this file (e.g. the DAG-overlay fallback in
+    /// `plan_detail_work_order_rows`).
+    ///
+    /// Deliberately client-side-only: `PlanEntry.to_dict()` carries no epic
+    /// state (see the #106 issue body), so this is derived from
+    /// `data.open_issues` rather than a wire-shape change to
+    /// `coord/plans.py`.
+    fn plan_epic_is_closed(&self, entry: &PlanRosterEntry) -> bool {
+        match entry.tracking_issue {
+            Some(tracking) => self.data.open_issues.iter().any(|oi| {
+                oi.repo_name == entry.repo && oi.number == tracking && oi.state == "closed"
+            }),
+            None => false,
+        }
+    }
+
+    /// #106: the plan-roster entries eligible for the Plans **sidebar
+    /// tree** for `repo` — `plans_entries()`'s group for that repo, with
+    /// closed-tracking-epic plans dropped (a plan you're using as a
+    /// worklist has no business surfacing a done epic). Milestones with no
+    /// epic at all are unaffected (`plan_epic_is_closed` is `false` for
+    /// `tracking_issue: None`) — they stay visible per the #106 issue body.
+    ///
+    /// Shared by `plans_tree_rows` (paint) and `plans_tree_click_row` /
+    /// `plans_tree_selected_entry` (index resolution) so a flat `mi` index
+    /// can never resolve to a different row than the one actually painted
+    /// — the same reasoning `plans_row_at`'s doc comment gives for
+    /// `render_plans_panel`.
+    ///
+    /// **Note:** this filter is sidebar-tree-only. The main-panel roster
+    /// (`plans_entries()` / `plans_scoped_entries()` / `plans_visible_entries()`)
+    /// stays unfiltered — `coord.plans.aggregate_repo_plans` deliberately
+    /// merges closed epics into its tracking-issue search (see the #106
+    /// issue body), and this file's aggregate consumers (attention counts,
+    /// the "All repos" badge below) intentionally keep matching that.
+    pub(crate) fn plans_tree_group_for_repo(&self, repo: &str) -> Vec<PlanRosterEntry> {
+        self.plans_entries()
+            .into_iter()
+            .filter(|e| e.repo == repo && !self.plan_epic_is_closed(e))
+            .collect()
+    }
+
+    /// #106: the sidebar tree's row label for one milestone leaf —
+    /// `"#<epic issue>  <title>"` when the plan has a (non-closed, per
+    /// `plans_tree_group_for_repo`'s filter) tracking epic, so the number
+    /// shown is the ISSUE you'd actually open/chat about/dispatch, not the
+    /// milestone number. A milestone with no epic at all keeps a `ms#N`
+    /// label instead, so it stays reachable from the tree without ever
+    /// being confused for an issue reference.
+    fn plans_tree_row_label(entry: &PlanRosterEntry) -> String {
+        match entry.tracking_issue {
+            Some(tracking) => format!("#{} {}", tracking, trunc(&entry.title, 24)),
+            None => format!("ms#{} {}", entry.milestone_number, trunc(&entry.title, 24)),
+        }
+    }
+
     /// Build the Plans sidebar tree (#1121): a root "All repos" leaf (no
     /// scoping — the pre-#1121 behaviour) followed by one row per
     /// `plans_repo_list()` entry, each carrying a plan-count badge (amber
     /// when the repo has ≥1 *loud* attention signal, see
-    /// `has_loud_attention`) and — when expanded — that repo's milestones as
-    /// leaves. Returns the `TreeRow`s alongside a same-length/same-order
-    /// `PlansTreeRow` index so click/keyboard-nav handlers can map a flat
-    /// row index back to what it represents, mirroring
-    /// `sessions_tree_rows`.
+    /// `has_loud_attention`) and — when expanded — that repo's OPEN-epic
+    /// milestones as leaves (#106: `plans_tree_group_for_repo` drops any
+    /// plan whose tracking epic has closed). Returns the `TreeRow`s
+    /// alongside a same-length/same-order `PlansTreeRow` index so
+    /// click/keyboard-nav handlers can map a flat row index back to what it
+    /// represents, mirroring `sessions_tree_rows`.
+    ///
+    /// **#106:** the "All repos" / per-repo badge counts and attention
+    /// totals below are derived from each repo's `plans_tree_group_for_repo`
+    /// (i.e. already exclude closed-epic plans) so they agree with what the
+    /// tree actually renders — unlike `plans_needing_attention_count`
+    /// (unfiltered, backs the status-bar badge, which intentionally counts
+    /// every loud signal on the board regardless of what's visible in any
+    /// one panel).
     pub(crate) fn plans_tree_rows(&self) -> (Vec<TreeRow>, Vec<PlansTreeRow>) {
-        let all_entries = self.plans_entries();
         let repos = self.plans_repo_list();
-        let total = all_entries.len();
-        let total_attn = self.plans_needing_attention_count();
+        let groups: Vec<Vec<PlanRosterEntry>> = repos
+            .iter()
+            .map(|repo| self.plans_tree_group_for_repo(repo))
+            .collect();
+        let total: usize = groups.iter().map(|g| g.len()).sum();
+        let total_attn: usize = groups
+            .iter()
+            .flatten()
+            .filter(|e| Self::has_loud_attention(e))
+            .count();
 
         let mut rows = Vec::with_capacity(repos.len() + 4);
         let mut index = Vec::with_capacity(repos.len() + 4);
@@ -375,8 +471,7 @@ impl CoordApp {
         index.push(PlansTreeRow::AllRepos);
 
         for (ri, repo) in repos.iter().enumerate() {
-            let group: Vec<&PlanRosterEntry> =
-                all_entries.iter().filter(|e| &e.repo == repo).collect();
+            let group = &groups[ri];
             let has_plans = !group.is_empty();
             let attn = group.iter().filter(|e| Self::has_loud_attention(e)).count();
             let expanded = has_plans && self.plans_tree_repo_expanded(repo);
@@ -436,7 +531,7 @@ impl CoordApp {
                         spans: vec![
                             StyledSpan::with_fg(format!("{marker} "), marker_col),
                             StyledSpan::with_fg(
-                                format!("#{} {}", entry.milestone_number, trunc(&entry.title, 24)),
+                                Self::plans_tree_row_label(entry),
                                 Color::rgb(190, 190, 200),
                             ),
                         ],
@@ -473,15 +568,20 @@ impl CoordApp {
     /// accounting for `plans_tree_scroll` — matching how
     /// `mouse_sidebar_click` derives it from pixel position for the
     /// Terminal/Sessions trees). Sets the scoping selection and, for a repo
-    /// row that hosts plans, toggles its tree expansion. Selecting a
-    /// milestone leaf scopes to its repo AND — expanding
-    /// `plans_expanded_repos` first if the milestone is untracked, so it's
-    /// actually visible — points `plans_sel` at the matching row in the
-    /// now-scoped `plans_visible_entries()`, so the main panel's existing
-    /// row highlight lands on the plan that was clicked. Always resets
-    /// `plans_sel` to 0 first since a scope change can shrink or grow the
-    /// visible list out from under the old index. Returns `true` when a
-    /// redraw is needed; `false` when `row_idx` is out of range.
+    /// row that hosts plans, toggles its tree expansion.
+    ///
+    /// **#106:** selecting a milestone/epic leaf no longer scopes/highlights
+    /// a row in the milestone roster (that view is retired for a specific
+    /// epic selection — `render_plans_panel` now shows the per-epic issue
+    /// grid instead, see `plans_tree_selected_entry`) — it resets the
+    /// grid's own selection/scroll (`plans_grid_table`) so a freshly-opened
+    /// epic's grid starts at the top rather than carrying over whatever
+    /// scroll position a previously-viewed epic's grid was left at.
+    ///
+    /// Always resets `plans_sel` to 0 first since a scope change (Repo/All
+    /// repos selection) can shrink or grow the roster's visible list out
+    /// from under the old index. Returns `true` when a redraw is needed;
+    /// `false` when `row_idx` is out of range.
     pub(crate) fn plans_tree_click_row(&mut self, row_idx: usize) -> bool {
         let (_, index) = self.plans_tree_rows();
         let Some(entry) = index.get(row_idx).copied() else {
@@ -504,28 +604,35 @@ impl CoordApp {
             }
             PlansTreeRow::Milestone(ri, mi) => {
                 self.plans_tree_selected = Some(vec![(ri + 1) as u16, mi as u16]);
-                if let Some(repo) = self.plans_repo_list().get(ri).cloned() {
-                    let group: Vec<PlanRosterEntry> = self
-                        .plans_entries()
-                        .into_iter()
-                        .filter(|e| e.repo == repo)
-                        .collect();
-                    if let Some(target) = group.get(mi).cloned() {
-                        if !target.has_work_order {
-                            self.plans_expanded_repos.insert(repo);
-                        }
-                        if let Some(idx) = self
-                            .plans_visible_entries()
-                            .iter()
-                            .position(|e| e.repo == target.repo && e.milestone_number == target.milestone_number)
-                        {
-                            self.plans_sel = idx;
-                        }
-                    }
-                }
+                self.plans_grid_table.sel = 0;
+                self.plans_grid_table.scroll = 0;
             }
         }
         true
+    }
+
+    /// #106: the plan-roster entry the sidebar tree's current selection
+    /// (`plans_tree_selected`) points at, when — and only when — that
+    /// selection is a specific milestone/epic leaf (a two-element path).
+    /// `None` for "All repos" / a bare repo-header selection (or nothing
+    /// selected yet), which is the tri-state `render_plans_panel` branches
+    /// on to decide between the classic milestone roster and the per-epic
+    /// issue grid.
+    ///
+    /// Resolves through `plans_tree_group_for_repo` — the SAME closed-epic-
+    /// filtered, per-repo group `plans_tree_rows` built `mi` against — so a
+    /// stale path (e.g. the epic closed since the tree was last painted)
+    /// fails closed to `None` (falls back to the roster) rather than
+    /// resolving to the wrong plan.
+    pub(crate) fn plans_tree_selected_entry(&self) -> Option<PlanRosterEntry> {
+        let path = self.plans_tree_selected.as_ref()?;
+        let repo_idx = *path.first()?;
+        if repo_idx == 0 {
+            return None;
+        }
+        let mi = *path.get(1)?;
+        let repo = self.plans_repo_list().get(repo_idx as usize - 1)?.clone();
+        self.plans_tree_group_for_repo(&repo).get(mi as usize).cloned()
     }
 
     /// Map one `needs_you` signal to its health-chip `(icon+label, color)`
@@ -636,6 +743,17 @@ impl CoordApp {
             let repo = self.plans_scope_repo().unwrap_or_default();
             let message = format!("  No plans for {repo}.");
             backend.draw_list(list_rect, &plain_list("plans-empty-scoped", &message, 0));
+            return;
+        }
+
+        // #106: an epic/milestone leaf selected in the sidebar tree gets
+        // the per-epic issue grid instead of the milestone roster below —
+        // must come AFTER both `plan_roster_supported` empty-state checks
+        // above (so those keep being the "not receiving plan data at all"
+        // pointer regardless of tree selection) but before the roster body
+        // itself, which this replaces entirely for that selection.
+        if let Some(epic_entry) = self.plans_tree_selected_entry() {
+            self.render_plan_issue_grid(backend, list_rect, lh, &epic_entry);
             return;
         }
 
@@ -833,6 +951,373 @@ impl CoordApp {
         // #79: milestone/epic titles and issue ids here need to be copyable
         // without retyping.
         register_list_text(backend, "plans-list", list_rect, &list);
+    }
+
+    // ─── #106: per-epic issue grid ─────────────────────────────────────────
+
+    /// #106 grid columns (repo column deliberately omitted — the
+    /// sidebar tree already scopes to one epic at a time).
+    pub(crate) fn plans_grid_columns() -> Vec<Column> {
+        vec![
+            Column {
+                title: "#".to_string(),
+                width: ColumnWidth::Fixed(8.0),
+                align: ColumnAlign::Left,
+            },
+            Column {
+                title: "Description".to_string(),
+                width: ColumnWidth::Flex(3.0),
+                align: ColumnAlign::Left,
+            },
+            Column {
+                title: "Status".to_string(),
+                width: ColumnWidth::Fixed(13.0),
+                align: ColumnAlign::Left,
+            },
+            Column {
+                title: "Order".to_string(),
+                width: ColumnWidth::Fixed(16.0),
+                align: ColumnAlign::Left,
+            },
+        ]
+    }
+
+    /// Narrow-terminal floor, same role as `Self::AUDIT_TABLE_MIN_WIDTH`.
+    pub(crate) const PLANS_GRID_MIN_WIDTH: f32 = 50.0;
+    /// Minimum width (cells) a #106 grid column may be dragged down to.
+    pub(crate) const PLANS_GRID_MIN_COLUMN_WIDTH: f32 = 4.0;
+
+    /// This repo's `waiting` `drive_queue` entries, in run order —
+    /// `drive_queue` ships "in run order" already (see the #106 issue
+    /// body), so this just filters+re-indexes rather than re-sorting
+    /// from scratch (a stable filter of an already-sorted sequence
+    /// preserves that order).
+    fn plan_grid_waiting_position(&self, repo: &str, issue_number: u64) -> Option<usize> {
+        self.data
+            .drive_queue
+            .iter()
+            .filter(|e| e.repo_name == repo && e.state == QUEUE_STATE_WAITING)
+            .position(|e| e.issue_number as u64 == issue_number)
+    }
+
+    /// #106 status/order derivation for one grid row — every input is
+    /// already on the wire (`open_issues` / `assignments` /
+    /// `drive_queue` / the work-order overlay), no new daemon call.
+    /// Precedence: `done` (closed) > `in-progress` (live assignment) >
+    /// queue state (`pending` w/ position, or `blocked`) > work-order
+    /// `Blocked` > anything else renders VERBATIM (the issue's raw
+    /// `state`) rather than being folded into a healthy bucket — the
+    /// same rule `drive_queue.rs` already states for an unrecognised
+    /// wire state.
+    fn plan_grid_status_order(
+        &self,
+        repo: &str,
+        oi: &OpenIssue,
+        dag_node: Option<&MilestoneDagNode>,
+        dag_index: Option<usize>,
+    ) -> (String, Color, String) {
+        let ordered = dag_index.map(|i| (i + 1).to_string()).unwrap_or_default();
+        if oi.state == "closed" {
+            return ("done".to_string(), Color::rgb(120, 210, 120), ordered);
+        }
+        if self
+            .data
+            .assignments
+            .iter()
+            .any(|a| a.repo == repo && a.issue_number == oi.number)
+        {
+            return ("in-progress".to_string(), Color::rgb(120, 190, 230), ordered);
+        }
+        if let Some(q) = self
+            .data
+            .drive_queue
+            .iter()
+            .find(|e| e.repo_name == repo && e.issue_number as u64 == oi.number)
+        {
+            match q.state.as_str() {
+                QUEUE_STATE_WAITING => {
+                    let pos = self
+                        .plan_grid_waiting_position(repo, oi.number)
+                        .unwrap_or(0);
+                    return (
+                        "pending".to_string(),
+                        Color::rgb(150, 150, 160),
+                        format!("{}", pos + 1),
+                    );
+                }
+                QUEUE_STATE_BLOCKED => {
+                    return ("blocked".to_string(), Color::rgb(220, 140, 90), ordered);
+                }
+                other => {
+                    // Anything else (e.g. `running`, `done`) renders
+                    // verbatim rather than being folded into a healthy
+                    // bucket.
+                    return (other.to_string(), Color::rgb(180, 180, 190), ordered);
+                }
+            }
+        }
+        if let Some(node) = dag_node {
+            if let NodeState::Blocked(after) = &node.state {
+                let order_text = if after.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "after {}",
+                        after.iter().map(|a| format!("#{a}")).collect::<Vec<_>>().join(", "),
+                    )
+                };
+                return ("blocked".to_string(), Color::rgb(220, 140, 90), order_text);
+            }
+        }
+        // Verbatim raw issue state (e.g. "open") — no canonical bucket
+        // applies.
+        (oi.state.clone(), Color::rgb(200, 200, 200), ordered)
+    }
+
+    /// Build the #106 issue grid's row set for `entry` — milestone
+    /// membership (`data.open_issues` on `entry.milestone_number`,
+    /// excluding the epic issue itself), overlaid with the work-order
+    /// DAG's declared order/blocked state when the epic has a parseable
+    /// `## Work order` block (reuses `milestones_with_work_orders`
+    /// rather than re-parsing — same precedent
+    /// `plan_detail_work_order_rows` already set). Rows are ordered by
+    /// declared work-order position when available, else by issue
+    /// number, so the grid reads top-to-bottom in dispatch order.
+    pub(crate) fn plans_grid_rows(&self, entry: &PlanRosterEntry) -> Vec<PlanGridRow> {
+        let members: Vec<&OpenIssue> = self
+            .data
+            .open_issues
+            .iter()
+            .filter(|oi| {
+                oi.repo_name == entry.repo
+                    && oi.milestone_number == Some(entry.milestone_number)
+                    && Some(oi.number) != entry.tracking_issue
+            })
+            .collect();
+
+        let dag_nodes: Option<Vec<MilestoneDagNode>> = entry.tracking_issue.and_then(|tracking| {
+            milestones_with_work_orders(&self.data.open_issues, &self.data.assignments)
+                .into_iter()
+                .find(|v| v.repo_name == entry.repo && v.tracking_issue == tracking)
+                .map(|v| v.nodes)
+                .filter(|nodes| !nodes.is_empty())
+        });
+
+        let mut rows: Vec<PlanGridRow> = members
+            .into_iter()
+            .map(|oi| {
+                let dag_index = dag_nodes
+                    .as_ref()
+                    .and_then(|nodes| nodes.iter().position(|n| n.issue_number == oi.number));
+                let dag_node = dag_index.and_then(|i| dag_nodes.as_ref().map(|nodes| &nodes[i]));
+                let (status, status_color, order_text) =
+                    self.plan_grid_status_order(&entry.repo, oi, dag_node, dag_index);
+                PlanGridRow {
+                    issue_number: oi.number,
+                    title: oi.title.clone(),
+                    status,
+                    status_color,
+                    order_text,
+                }
+            })
+            .collect();
+        rows.sort_by_key(|r| {
+            let dag_index = dag_nodes
+                .as_ref()
+                .and_then(|nodes| nodes.iter().position(|n| n.issue_number == r.issue_number))
+                .unwrap_or(usize::MAX);
+            (dag_index, r.issue_number)
+        });
+        rows
+    }
+
+    /// `DataRow`s for `plans_grid_rows`'s output — the "#"/Description
+    /// cells are plain text; Status is coloured by
+    /// `plan_grid_status_order`'s verdict.
+    fn plans_grid_data_rows(rows: &[PlanGridRow]) -> Vec<DataRow> {
+        rows.iter()
+            .map(|row| DataRow {
+                cells: vec![
+                    StyledText {
+                        spans: vec![StyledSpan::with_fg(
+                            format!("#{}", row.issue_number),
+                            Color::rgb(200, 200, 200),
+                        )],
+                    },
+                    StyledText {
+                        spans: vec![StyledSpan::with_fg(
+                            row.title.clone(),
+                            Color::rgb(200, 200, 200),
+                        )],
+                    },
+                    StyledText {
+                        spans: vec![StyledSpan::with_fg(row.status.clone(), row.status_color)],
+                    },
+                    StyledText {
+                        spans: vec![StyledSpan::with_fg(
+                            row.order_text.clone(),
+                            Color::rgb(160, 160, 170),
+                        )],
+                    },
+                ],
+                decoration: Decoration::Normal,
+            })
+            .collect()
+    }
+
+    /// Row count of the currently-open #106 grid (the sidebar tree's
+    /// selected epic), or `0` when no epic is selected. Shared by
+    /// `events.rs`'s keyboard nav and mouse hit-testing so neither has
+    /// to re-derive `plans_tree_selected_entry` + `plans_grid_rows`
+    /// itself.
+    pub(crate) fn plans_grid_row_count(&self) -> usize {
+        self.plans_tree_selected_entry()
+            .map(|e| self.plans_grid_rows(&e).len())
+            .unwrap_or(0)
+    }
+
+    /// Hit-test a click against the last-painted #106 grid (cached in
+    /// `plans_grid_table.layout` by `render_plan_issue_grid`), or
+    /// `None` when no epic is selected or nothing was painted yet.
+    pub(crate) fn plans_grid_hit(&self, pos: Point) -> Option<DataTableHit> {
+        let n = self.plans_grid_row_count();
+        if n == 0 {
+            return None;
+        }
+        self.plans_grid_table.hit(pos, n)
+    }
+
+    /// Keep `plans_grid_table.sel` inside the visible window, same
+    /// structural pattern as `fix_audit_scroll` / `fix_plans_detail_scroll`.
+    /// Must be called after every keyboard nav that moves
+    /// `plans_grid_table.sel` (`j`/`k`/`Down`/`Up` in events.rs, while
+    /// the grid is on screen).
+    pub(crate) fn fix_plans_grid_scroll(&mut self, visible: usize) {
+        let sel = self.plans_grid_table.sel;
+        crate::app::tree_nav::scroll_to_visible(&mut self.plans_grid_table.scroll, sel, visible);
+    }
+
+    /// The grid row currently selected (`plans_grid_table.sel`, clamped),
+    /// or `None` when no epic is selected or its grid is empty.
+    pub(crate) fn plans_grid_selected_row(&self) -> Option<PlanGridRow> {
+        let entry = self.plans_tree_selected_entry()?;
+        let rows = self.plans_grid_rows(&entry);
+        if rows.is_empty() {
+            return None;
+        }
+        let idx = self.plans_grid_table.sel.min(rows.len() - 1);
+        rows.into_iter().nth(idx)
+    }
+
+    /// Render the #106 per-epic issue grid — the Plans main panel's
+    /// content while the sidebar tree has a specific milestone/epic
+    /// leaf selected (`plans_tree_selected_entry`). A one-line,
+    /// unbordered caption names the epic (mirrors
+    /// `completed_caption_list`'s "single row → no border" reasoning);
+    /// the `DataTable` below it is built from `plans_grid_rows`,
+    /// copying the `audit.rs` (#1094) `DataTable`/layout-cache/resize
+    /// precedent rather than hand-rolling a `ListView` grid.
+    pub(crate) fn render_plan_issue_grid(
+        &self,
+        backend: &mut dyn Backend,
+        rect: Rect,
+        lh: f32,
+        entry: &PlanRosterEntry,
+    ) {
+        let caption_h = lh.min(rect.height);
+        let caption_rect = Rect::new(rect.x, rect.y, rect.width, caption_h);
+        let caption = format!(
+            "  {}   (Esc to go back)",
+            Self::plans_tree_row_label(entry),
+        );
+        backend.draw_list(
+            caption_rect,
+            &ListView {
+                id: WidgetId::new("plans-grid-caption"),
+                title: None,
+                items: vec![ListItem {
+                    text: StyledText {
+                        spans: vec![StyledSpan::with_fg(caption, Color::rgb(170, 170, 200))],
+                    },
+                    icon: None,
+                    detail: None,
+                    decoration: Decoration::Normal,
+                }],
+                selected_idx: 0,
+                scroll_offset: 0,
+                has_focus: false,
+                bordered: false,
+                h_scroll: 0,
+                max_content_width: None,
+                show_v_scrollbar: false,
+            },
+        );
+        let grid_rect = Rect::new(
+            rect.x,
+            rect.y + caption_h,
+            rect.width,
+            (rect.height - caption_h).max(0.0),
+        );
+
+        let rows = self.plans_grid_rows(entry);
+        if rows.is_empty() {
+            *self.plans_grid_table.layout.borrow_mut() = None;
+            backend.draw_list(
+                grid_rect,
+                &plain_list("plans-grid-empty", "  No issues on this milestone.", 0),
+            );
+            return;
+        }
+        let sel = self.plans_grid_table.sel.min(rows.len() - 1);
+        let table = DataTable {
+            id: WidgetId::new("plans-grid"),
+            columns: Self::plans_grid_columns(),
+            rows: Self::plans_grid_data_rows(&rows),
+            selected_idx: Some(sel),
+            scroll_offset: self.plans_grid_table.scroll,
+            sort: None,
+            has_focus: true,
+            show_scrollbar: true,
+            min_total_width: Some(Self::PLANS_GRID_MIN_WIDTH),
+            h_scroll: self.plans_grid_table.h_scroll.get(),
+            column_overrides: self.plans_grid_table.column_overrides.clone(),
+            footer: None,
+        };
+        let layout = backend.draw_data_table(grid_rect, &table, None);
+        *self.plans_grid_table.layout.borrow_mut() = Some((grid_rect, layout));
+    }
+
+    /// #106: right-click menu for a #106 grid row — "Go to Board"
+    /// always, plus a queue-state-gated "Add to drive queue" ⇄ "Remove
+    /// from queue" swap (never both, and Remove is withheld for a
+    /// `running` row — that needs `coord drive-stop`, and an item that
+    /// silently no-ops is worse than no item). State is resolved fresh
+    /// from `self.data.drive_queue` here rather than cached on the
+    /// target, same posture as `ReportRow`/`ApprovedRow`.
+    pub(crate) fn context_menu_items_for_plans_grid_row(
+        &self,
+        repo_name: &str,
+        issue_number: u64,
+    ) -> Vec<ContextMenuItem> {
+        let mut items = vec![ContextMenuItem::action("plans-grid-go-to-board", "Go to Board")];
+        match self.drive_queue_entry_for(repo_name, issue_number) {
+            Some(e) if e.state == QUEUE_STATE_WAITING => {
+                items.push(ContextMenuItem::action(
+                    "drive-queue-remove",
+                    "Remove from queue",
+                ));
+            }
+            Some(_) => {
+                // `running`/`blocked`/`done` — no menu item: Remove
+                // isn't offered for `running` (needs `coord
+                // drive-stop`), and re-offering Add on an already-
+                // queued row would just be a confusing no-op upsert.
+            }
+            None => {
+                items.push(ContextMenuItem::action("drive-queue-add", "Add to drive queue"));
+            }
+        }
+        items
     }
 
     // ─── #1122: in-app plan detail pane ───────────────────────────────────

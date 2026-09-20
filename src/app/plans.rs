@@ -143,6 +143,49 @@ struct DetailWorkOrderRow {
     color: Color,
 }
 
+/// Stable per-entry identity for a [`PlanRosterEntry`] (#108), independent of
+/// list order and of `plans_visible_entries()`'s indices (which a board
+/// refresh can reorder/shrink/grow while, e.g., the #1122 detail pane is
+/// open). Milestone-backed plans key on `Milestone(milestone_number)` as
+/// before #108; a standalone epic (`milestone_number: None` — an
+/// `epic`-labelled issue with no GitHub milestone) keys on
+/// `Epic(tracking_issue)` instead, since `milestone_number` alone can no
+/// longer disambiguate two such entries in the same repo (both would be
+/// `None`), while a tracking-issue number is unique within a repo. See
+/// `PlanRosterEntry::plan_key`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PlanKey {
+    Milestone(i64),
+    Epic(u64),
+}
+
+impl PlanRosterEntry {
+    /// This entry's stable identity (see [`PlanKey`]), or `None` on the
+    /// (should be unreachable per #108's contract — a milestone-less entry
+    /// always carries a tracking epic) case where neither a milestone number
+    /// nor a tracking issue is available to key on.
+    pub(crate) fn plan_key(&self) -> Option<PlanKey> {
+        match self.milestone_number {
+            Some(n) => Some(PlanKey::Milestone(n)),
+            None => self.tracking_issue.map(PlanKey::Epic),
+        }
+    }
+}
+
+/// Display label for a plan's leading `#N` reference (#108): the milestone
+/// number when the plan has one, or the tracking-epic issue number
+/// (distinctly prefixed) for a standalone epic with no milestone — never a
+/// bare `#0`/blank left over from an unwrapped `None`. Falls back to a plain
+/// dash on the (should be unreachable per the #108 contract) case where
+/// neither is available.
+fn plan_ref_label(entry: &PlanRosterEntry) -> String {
+    match (entry.milestone_number, entry.tracking_issue) {
+        (Some(n), _) => format!("#{n}"),
+        (None, Some(t)) => format!("epic#{t}"),
+        (None, None) => "#—".to_string(),
+    }
+}
+
 // ─── impl CoordApp — sidebar/main-panel rendering + actions ──────────────────
 
 impl CoordApp {
@@ -228,7 +271,7 @@ impl CoordApp {
     ///
     /// **#1122 fix (review non-blocking concern):** while the detail pane is
     /// open (`plans_detail_open`), resolution goes through the stable
-    /// `(repo, milestone_number)` identity captured in `plans_detail_target`
+    /// `(repo, PlanKey)` identity (#108) captured in `plans_detail_target`
     /// at open time instead of `plans_sel`/`plans_visible_entries()`. The
     /// roster list isn't even painted while the pane is open, and this is a
     /// polling TUI — a board refresh mid-pane can reorder, shrink, or grow
@@ -239,11 +282,11 @@ impl CoordApp {
     /// entirely (e.g. the milestone closed).
     pub(crate) fn plans_selected(&self) -> Option<PlanRosterEntry> {
         if self.plans_detail_open {
-            let (repo, milestone_number) = self.plans_detail_target.as_ref()?;
+            let (repo, key) = self.plans_detail_target.as_ref()?;
             return self
                 .plans_entries()
                 .into_iter()
-                .find(|e| &e.repo == repo && &e.milestone_number == milestone_number);
+                .find(|e| &e.repo == repo && e.plan_key().as_ref() == Some(key));
         }
         let entries = self.plans_visible_entries();
         if entries.is_empty() {
@@ -410,7 +453,12 @@ impl CoordApp {
     fn plans_tree_row_label(entry: &PlanRosterEntry) -> String {
         match entry.tracking_issue {
             Some(tracking) => format!("#{} {}", tracking, trunc(&entry.title, 24)),
-            None => format!("ms#{} {}", entry.milestone_number, trunc(&entry.title, 24)),
+            // A milestone with no epic still always carries a real
+            // `milestone_number` (#108's `None` case is reserved for
+            // standalone epics, which always have a `tracking_issue` and so
+            // take the branch above) — `plan_ref_label` covers the
+            // should-be-unreachable fallback defensively.
+            None => format!("ms{} {}", plan_ref_label(entry), trunc(&entry.title, 24)),
         }
     }
 
@@ -831,9 +879,12 @@ impl CoordApp {
                     "no work order".to_string()
                 };
                 let row_label = format!(
-                    " {}  #{}  {}   {}   {}",
+                    " {}  {}  {}   {}   {}",
                     entry.repo,
-                    entry.milestone_number,
+                    // #108: `plan_ref_label` reads as a plan reference even
+                    // for a standalone epic with no milestone — never a bare
+                    // `#0` from an unwrapped `None`.
+                    plan_ref_label(entry),
                     trunc(&entry.title, 32),
                     tracking,
                     stats,
@@ -1083,18 +1134,12 @@ impl CoordApp {
     /// `plan_detail_work_order_rows` already set). Rows are ordered by
     /// declared work-order position when available, else by issue
     /// number, so the grid reads top-to-bottom in dispatch order.
+    ///
+    /// #108: a standalone epic has no `milestone_number` to group issues
+    /// under — membership for that case comes from the work-order DAG's own
+    /// declared issue numbers instead (resolved back to `OpenIssue`s below),
+    /// so `dag_nodes` is computed first and `members` falls back to it.
     pub(crate) fn plans_grid_rows(&self, entry: &PlanRosterEntry) -> Vec<PlanGridRow> {
-        let members: Vec<&OpenIssue> = self
-            .data
-            .open_issues
-            .iter()
-            .filter(|oi| {
-                oi.repo_name == entry.repo
-                    && oi.milestone_number == Some(entry.milestone_number)
-                    && Some(oi.number) != entry.tracking_issue
-            })
-            .collect();
-
         let dag_nodes: Option<Vec<MilestoneDagNode>> = entry.tracking_issue.and_then(|tracking| {
             milestones_with_work_orders(&self.data.open_issues, &self.data.assignments)
                 .into_iter()
@@ -1102,6 +1147,33 @@ impl CoordApp {
                 .map(|v| v.nodes)
                 .filter(|nodes| !nodes.is_empty())
         });
+
+        let members: Vec<&OpenIssue> = match entry.milestone_number {
+            Some(ms) => self
+                .data
+                .open_issues
+                .iter()
+                .filter(|oi| {
+                    oi.repo_name == entry.repo
+                        && oi.milestone_number == Some(ms)
+                        && Some(oi.number) != entry.tracking_issue
+                })
+                .collect(),
+            None => dag_nodes
+                .as_ref()
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .filter_map(|n| {
+                            self.data
+                                .open_issues
+                                .iter()
+                                .find(|oi| oi.repo_name == entry.repo && oi.number == n.issue_number)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
 
         let mut rows: Vec<PlanGridRow> = members
             .into_iter()
@@ -1339,7 +1411,7 @@ impl CoordApp {
                 spans: vec![StyledSpan {
                     bold: true,
                     ..StyledSpan::with_fg(
-                        format!("#{} {}", entry.milestone_number, entry.title),
+                        format!("{} {}", plan_ref_label(entry), entry.title),
                         Color::rgb(230, 230, 230),
                     )
                 }],
@@ -1616,8 +1688,8 @@ impl CoordApp {
         let list = ListView {
             id: WidgetId::new("plans-detail"),
             title: Some(StyledText::plain(format!(
-                " #{} {} ",
-                entry.milestone_number,
+                " {} {} ",
+                plan_ref_label(&entry),
                 trunc(&entry.title, 60),
             ))),
             items,
@@ -1660,8 +1732,8 @@ impl CoordApp {
         let list = ListView {
             id: WidgetId::new("plans-detail"),
             title: Some(StyledText::plain(format!(
-                " #{} {} ",
-                entry.milestone_number,
+                " {} {} ",
+                plan_ref_label(&entry),
                 trunc(&entry.title, 60),
             ))),
             items,
@@ -1933,9 +2005,11 @@ impl CoordApp {
             self.push_toast(
                 "No tracking epic yet",
                 &format!(
-                    "{} #{}: {} has no `epic`-labelled tracking issue. \
+                    "{} {}: {} has no `epic`-labelled tracking issue. \
                      Create one with `coord milestone chat`.",
-                    entry.repo, entry.milestone_number, entry.title,
+                    entry.repo,
+                    plan_ref_label(&entry),
+                    entry.title,
                 ),
                 ToastSeverity::Info,
             );
@@ -1947,7 +2021,12 @@ impl CoordApp {
         // see that method's doc comment) and reset the pane's own
         // scroll/selection state so a previous pane's leftover scroll
         // position never leaks into a freshly-opened one.
-        self.plans_detail_target = Some((entry.repo.clone(), entry.milestone_number));
+        //
+        // #108: `entry.plan_key()` is guaranteed `Some` here — the guard
+        // above already returned unless `tracking_issue.is_some()`, and
+        // `plan_key()` falls back to `tracking_issue` exactly when
+        // `milestone_number` is `None`.
+        self.plans_detail_target = entry.plan_key().map(|key| (entry.repo.clone(), key));
         self.plans_detail_sel = 0;
         self.plans_detail_scroll = 0;
         true
@@ -1980,9 +2059,11 @@ impl CoordApp {
             self.push_toast(
                 "No tracking epic yet",
                 &format!(
-                    "{} #{}: {} has no `epic`-labelled tracking issue. \
+                    "{} {}: {} has no `epic`-labelled tracking issue. \
                      Create one with `coord milestone chat`.",
-                    entry.repo, entry.milestone_number, entry.title,
+                    entry.repo,
+                    plan_ref_label(&entry),
+                    entry.title,
                 ),
                 ToastSeverity::Info,
             );
@@ -2020,8 +2101,10 @@ impl CoordApp {
         self.push_toast(
             "Opening plan",
             &format!(
-                "gh issue view #{} — opening tracking epic for {} #{} in browser…",
-                tracking, entry.repo, entry.milestone_number,
+                "gh issue view #{} — opening tracking epic for {} {} in browser…",
+                tracking,
+                entry.repo,
+                plan_ref_label(&entry),
             ),
             ToastSeverity::Info,
         );
@@ -2486,16 +2569,24 @@ impl CoordApp {
             "dispatch-milestone" | "open-milestone-chat" | "view-milestone-order"
             | "edit-milestone" | "add-issue-to-milestone" | "dispatch-milestone-next"
             | "remove-issue-from-milestone" | "close-plan" => {
-                match self
-                    .plans_selected()
-                    .and_then(|e| e.tracking_issue.map(|t| (e, t)))
-                {
-                    Some((entry, tracking_issue)) => {
+                // #108: `MilestoneHeader` requires a real GitHub milestone
+                // number for its CRUD verbs (edit/assign/remove operate on
+                // the milestone, not just the epic) — a standalone epic
+                // (`milestone_number: None`) has no milestone to target yet,
+                // so it falls through to the same "nothing selected" toast
+                // below rather than building a target with a fabricated
+                // number.
+                match self.plans_selected().and_then(|e| {
+                    let tracking_issue = e.tracking_issue?;
+                    let milestone_number = e.milestone_number?;
+                    Some((e, tracking_issue, milestone_number))
+                }) {
+                    Some((entry, tracking_issue, milestone_number)) => {
                         let target = ContextMenuTarget::MilestoneHeader {
                             repo_name: entry.repo.clone(),
                             tracking_issue,
                             milestone_title: entry.title.clone(),
-                            milestone_number: entry.milestone_number,
+                            milestone_number,
                         };
                         self.dispatch_context_menu_action(action_id, &target);
                     }
@@ -2641,7 +2732,7 @@ mod pure_tests {
 
     fn entry(
         repo: &str,
-        ms: i64,
+        ms: Option<i64>,
         title: &str,
         tracking: Option<u64>,
         needs: &[&str],
@@ -2670,13 +2761,13 @@ mod pure_tests {
     #[test]
     fn plans_entries_sorts_by_repo_then_milestone_number() {
         let entries = vec![
-            entry("b-repo", 2, "b2", None, &[]),
-            entry("a-repo", 5, "a5", None, &[]),
-            entry("b-repo", 1, "b1", None, &[]),
-            entry("a-repo", 1, "a1", None, &[]),
+            entry("b-repo", Some(2), "b2", None, &[]),
+            entry("a-repo", Some(5), "a5", None, &[]),
+            entry("b-repo", Some(1), "b1", None, &[]),
+            entry("a-repo", Some(1), "a1", None, &[]),
         ];
         // Simulate what the payload → BoardData flow would set.
-        let ordered: Vec<(String, i64)> = {
+        let ordered: Vec<(String, Option<i64>)> = {
             let mut es = entries;
             es.sort_by(|a, b| {
                 (a.repo.as_str(), a.milestone_number).cmp(&(b.repo.as_str(), b.milestone_number))
@@ -2686,12 +2777,47 @@ mod pure_tests {
         assert_eq!(
             ordered,
             vec![
-                ("a-repo".to_string(), 1),
-                ("a-repo".to_string(), 5),
-                ("b-repo".to_string(), 1),
-                ("b-repo".to_string(), 2),
+                ("a-repo".to_string(), Some(1)),
+                ("a-repo".to_string(), Some(5)),
+                ("b-repo".to_string(), Some(1)),
+                ("b-repo".to_string(), Some(2)),
             ]
         );
+    }
+
+    /// #108: a standalone epic (no GitHub milestone) sorts *before* any
+    /// milestoned entry in the same repo — `Option<i64>`'s `Ord` puts `None`
+    /// first — and, more importantly, its `plan_key()` never collides with a
+    /// milestoned entry's, since the two variants (`Epic` vs `Milestone`)
+    /// are never equal regardless of their inner number.
+    #[test]
+    fn plans_entries_sorts_milestone_less_epic_first_within_its_repo() {
+        let entries = vec![
+            entry("a-repo", Some(1), "Has milestone", Some(101), &[]),
+            entry("a-repo", None, "Standalone epic", Some(900), &[]),
+        ];
+        let mut es = entries;
+        es.sort_by(|a, b| {
+            (a.repo.as_str(), a.milestone_number).cmp(&(b.repo.as_str(), b.milestone_number))
+        });
+        assert_eq!(es[0].title, "Standalone epic");
+        assert_eq!(es[1].title, "Has milestone");
+    }
+
+    /// #108: `plan_key()` — the milestone-backed case keys on the milestone
+    /// number; the milestone-less case falls back to the tracking issue so
+    /// two standalone epics in the same repo (both `milestone_number: None`)
+    /// still resolve to distinct, stable identities.
+    #[test]
+    fn plan_key_falls_back_to_tracking_issue_when_milestone_number_is_none() {
+        let milestoned = entry("api", Some(5), "Substrate", Some(500), &[]);
+        assert_eq!(milestoned.plan_key(), Some(PlanKey::Milestone(5)));
+
+        let standalone_a = entry("api", None, "Epic A", Some(700), &[]);
+        let standalone_b = entry("api", None, "Epic B", Some(800), &[]);
+        assert_eq!(standalone_a.plan_key(), Some(PlanKey::Epic(700)));
+        assert_eq!(standalone_b.plan_key(), Some(PlanKey::Epic(800)));
+        assert_ne!(standalone_a.plan_key(), standalone_b.plan_key());
     }
 
     #[test]
@@ -2713,7 +2839,7 @@ mod pure_tests {
         }"#;
         let entry: PlanRosterEntry = serde_json::from_str(json).expect("valid roster JSON");
         assert_eq!(entry.repo, "api");
-        assert_eq!(entry.milestone_number, 5);
+        assert_eq!(entry.milestone_number, Some(5));
         assert_eq!(entry.tracking_issue, Some(500));
         assert!(entry.has_work_order);
         assert_eq!(entry.ready_frontier, 2);
@@ -2740,5 +2866,56 @@ mod pure_tests {
         assert_eq!(entry.tracking_issue, None);
         assert!(!entry.has_work_order);
         assert_eq!(entry.needs_you, vec!["no_work_order".to_string()]);
+    }
+
+    /// #108: code-coordinator is about to start emitting `milestone_number:
+    /// null` for a standalone `epic`-labelled issue with no GitHub
+    /// milestone. Per the struct's own #632 serde note, a mistyped field
+    /// here fails the WHOLE `BoardPayload` parse and blanks the board — this
+    /// pins that the widened `Option<i64>` field actually parses the null
+    /// instead of erroring, and that `plan_key()` falls back to the
+    /// tracking issue for exactly this shape.
+    #[test]
+    fn plan_roster_entry_deserializes_with_null_milestone_number() {
+        let json = r#"{
+            "repo": "api",
+            "title": "Standalone epic",
+            "milestone_number": null,
+            "tracking_issue": 700,
+            "has_work_order": true,
+            "ready_frontier": 1,
+            "blocked": 0,
+            "in_flight": 0,
+            "done": 0,
+            "total": 1,
+            "needs_you": []
+        }"#;
+        let entry: PlanRosterEntry =
+            serde_json::from_str(json).expect("null milestone_number must still parse (#108)");
+        assert_eq!(entry.milestone_number, None);
+        assert_eq!(entry.tracking_issue, Some(700));
+        assert_eq!(entry.plan_key(), Some(PlanKey::Epic(700)));
+    }
+
+    /// #108: the field is also missing entirely on some hand-built fixtures
+    /// (e.g. `#[serde(default)]` payloads that omit it) — must default to
+    /// `None` rather than failing the parse.
+    #[test]
+    fn plan_roster_entry_deserializes_with_missing_milestone_number() {
+        let json = r#"{
+            "repo": "api",
+            "title": "Standalone epic",
+            "tracking_issue": 701,
+            "has_work_order": true,
+            "ready_frontier": 0,
+            "blocked": 0,
+            "in_flight": 0,
+            "done": 0,
+            "total": 0,
+            "needs_you": []
+        }"#;
+        let entry: PlanRosterEntry =
+            serde_json::from_str(json).expect("missing milestone_number must default (#108)");
+        assert_eq!(entry.milestone_number, None);
     }
 }

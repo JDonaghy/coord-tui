@@ -1576,8 +1576,16 @@ pub(crate) struct PlanRosterEntry {
     pub(crate) repo: String,
     /// Milestone title, e.g. `"Substrate"`.
     pub(crate) title: String,
-    /// GitHub milestone number.
-    pub(crate) milestone_number: i64,
+    /// GitHub milestone number, or `None` for a standalone `epic`-labelled
+    /// issue that has no GitHub milestone at all (#108 — filed to make an
+    /// otherwise-invisible epic, vimcode#1212, show up in the Plans panel).
+    /// `coord.plans.aggregate_repo_plans` emits `null` for exactly that
+    /// case; every other row still carries a real milestone number.  See
+    /// `PlanRosterEntry::plan_key` for the stable per-entry identity this
+    /// forces (milestone number alone can no longer disambiguate two
+    /// standalone epics in the same repo, since both would be `None`).
+    #[serde(default)]
+    pub(crate) milestone_number: Option<i64>,
     /// Tracking-epic issue number, or `None` when the milestone has no
     /// `"epic"`-labelled issue.  When present, selecting the row opens this
     /// issue in the browser via `gh issue view --web`.

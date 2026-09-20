@@ -217,6 +217,7 @@ use self::events::*;
 #[allow(unused_imports)]
 use self::pipeline::*;
 use self::milestone_dag::*;
+use self::plans::PlanKey;
 #[allow(unused_imports)]
 use self::fleet_terminals::*;
 #[allow(unused_imports)]
@@ -3870,15 +3871,21 @@ pub struct CoordApp {
     /// the pane is open (events.rs) and kept inside the visible window by
     /// `fix_plans_detail_scroll`. Reset to 0 whenever the pane (re)opens.
     plans_detail_sel: usize,
-    /// The `(repo, milestone_number)` identity of the plan the #1122 detail
-    /// pane was opened for, captured once by `open_selected_plan_detail`.
+    /// The `(repo, PlanKey)` identity of the plan the #1122 detail pane was
+    /// opened for, captured once by `open_selected_plan_detail`.
     /// `plans_selected()` resolves through this — instead of `plans_sel`
     /// indexing into `plans_visible_entries()` — whenever `plans_detail_open`
     /// is true, so a board refresh that reorders/shrinks/grows the visible
     /// roster while the pane is open can never silently swap the pane onto a
     /// different plan than the one the operator opened (review finding on
     /// #1122's non-blocking concerns). `None` when the pane is closed.
-    plans_detail_target: Option<(String, i64)>,
+    ///
+    /// #108: keyed on `PlanKey` rather than a bare `milestone_number` — a
+    /// standalone epic (no GitHub milestone) has `milestone_number: None`,
+    /// which can't disambiguate two such epics in the same repo the way a
+    /// real milestone number could, so `PlanKey` falls back to the
+    /// tracking-issue number instead. See `PlanRosterEntry::plan_key`.
+    plans_detail_target: Option<(String, PlanKey)>,
 
     // ── #1121: Plans sidebar repo→plan tree + repo scoping ──────────────────
     /// Per-repo expand state for the Plans sidebar `TreeView`, keyed by repo

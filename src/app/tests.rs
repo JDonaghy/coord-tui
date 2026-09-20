@@ -40346,7 +40346,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Substrate".to_string(),
-                milestone_number: 5,
+                milestone_number: Some(5),
                 tracking_issue: Some(500),
                 has_work_order: true,
                 ready_frontier: 1,
@@ -40390,7 +40390,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Bare Milestone".to_string(),
-                milestone_number: 9,
+                milestone_number: Some(9),
                 tracking_issue: None,
                 has_work_order: false,
                 ready_frontier: 0,
@@ -40422,7 +40422,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Bare Milestone".to_string(),
-                milestone_number: 9,
+                milestone_number: Some(9),
                 tracking_issue: None,
                 has_work_order: false,
                 ready_frontier: 0,
@@ -45409,7 +45409,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Substrate".to_string(),
-                    milestone_number: 5,
+                    milestone_number: Some(5),
                     tracking_issue: Some(500),
                     has_work_order: true,
                     ready_frontier: 2,
@@ -45428,7 +45428,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Follow-up".to_string(),
-                    milestone_number: 6,
+                    milestone_number: Some(6),
                     tracking_issue: None,
                     has_work_order: false,
                     ready_frontier: 0,
@@ -45534,6 +45534,79 @@ Milestone tracking issue.
         assert!(
             screen.contains("+1 without a work order"),
             "#1001: a collapsed repo must show a '+N without a work order' summary line:\n{screen}",
+        );
+    }
+
+    /// #108: code-coordinator is about to start emitting a plan-roster row
+    /// for a standalone `epic`-labelled issue with no GitHub milestone
+    /// (`milestone_number: null`) — before this fix, that field was a
+    /// mistyped-and-required `i64`, so a payload shaped like this would
+    /// fail the WHOLE `BoardPayload` parse and blank the entire board
+    /// (#632). This pins the black-box path: a board carrying exactly that
+    /// shape still parses AND the Plans panel still renders the row as a
+    /// plan (identified by its tracking epic), never as a bare `#0` left
+    /// over from an unwrapped `None`.
+    #[test]
+    fn plans_panel_renders_milestone_less_standalone_epic() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = make_test_app(BoardData {
+            pipeline_repos: vec![("api".to_string(), "acme/api".to_string())],
+            plan_roster_supported: true,
+            plan_roster: vec![PlanRosterEntry {
+                repo: "api".to_string(),
+                title: "Standalone Epic".to_string(),
+                milestone_number: None,
+                tracking_issue: Some(700),
+                has_work_order: true,
+                ready_frontier: 1,
+                blocked: 0,
+                in_flight: 0,
+                done: 0,
+                total: 1,
+                needs_you: vec![],
+                ..PlanRosterEntry::default()
+            }],
+            ..BoardData::default()
+        });
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+        click_activity_icon(&mut driver, "◆");
+
+        let screen = driver.screen();
+        assert!(
+            screen.contains("Standalone Epic"),
+            "#108: a milestone-less plan-roster row must still render its \
+             title:\n{screen}",
+        );
+        assert!(
+            screen.contains("epic:#700"),
+            "#108: the row must show its tracking epic reference:\n{screen}",
+        );
+        assert!(
+            !screen.contains("#0"),
+            "#108: an unwrapped `None` milestone_number must never render \
+             as a bare '#0':\n{screen}",
+        );
+
+        // Opening the #1122 detail pane must not panic and must key off the
+        // tracking epic, not a fabricated milestone number.
+        let (x, y) = driver.find("Standalone Epic").unwrap_or_else(|| {
+            panic!(
+                "#108: could not find the 'Standalone Epic' row to click:\n{}",
+                driver.screen()
+            )
+        });
+        driver.click(x, y);
+        driver.press_named(quadraui::NamedKey::Enter);
+        let detail_screen = driver.screen();
+        assert!(
+            detail_screen.contains("Standalone Epic"),
+            "#108: the detail pane must still identify the plan by title:\n{detail_screen}",
+        );
+        assert!(
+            !detail_screen.contains("#0"),
+            "#108: the detail pane header must never fall back to a bare \
+             '#0' for a milestone-less plan:\n{detail_screen}",
         );
     }
 
@@ -45970,7 +46043,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "coord-repo".to_string(),
                 title: "Big epic".to_string(),
-                milestone_number: 5,
+                milestone_number: Some(5),
                 tracking_issue: Some(100),
                 has_work_order: true,
                 ready_frontier: 0,
@@ -46072,7 +46145,7 @@ Milestone tracking issue.
         );
         assert_eq!(
             app.plans_selected().map(|e| e.milestone_number),
-            Some(5),
+            Some(Some(5)),
             "precondition: the pane must have opened on Substrate (#5)",
         );
 
@@ -46086,7 +46159,7 @@ Milestone tracking issue.
             PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Newly appeared".to_string(),
-                milestone_number: 1,
+                milestone_number: Some(1),
                 tracking_issue: Some(999),
                 has_work_order: true,
                 ..PlanRosterEntry::default()
@@ -46097,7 +46170,7 @@ Milestone tracking issue.
         let selected = app.plans_selected();
         assert_eq!(
             selected.as_ref().map(|e| e.milestone_number),
-            Some(5),
+            Some(Some(5)),
             "#1122 fix: the detail pane must still resolve to Substrate \
              (#5) after the refresh — not silently swap onto the new \
              milestone #1 that now sorts first in \
@@ -46394,7 +46467,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Substrate".to_string(),
-                    milestone_number: 5,
+                    milestone_number: Some(5),
                     tracking_issue: Some(500),
                     has_work_order: true,
                     ready_frontier: 2,
@@ -46410,13 +46483,13 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Follow-up".to_string(),
-                    milestone_number: 6,
+                    milestone_number: Some(6),
                     ..Default::default()
                 },
                 PlanRosterEntry {
                     repo: "web".to_string(),
                     title: "Frontend Revamp".to_string(),
-                    milestone_number: 12,
+                    milestone_number: Some(12),
                     tracking_issue: Some(1200),
                     has_work_order: true,
                     ready_frontier: 1,
@@ -46578,7 +46651,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Stalled Plan".to_string(),
-                milestone_number: 7,
+                milestone_number: Some(7),
                 tracking_issue: Some(700),
                 has_work_order: true,
                 ready_frontier: 0,
@@ -46608,7 +46681,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Bare Milestone".to_string(),
-                milestone_number: 9,
+                milestone_number: Some(9),
                 tracking_issue: None,
                 has_work_order: false,
                 ready_frontier: 0,
@@ -46817,7 +46890,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Solo".to_string(),
-                milestone_number: 1,
+                milestone_number: Some(1),
                 tracking_issue: Some(100),
                 has_work_order: true,
                 ready_frontier: 1,
@@ -46913,7 +46986,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "All Done".to_string(),
-                milestone_number: 2,
+                milestone_number: Some(2),
                 tracking_issue: Some(200),
                 has_work_order: true,
                 ready_frontier: 0,
@@ -46983,7 +47056,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Substrate".to_string(),
-                    milestone_number: 5,
+                    milestone_number: Some(5),
                     tracking_issue: Some(500),
                     has_work_order: true,
                     ready_frontier: 1,
@@ -47002,7 +47075,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "web".to_string(),
                     title: "Frontend".to_string(),
-                    milestone_number: 10,
+                    milestone_number: Some(10),
                     tracking_issue: Some(1000),
                     has_work_order: true,
                     ready_frontier: 1,
@@ -47118,7 +47191,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Done Epic".to_string(),
-                milestone_number: 5,
+                milestone_number: Some(5),
                 tracking_issue: Some(500),
                 has_work_order: true,
                 ready_frontier: 0,
@@ -47167,7 +47240,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "vimcode".to_string(),
                 title: "Crate Extraction".to_string(),
-                milestone_number: 2,
+                milestone_number: Some(2),
                 tracking_issue: None,
                 has_work_order: false,
                 ready_frontier: 0,
@@ -47230,7 +47303,7 @@ Milestone tracking issue.
         let entry = PlanRosterEntry {
             repo: "vimcode".to_string(),
             title: "Vim Conformance".to_string(),
-            milestone_number: 1,
+            milestone_number: Some(1),
             tracking_issue: Some(1170),
             has_work_order: false,
             ready_frontier: 0,
@@ -47287,7 +47360,7 @@ Milestone tracking issue.
         let entry = PlanRosterEntry {
             repo: "api".to_string(),
             title: "Substrate".to_string(),
-            milestone_number: 5,
+            milestone_number: Some(5),
             tracking_issue: Some(500),
             has_work_order: false,
             ready_frontier: 0,
@@ -47332,7 +47405,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Substrate".to_string(),
-                milestone_number: 5,
+                milestone_number: Some(5),
                 tracking_issue: Some(500),
                 has_work_order: false,
                 ready_frontier: 0,
@@ -47420,7 +47493,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Ready one".to_string(),
-                    milestone_number: 1,
+                    milestone_number: Some(1),
                     tracking_issue: Some(100),
                     has_work_order: true,
                     ready_frontier: 1,
@@ -47439,7 +47512,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Stalled one".to_string(),
-                    milestone_number: 2,
+                    milestone_number: Some(2),
                     tracking_issue: Some(101),
                     has_work_order: true,
                     ready_frontier: 0,
@@ -47458,7 +47531,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Untracked one".to_string(),
-                    milestone_number: 3,
+                    milestone_number: Some(3),
                     tracking_issue: None,
                     has_work_order: false,
                     ready_frontier: 0,
@@ -47477,7 +47550,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Untracked two".to_string(),
-                    milestone_number: 4,
+                    milestone_number: Some(4),
                     tracking_issue: None,
                     has_work_order: false,
                     ready_frontier: 0,
@@ -47496,7 +47569,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Chatting one".to_string(),
-                    milestone_number: 5,
+                    milestone_number: Some(5),
                     tracking_issue: Some(105),
                     has_work_order: true,
                     ready_frontier: 0,
@@ -47543,7 +47616,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "api".to_string(),
                     title: "Substrate".to_string(),
-                    milestone_number: 5,
+                    milestone_number: Some(5),
                     tracking_issue: Some(500),
                     has_work_order: true,
                     ready_frontier: 2,
@@ -47562,7 +47635,7 @@ Milestone tracking issue.
                 PlanRosterEntry {
                     repo: "web".to_string(),
                     title: "Old category bucket".to_string(),
-                    milestone_number: 1,
+                    milestone_number: Some(1),
                     tracking_issue: None,
                     has_work_order: false,
                     ready_frontier: 0,
@@ -47626,7 +47699,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Substrate".to_string(),
-                milestone_number: 5,
+                milestone_number: Some(5),
                 tracking_issue: Some(751),
                 has_work_order: true,
                 ready_frontier: 0,
@@ -47688,7 +47761,7 @@ Milestone tracking issue.
             plan_roster: vec![PlanRosterEntry {
                 repo: "api".to_string(),
                 title: "Substrate".to_string(),
-                milestone_number: 5,
+                milestone_number: Some(5),
                 tracking_issue: Some(751),
                 has_work_order: true,
                 ready_frontier: 1,

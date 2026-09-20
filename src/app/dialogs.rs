@@ -1379,18 +1379,29 @@ impl CoordApp {
                     issue_number: row.issue_number,
                 })
             }
-            SidebarView::Plans => self.plans_selected().map(|e| match e.tracking_issue {
-                Some(tracking_issue) => ContextMenuTarget::MilestoneHeader {
-                    repo_name: e.repo.clone(),
-                    tracking_issue,
-                    milestone_title: e.title.clone(),
-                    milestone_number: e.milestone_number,
-                },
-                None => ContextMenuTarget::PlansStub {
-                    repo_name: Some(e.repo.clone()),
-                    milestone: Some((e.milestone_number, e.title.clone())),
-                },
-            }),
+            // #108: `MilestoneHeader`'s CRUD verbs (edit/assign/remove) act
+            // on a real GitHub milestone number, and `PlansStub::milestone`
+            // is specifically the "milestone with no epic yet" case — a
+            // standalone epic (`tracking_issue: Some`, `milestone_number:
+            // None`) fits neither, so it builds no target yet (right-click
+            // no-ops there) rather than fabricating a milestone number.
+            SidebarView::Plans => {
+                self.plans_selected().and_then(|e| match (e.tracking_issue, e.milestone_number) {
+                    (Some(tracking_issue), Some(milestone_number)) => {
+                        Some(ContextMenuTarget::MilestoneHeader {
+                            repo_name: e.repo.clone(),
+                            tracking_issue,
+                            milestone_title: e.title.clone(),
+                            milestone_number,
+                        })
+                    }
+                    (None, Some(milestone_number)) => Some(ContextMenuTarget::PlansStub {
+                        repo_name: Some(e.repo.clone()),
+                        milestone: Some((milestone_number, e.title.clone())),
+                    }),
+                    (Some(_), None) | (None, None) => None,
+                })
+            }
             // #956: Terminal-view tree — only terminal rows get a menu; a
             // machine row (or nothing selected) has no verb defined yet.
             SidebarView::Terminal => self

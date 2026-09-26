@@ -556,6 +556,92 @@ impl CoordApp {
         );
     }
 
+    /// #102: rect for the concurrency ceilings/usage readout carved off the
+    /// very top of the Queue panel — mirrors `queue_roll_pending_banner_
+    /// rect`'s shape, but sized to `line_count` (1 normally, more once
+    /// `queue_concurrency_detail_open` adds provenance lines) rather than a
+    /// fixed 2, and unconditional rather than gated on `Some`.
+    fn queue_concurrency_readout_rect(main: Rect, lh: f32, line_count: usize) -> Rect {
+        if lh <= 0.0 {
+            return Rect::new(main.x, main.y, main.width, 0.0);
+        }
+        let want_rows = line_count.max(1) as f32;
+        // A wide-open cap (50%, vs the roll-pending banner's 30%) — the
+        // provenance detail can run to `1 (summary) + 3 (the three fleet-wide
+        // ceilings) + one line per overridden repo` lines, and clipping that
+        // silently would make `c` look like it did nothing.
+        let max_h = (main.height * 0.5).max(lh);
+        let h = (want_rows * lh).min(max_h).min(main.height);
+        Rect::new(main.x, main.y, main.width, h)
+    }
+
+    /// #102: the remainder of the Queue panel below the concurrency readout.
+    fn queue_rect_below_concurrency_readout(rect: Rect, readout_rect: Rect) -> Rect {
+        Rect::new(
+            rect.x,
+            rect.y + readout_rect.height,
+            rect.width,
+            (rect.height - readout_rect.height).max(0.0),
+        )
+    }
+
+    /// #102: paint the concurrency ceilings/usage readout — read-only, not
+    /// part of the selectable grid below it (same posture as
+    /// `render_roll_pending_banner`). `lines[0]` is always the compact
+    /// summary [`concurrency_readout_text`] produces; anything after that is
+    /// provenance, only present when `queue_concurrency_detail_open` — see
+    /// [`concurrency_readout_lines`].
+    fn render_concurrency_readout(&self, backend: &mut dyn Backend, rect: Rect, lines: &[String]) {
+        let at_capacity = self
+            .data
+            .concurrency
+            .as_ref()
+            .is_some_and(concurrency_is_at_capacity);
+        // Amber — the same "needs a look, not a fault" palette
+        // `DriveQueueLevel::Stalled`/`Held` use — the instant the fleet-wide
+        // ceiling is fully occupied; calm grey-blue otherwise, matching the
+        // roll-pending banner's own muted detail colour.
+        let headline_fg = if at_capacity {
+            Color::rgb(255, 210, 100)
+        } else {
+            Color::rgb(150, 190, 255)
+        };
+        let items: Vec<ListItem> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| ListItem {
+                text: StyledText {
+                    spans: vec![StyledSpan::with_fg(
+                        line.clone(),
+                        if i == 0 {
+                            headline_fg
+                        } else {
+                            Color::rgb(160, 175, 195)
+                        },
+                    )],
+                },
+                icon: None,
+                detail: None,
+                decoration: if i == 0 { Decoration::Header } else { Decoration::Normal },
+            })
+            .collect();
+        backend.draw_list(
+            rect,
+            &ListView {
+                id: WidgetId::new("queue-concurrency-readout"),
+                title: None,
+                items,
+                selected_idx: 0,
+                scroll_offset: 0,
+                has_focus: false,
+                bordered: false,
+                h_scroll: 0,
+                max_content_width: None,
+                show_v_scrollbar: false,
+            },
+        );
+    }
+
     /// The persistent status-bar segment — ALWAYS present, in every view,
     /// regardless of depth (see [`drive_queue_status_text`]). Carries no
     /// `action_id`: reached by right-clicking the status bar, per the module
@@ -1237,7 +1323,7 @@ impl CoordApp {
                         .join(", "),
                 ),
                 queue_hold_cell(e),
-                or_dash(queue_reason_cell(e)),
+                or_dash(self.queue_reason_display(e)),
                 // #101: deliberately NOT `or_dash` — `queue_reason_age_cell`
                 // already returns `QUEUE_EMPTY_CELL` for "no reason at all"
                 // and a different, non-dash string ("unknown") for "reason
@@ -1247,6 +1333,70 @@ impl CoordApp {
                 queue_reason_age_cell(e),
             ],
         }
+    }
+
+    /// #102 item 2: the `Reason` cell for one entry — `last_reason` verbatim
+    /// whenever the tick has actually stamped one, else this row's own
+    /// capacity explanation ([`Self::queue_capacity_note`]) when one
+    /// applies, else empty (renders as [`QUEUE_EMPTY_CELL`] via `or_dash`).
+    ///
+    /// Never the other way around: a REAL, tick-stamped reason (an
+    /// unsatisfied `after`, a cordon, a per-repo limit the walk itself
+    /// already reached and named) is never clobbered by a locally-derived
+    /// guess — this is purely a fallback for the gap `coord.drive_queue.
+    /// plan_tick`'s own step-3 early-return leaves behind: when the
+    /// FLEET-wide ceiling is full, the tick never reaches the per-entry walk
+    /// that would stamp a reason at all, so a brand-new or long-idle row can
+    /// sit at `last_reason == ""` forever even though nothing is actually
+    /// wrong with it — the exact "a queue at its cap looks identical to a
+    /// stalled one" symptom this issue reports. Also why a row with its own
+    /// unsatisfied `after` (which DOES get a fresh, real reason every tick
+    /// that reaches it) stays visibly distinct from a purely-capacity-bound
+    /// one, satisfying the issue's "distinguishable from an unsatisfied
+    /// after" acceptance bar without this module re-implementing the tick's
+    /// own prereq resolution.
+    fn queue_reason_display(&self, e: &BoardDriveQueueEntry) -> String {
+        let real = queue_reason_cell(e);
+        if !real.is_empty() {
+            return real;
+        }
+        self.queue_capacity_note(e).unwrap_or_default()
+    }
+
+    /// #102: this row's own "waiting purely on capacity" explanation —
+    /// `None` unless the row is [`QUEUE_STATE_WAITING`] AND either the
+    /// fleet-wide queue or this row's own repo is at (or over) its resolved
+    /// ceiling. Only ever consulted as [`Self::queue_reason_display`]'s
+    /// fallback, never in front of a real `last_reason`.
+    fn queue_capacity_note(&self, e: &BoardDriveQueueEntry) -> Option<String> {
+        if e.state != QUEUE_STATE_WAITING {
+            return None;
+        }
+        let c = self.data.concurrency.as_ref()?;
+        if concurrency_is_at_capacity(c) {
+            return Some(format!(
+                "queue at capacity ({}/{}) — waiting for a free slot",
+                c.occupied.unwrap_or_default(),
+                c.max_parallel.value
+            ));
+        }
+        let repo_cap = c
+            .repo_overrides
+            .get(&e.repo_name)
+            .map(|b| b.value)
+            .unwrap_or(c.max_parallel_per_repo.value);
+        let repo_occ = c
+            .repo_occupied
+            .as_ref()
+            .and_then(|m| m.get(&e.repo_name))
+            .copied()?;
+        if repo_cap > 0 && repo_occ >= repo_cap {
+            return Some(format!(
+                "{} at capacity ({repo_occ}/{repo_cap}) — waiting for a free slot",
+                repo_alias(&e.repo_name)
+            ));
+        }
+        None
     }
 
     /// Count of this entry's own dispatched legs whose `assignment_type`
@@ -1534,6 +1684,20 @@ impl CoordApp {
         *self.queue_table_layout.borrow_mut() = None;
         self.queue_separator_rect.set(None);
         *self.queue_detail_scrollbar.borrow_mut() = None;
+
+        // #102: carve the ceilings/usage readout off the very top of `rect`
+        // FIRST — even before the (conditional) roll-pending banner. Unlike
+        // that banner this is UNCONDITIONAL: an idle queue with zero rows
+        // still has an effective global/per-repo cap, and the whole point of
+        // this readout is that "at its cap" and "stalled" must never look
+        // identical (the issue's own reported symptom). `rect` is shadowed
+        // with the remainder so every rect computed below already accounts
+        // for it.
+        let readout_lines =
+            concurrency_readout_lines(self.data.concurrency.as_ref(), self.queue_concurrency_detail_open);
+        let readout_rect = Self::queue_concurrency_readout_rect(rect, lh, readout_lines.len());
+        self.render_concurrency_readout(backend, readout_rect, &readout_lines);
+        let rect = Self::queue_rect_below_concurrency_readout(rect, readout_rect);
 
         // #2608: carve the roll-pending banner off the top of `rect` FIRST,
         // before either of the empty/non-empty branches below — a roll can
@@ -2594,6 +2758,186 @@ pub(crate) fn dq_state_colors(state: &str) -> (Color, Color) {
         QUEUE_STATE_WAITING => (Color::rgb(210, 210, 220), Color::rgb(40, 40, 55)),
         _ => (Color::rgb(210, 210, 220), Color::rgb(40, 40, 55)),
     }
+}
+
+// ── #102: concurrency ceilings/usage readout ─────────────────────────────
+//
+// A queue at its resolved global (or per-repo) cap and a queue that has
+// silently stopped dispatching look identical from the Queue grid alone —
+// this is the whole reported symptom. `self.data.concurrency` (mirroring
+// `/board`'s `concurrency` sibling key, #3428) is the daemon's own resolved
+// answer, never re-derived from a locally-cached `coordinator.yml` (a
+// machine-local systemd flag is invisible to this thin client by
+// construction — see `BoardConcurrency`'s doc comment).
+
+/// `c.name`, or `fallback` when the daemon shipped an empty string (an older
+/// `CeilingResolution` that predates naming its own resolution, or a
+/// synthetic one this build has never heard of) — never trusted to be
+/// non-empty.
+fn ceiling_label<'a>(c: &'a BoardCeiling, fallback: &'a str) -> &'a str {
+    if c.name.is_empty() {
+        fallback
+    } else {
+        &c.name
+    }
+}
+
+/// One ceiling's provenance line — `source` classified by `source_kind`,
+/// plus how many OTHER sources this one outranked (`losing`, #3408's whole
+/// point: an operator needs to know a machine-local systemd flag is
+/// outranking `coordinator.yml`, not just what won). `"unknown"` for either
+/// half of the winning pair the daemon shipped empty, matching this module's
+/// existing "never trusted to be non-empty" posture for wire prose.
+fn ceiling_provenance_text(c: &BoardCeiling) -> String {
+    let source = if c.source.is_empty() { "unknown" } else { &c.source };
+    let kind = if c.source_kind.is_empty() {
+        "unknown"
+    } else {
+        &c.source_kind
+    };
+    match &c.losing {
+        Some(others) if !others.is_empty() => {
+            format!("{source} [{kind}] ({} other source(s) outranked)", others.len())
+        }
+        _ => format!("{source} [{kind}]"),
+    }
+}
+
+/// Detail lines for one ceiling's `losing` sources (#3408's reported
+/// incident: an operator must be able to see WHAT was outranked, not just
+/// that something was) — empty when `losing` is `None`/`[]`.
+fn ceiling_losing_lines(c: &BoardCeiling) -> Vec<String> {
+    c.losing
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|other| {
+            let kind = if other.source_kind.is_empty() {
+                "unknown"
+            } else {
+                &other.source_kind
+            };
+            format!(
+                "      outranked: {} [{}] = {}",
+                other.source, kind, other.value
+            )
+        })
+        .collect()
+}
+
+/// #102: is the fleet-wide queue fully occupied against its resolved
+/// `max_parallel` ceiling? `false` whenever occupancy hasn't been OBSERVED
+/// yet (`occupied` is `None`, #2096) — an unknown reading is never rendered
+/// as "at capacity" with false confidence.
+pub(crate) fn concurrency_is_at_capacity(c: &BoardConcurrency) -> bool {
+    match c.occupied {
+        Some(occ) => c.max_parallel.value > 0 && occ >= c.max_parallel.value,
+        None => false,
+    }
+}
+
+/// #102 item 1: the one-line ceilings/usage summary — `"global 4/4 · CC
+/// 2/2 · V 2/2"`. Global first, then one `alias N/cap` segment per repo in
+/// `repo_overrides` (sorted by repo name so the line is deterministic),
+/// mirroring the daemon's own "only the repos that disagree" trim — see
+/// `BoardConcurrency`'s doc comment.
+///
+/// `None` — the #2133-style "unknown" treatment, never a guessed number or
+/// a `0/0` — when the daemon predates #3428 and never sent a `concurrency`
+/// block at all.
+pub(crate) fn concurrency_readout_text(concurrency: Option<&BoardConcurrency>) -> String {
+    let Some(c) = concurrency else {
+        return "concurrency ceilings: unknown — daemon predates effective-ceiling reporting (#3428)"
+            .to_string();
+    };
+    let occ_text = |occ: Option<i64>| occ.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string());
+    let mut out = format!("global {}/{}", occ_text(c.occupied), c.max_parallel.value);
+    let mut repos: Vec<&String> = c.repo_overrides.keys().collect();
+    repos.sort();
+    for repo in repos {
+        let ceiling = c
+            .repo_overrides
+            .get(repo)
+            .map(|b| b.value)
+            .unwrap_or(c.max_parallel_per_repo.value);
+        let repo_occ = c.repo_occupied.as_ref().and_then(|m| m.get(repo)).copied();
+        out.push_str(&format!(" · {} {}/{}", repo_alias(repo), occ_text(repo_occ), ceiling));
+    }
+    // #2096/#2133: a numberless `occupied` says WHY, right on the summary
+    // line itself — `occupancy_state` is `coord.drive_sessions_snapshot.
+    // OCCUPANCY_STATES`'s own verdict, rendered verbatim (never re-derived),
+    // same posture as `queue_state_cell` consuming `state`.
+    if c.occupied.is_none() {
+        let state = if c.occupancy_state.is_empty() {
+            "unobserved"
+        } else {
+            &c.occupancy_state
+        };
+        out.push_str(&format!(" (occupancy {state})"));
+    }
+    out
+}
+
+/// #102 item 3: the full readout, one string per rendered line. `lines[0]`
+/// is [`concurrency_readout_text`]'s summary, with `" — AT CAPACITY"`
+/// appended whenever [`concurrency_is_at_capacity`] — a literal, greppable
+/// string rather than colour alone, so "the queue is full" is legible in a
+/// screen dump too (acceptance bar: a fixture below cap must never show
+/// this marker). Anything after `lines[0]` is PROVENANCE — the resolved
+/// `source` behind each ceiling — appended only when `detail_open` (toggled
+/// by `c` in the Queue panel), so the always-on summary stays exactly one
+/// line, per the issue's own "behind a detail view or key rather than
+/// always on screen" framing for item 3.
+pub(crate) fn concurrency_readout_lines(
+    concurrency: Option<&BoardConcurrency>,
+    detail_open: bool,
+) -> Vec<String> {
+    let mut summary = concurrency_readout_text(concurrency);
+    if concurrency.is_some_and(concurrency_is_at_capacity) {
+        summary.push_str(" — AT CAPACITY");
+    }
+    let mut lines = vec![summary];
+    if !detail_open {
+        return lines;
+    }
+    let Some(c) = concurrency else {
+        lines.push(
+            "  no provenance — daemon predates effective-ceiling reporting (#3428)".to_string(),
+        );
+        return lines;
+    };
+    let mut push_ceiling = |label: &str, ceiling: &BoardCeiling| {
+        lines.push(format!(
+            "  {}: {}",
+            ceiling_label(ceiling, label),
+            ceiling_provenance_text(ceiling)
+        ));
+        lines.extend(ceiling_losing_lines(ceiling));
+    };
+    push_ceiling("max_parallel (global)", &c.max_parallel);
+    push_ceiling("max_parallel_per_repo (per-repo default)", &c.max_parallel_per_repo);
+    push_ceiling("max_workers (fleet workers)", &c.max_workers);
+    let mut repos: Vec<&String> = c.repo_overrides.keys().collect();
+    repos.sort();
+    for repo in repos {
+        if let Some(ceiling) = c.repo_overrides.get(repo) {
+            push_ceiling(&format!("{} override", repo_alias(repo)), ceiling);
+        }
+    }
+    // #2096: the wall-clock moment behind `occupied`/`repo_occupied` — lets
+    // an operator age out a reading themselves rather than trusting a
+    // number with no visible timestamp.
+    if let Some(observed_at) = c.occupancy_observed_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let age = format_age(Some(observed_at), now);
+        if !age.is_empty() {
+            lines.push(format!("  occupancy observed: {age}"));
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -4546,5 +4890,346 @@ mod tests {
     #[test]
     fn queue_clamp_h_scroll_never_goes_negative() {
         assert_eq!(CoordApp::queue_clamp_h_scroll(-5.0, 200.0, 100.0), 0.0);
+    }
+
+    // ── #102: concurrency ceilings/usage readout ─────────────────────────
+
+    fn ceiling(name: &str, value: i64, source: &str, source_kind: &str) -> BoardCeiling {
+        BoardCeiling {
+            name: name.to_string(),
+            value,
+            source: source.to_string(),
+            source_kind: source_kind.to_string(),
+            losing: None,
+        }
+    }
+
+    /// A `BoardConcurrency` at exactly its global cap: 4 occupied, 4
+    /// resolved — the reported symptom's own numbers.
+    fn concurrency_at_cap() -> BoardConcurrency {
+        BoardConcurrency {
+            max_parallel: ceiling(
+                "max_parallel",
+                4,
+                "systemd ExecStart --max-parallel 4",
+                "systemd_flag",
+            ),
+            max_parallel_per_repo: ceiling("max_parallel_per_repo", 2, "default (2)", "default"),
+            max_workers: ceiling("max_workers", 8, "coordinator.yml concurrency.max_workers", "coordinator_yml_concurrency"),
+            repo_overrides: std::collections::HashMap::new(),
+            occupied: Some(4),
+            repo_occupied: Some(std::collections::HashMap::new()),
+            occupancy_state: "observed".to_string(),
+            occupancy_observed_at: Some(1_700_000_000.0),
+        }
+    }
+
+    #[test]
+    fn concurrency_readout_text_renders_global_and_repo_usage() {
+        let mut c = concurrency_at_cap();
+        c.repo_overrides.insert(
+            "claude-coordinator".to_string(),
+            ceiling("max_parallel", 2, "coordinator.yml repos[claude-coordinator].max_parallel", "coordinator_yml_repo"),
+        );
+        c.repo_occupied.as_mut().unwrap().insert("claude-coordinator".to_string(), 2);
+        assert_eq!(
+            concurrency_readout_text(Some(&c)),
+            "global 4/4 · CC 2/2"
+        );
+    }
+
+    #[test]
+    fn concurrency_readout_text_unknown_treatment_when_daemon_predates_3428() {
+        let text = concurrency_readout_text(None);
+        assert!(
+            text.contains("unknown"),
+            "an absent `concurrency` block must render the #2133-style \
+             'unknown' treatment, never a guessed number:\n{text}"
+        );
+        assert!(!text.contains("0/0"), "must never guess a `0/0`:\n{text}");
+    }
+
+    #[test]
+    fn concurrency_readout_text_says_why_when_occupancy_unobserved() {
+        let mut c = concurrency_at_cap();
+        c.occupied = None;
+        c.occupancy_state = "stale".to_string();
+        let text = concurrency_readout_text(Some(&c));
+        assert!(
+            text.contains("global ?/4") && text.contains("stale"),
+            "an unobserved/stale occupancy reading must say so instead of \
+             guessing a number:\n{text}"
+        );
+    }
+
+    #[test]
+    fn concurrency_is_at_capacity_true_at_and_over_the_ceiling() {
+        assert!(concurrency_is_at_capacity(&concurrency_at_cap()));
+        let mut over = concurrency_at_cap();
+        over.occupied = Some(5);
+        assert!(concurrency_is_at_capacity(&over));
+    }
+
+    #[test]
+    fn concurrency_is_at_capacity_false_below_the_ceiling_or_unobserved() {
+        let mut below = concurrency_at_cap();
+        below.occupied = Some(2);
+        assert!(!concurrency_is_at_capacity(&below));
+        let mut unobserved = concurrency_at_cap();
+        unobserved.occupied = None;
+        assert!(!concurrency_is_at_capacity(&unobserved));
+    }
+
+    #[test]
+    fn concurrency_readout_lines_appends_at_capacity_marker_only_when_full() {
+        let at_cap = concurrency_readout_lines(Some(&concurrency_at_cap()), false);
+        assert_eq!(at_cap.len(), 1);
+        assert!(
+            at_cap[0].ends_with("— AT CAPACITY"),
+            "an at-cap fixture must render the marker:\n{at_cap:?}"
+        );
+
+        let mut below = concurrency_at_cap();
+        below.occupied = Some(1);
+        let below_lines = concurrency_readout_lines(Some(&below), false);
+        assert!(
+            !below_lines[0].contains("AT CAPACITY"),
+            "a below-cap fixture must NOT render the marker:\n{below_lines:?}"
+        );
+    }
+
+    #[test]
+    fn concurrency_readout_lines_detail_open_shows_provenance_and_losing_sources() {
+        let mut c = concurrency_at_cap();
+        c.max_parallel.losing = Some(vec![BoardCeilingSource {
+            source: "coordinator.yml pipeline.max_parallel".to_string(),
+            source_kind: "coordinator_yml_pipeline".to_string(),
+            value: 8,
+        }]);
+        let closed = concurrency_readout_lines(Some(&c), false);
+        assert_eq!(closed.len(), 1, "provenance must stay hidden by default:\n{closed:?}");
+
+        let open = concurrency_readout_lines(Some(&c), true);
+        let joined = open.join("\n");
+        assert!(
+            joined.contains("systemd ExecStart --max-parallel 4") && joined.contains("systemd_flag"),
+            "detail must name the WINNING source and its kind:\n{joined}"
+        );
+        assert!(
+            joined.contains("outranked") && joined.contains("coordinator.yml pipeline.max_parallel"),
+            "detail must also name what the winning source outranked \
+             (#3408's whole point):\n{joined}"
+        );
+    }
+
+    /// One row waiting purely on the fleet-wide cap (no `after`, no
+    /// tick-stamped `last_reason`) must read "at capacity" in its own
+    /// Reason cell, while a row waiting on an unsatisfied `after` (which
+    /// DOES carry a real, tick-stamped reason) keeps that text untouched —
+    /// the two must never look the same.
+    #[test]
+    fn queue_capacity_note_only_fills_the_gap_a_real_reason_leaves() {
+        let app = make_test_app(BoardData {
+            drive_queue: vec![
+                entry(1, 0, QUEUE_STATE_RUNNING, &[]),
+                entry(2, 1, QUEUE_STATE_RUNNING, &[]),
+                entry(3, 2, QUEUE_STATE_RUNNING, &[]),
+                entry(4, 3, QUEUE_STATE_RUNNING, &[]),
+                {
+                    let mut e = entry(5, 4, QUEUE_STATE_WAITING, &["myrepo#9"]);
+                    e.last_reason = "waiting on myrepo#9's deploy gate".to_string();
+                    e
+                },
+                entry(6, 5, QUEUE_STATE_WAITING, &[]),
+            ],
+            concurrency: Some(concurrency_at_cap()),
+            ..BoardData::default()
+        });
+        let rows = app.queue_rows();
+        let reason_for = |issue: i64| {
+            rows.iter()
+                .find(|r| r.issue_number == issue)
+                .map(|r| r.cells[11].clone())
+                .unwrap_or_else(|| panic!("row {issue} not found"))
+        };
+        assert_eq!(reason_for(5), "waiting on myrepo#9's deploy gate");
+        assert_eq!(reason_for(6), "queue at capacity (4/4) — waiting for a free slot");
+    }
+
+    #[test]
+    fn queue_capacity_note_absent_below_cap_and_off_terminal_states() {
+        let app = make_test_app(BoardData {
+            drive_queue: vec![entry(1, 0, QUEUE_STATE_WAITING, &[])],
+            concurrency: Some({
+                let mut c = concurrency_at_cap();
+                c.occupied = Some(1);
+                c
+            }),
+            ..BoardData::default()
+        });
+        let rows = app.queue_rows();
+        assert_eq!(rows[0].cells[11], QUEUE_EMPTY_CELL);
+    }
+
+    // ── TuiDriver black-box (#102 acceptance) ────────────────────────────
+
+    /// Acceptance bullet 1: a board fixture with global in-flight == global
+    /// cap renders the at-capacity readout; a fixture below cap does not.
+    #[test]
+    fn tuidriver_queue_panel_renders_at_capacity_readout_only_when_full() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = driver_app(vec![
+            entry(1, 0, QUEUE_STATE_RUNNING, &[]),
+            entry(2, 1, QUEUE_STATE_WAITING, &[]),
+        ]);
+        app.data.concurrency = Some(concurrency_at_cap());
+        app.active_view = SidebarView::Queue;
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 200, 44);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("global 4/4") && screen.contains("AT CAPACITY"),
+            "an at-cap fixture must render the ceilings/usage readout AND \
+             the at-capacity marker:\n{screen}"
+        );
+
+        let mut below = driver_app(vec![
+            entry(1, 0, QUEUE_STATE_RUNNING, &[]),
+            entry(2, 1, QUEUE_STATE_WAITING, &[]),
+        ]);
+        let mut c = concurrency_at_cap();
+        c.occupied = Some(1);
+        below.data.concurrency = Some(c);
+        below.active_view = SidebarView::Queue;
+        let driver = driver_with_shell(below, CoordApp::shell_config(), 200, 44);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("global 1/4"),
+            "the readout itself must still render below cap:\n{screen}"
+        );
+        assert!(
+            !screen.contains("AT CAPACITY"),
+            "…but the at-capacity marker must NOT appear below cap:\n{screen}"
+        );
+    }
+
+    /// Acceptance bullet 2: a row deferred on capacity reads visibly
+    /// differently, on the real rendered grid, from a row deferred on an
+    /// unsatisfied `after`.
+    #[test]
+    fn tuidriver_queue_panel_distinguishes_capacity_from_unsatisfied_after() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut gated = entry(9, 4, QUEUE_STATE_WAITING, &["myrepo#7"]);
+        gated.last_reason = "waiting on myrepo#7's deploy gate".to_string();
+        let mut app = driver_app(vec![
+            entry(1, 0, QUEUE_STATE_RUNNING, &[]),
+            entry(2, 1, QUEUE_STATE_RUNNING, &[]),
+            entry(3, 2, QUEUE_STATE_RUNNING, &[]),
+            entry(4, 3, QUEUE_STATE_RUNNING, &[]),
+            gated,
+            entry(6, 5, QUEUE_STATE_WAITING, &[]),
+        ]);
+        app.data.concurrency = Some(concurrency_at_cap());
+        app.active_view = SidebarView::Queue;
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 220, 44);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("waiting on myrepo#7's deploy gate"),
+            "a row with a real, tick-stamped reason keeps it verbatim:\n{screen}"
+        );
+        assert!(
+            screen.contains("queue at capacity (4/4)"),
+            "a row with no reason of its own, at a full queue, must say \
+             capacity — the exact gap #102 reports:\n{screen}"
+        );
+    }
+
+    /// Acceptance bullet 3: an older daemon that never sent `concurrency`
+    /// at all must degrade safely — the #2133-style "unknown" treatment,
+    /// never a blanked panel and never a confidently-wrong `0/0`.
+    #[test]
+    fn tuidriver_queue_panel_degrades_safely_without_a_concurrency_block() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = driver_app(vec![entry(1, 0, QUEUE_STATE_WAITING, &[])]);
+        app.data.concurrency = None;
+        app.active_view = SidebarView::Queue;
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 200, 44);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("unknown"),
+            "a pre-#3428 daemon must render the unknown treatment:\n{screen}"
+        );
+        assert!(!screen.contains("0/0"), "never a guessed 0/0:\n{screen}");
+        // The grid itself must still be there — an absent `concurrency`
+        // block must never blank the rest of the panel (#632/#546/#628).
+        assert!(
+            screen.contains("M#1"),
+            "the queue grid must still render:\n{screen}"
+        );
+    }
+
+    /// Item 3: `c` toggles the readout's provenance detail on and off while
+    /// the Queue panel is focused — the "behind a detail view or key"
+    /// surface, exercised end-to-end through the real key-dispatch path
+    /// rather than just the pure `concurrency_readout_lines` unit above.
+    #[test]
+    fn tuidriver_queue_panel_c_toggles_provenance_detail() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = driver_app(vec![
+            entry(1, 0, QUEUE_STATE_RUNNING, &[]),
+            entry(2, 1, QUEUE_STATE_WAITING, &[]),
+        ]);
+        app.data.concurrency = Some(concurrency_at_cap());
+        app.active_view = SidebarView::Queue;
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 200, 44);
+
+        let before = driver.screen();
+        assert!(
+            !before.contains("systemd_flag"),
+            "provenance must stay hidden until `c` is pressed:\n{before}"
+        );
+
+        driver.press(Key::Char('c'));
+        let after = driver.screen();
+        assert!(
+            after.contains("systemd_flag") && after.contains("max_parallel"),
+            "`c` must reveal the ceiling's provenance:\n{after}"
+        );
+
+        driver.press(Key::Char('c'));
+        let toggled_off = driver.screen();
+        assert!(
+            !toggled_off.contains("systemd_flag"),
+            "a second `c` must hide it again:\n{toggled_off}"
+        );
+    }
+
+    /// Acceptance bullet 4: the readout stays legible at the narrowest grid
+    /// width before horizontal scrolling kicks in (#2043's
+    /// `QUEUE_MIN_WIDTH_CHARS`, 120 characters).
+    #[test]
+    fn tuidriver_queue_panel_readout_legible_at_narrowest_width() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = driver_app(vec![
+            entry(1, 0, QUEUE_STATE_RUNNING, &[]),
+            entry(2, 1, QUEUE_STATE_WAITING, &[]),
+        ]);
+        app.data.concurrency = Some(concurrency_at_cap());
+        app.active_view = SidebarView::Queue;
+        // 130 columns: just above the grid's own 120-char floor, once the
+        // sidebar's own width is accounted for, but still narrow enough
+        // that a truncation bug in the readout (as opposed to the grid,
+        // which is allowed to scroll) would be visible here first.
+        let driver = driver_with_shell(app, CoordApp::shell_config(), 130, 40);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("global 4/4") && screen.contains("AT CAPACITY"),
+            "the readout must stay whole, not truncated, at the narrowest \
+             supported width:\n{screen}"
+        );
     }
 }

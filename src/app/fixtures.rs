@@ -189,6 +189,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         queue_hscroll_drag: false,
         queue_detail_scrollbar: std::cell::RefCell::new(None),
         queue_detail_vscroll_drag: false,
+        queue_concurrency_detail_open: false,
         pipeline_log_scrollbar: std::cell::RefCell::new(None),
         pipeline_log_scrollbar_drag: false,
         last_log_panel_visible_rows: std::cell::Cell::new(40),
@@ -659,6 +660,7 @@ fn board_data_from_payload(payload: BoardPayload) -> BoardData {
         fleet_health: payload.fleet_health,
         drive_queue: payload.drive_queue,
         roll_pending: payload.roll_pending,
+        concurrency: payload.concurrency,
         approved_submissions: payload.approved_submissions,
         // #2895: a fixture built from a board payload is by definition a
         // successful load.

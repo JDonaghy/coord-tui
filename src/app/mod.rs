@@ -3058,6 +3058,13 @@ pub struct CoordApp {
     /// vertical-scrollbar thumb. Same shape as `queue_vscroll_drag`, for
     /// the other pane.
     queue_detail_vscroll_drag: bool,
+    /// #102: `true` while the Queue panel's concurrency-ceilings readout is
+    /// showing PROVENANCE (the resolved `source` behind each ceiling) rather
+    /// than just its one-line summary — toggled by `c` while the Queue panel
+    /// is the active view (`events.rs`). Off by default: item 3 of #102's
+    /// "what to build" list is explicit that provenance stays "behind a
+    /// detail view or key rather than always on screen".
+    queue_concurrency_detail_open: bool,
     /// #64: the Pipeline Log tab's most recently painted vertical scrollbar
     /// geometry — the hand-rolled `Scrollbar` `render.rs` constructs for
     /// `log_rect` (not `Backend::list_vscrollbar`: GTK's `ListView`
@@ -4520,6 +4527,7 @@ impl CoordApp {
             queue_hscroll_drag: false,
             queue_detail_scrollbar: std::cell::RefCell::new(None),
             queue_detail_vscroll_drag: false,
+            queue_concurrency_detail_open: false,
             pipeline_log_scrollbar: std::cell::RefCell::new(None),
             pipeline_log_scrollbar_drag: false,
             last_log_panel_visible_rows: std::cell::Cell::new(40),

@@ -1867,6 +1867,7 @@ pub(crate) fn assemble_board_data(
     fleet_health: FleetHealthBlock,
     drive_queue: Vec<BoardDriveQueueEntry>,
     roll_pending: Option<RollPending>,
+    concurrency: Option<BoardConcurrency>,
     approved_submissions: Vec<ApprovedSubmission>,
 ) -> BoardData {
     // ── Machine reachability probes + health fetches ──────────────────────
@@ -2012,6 +2013,7 @@ pub(crate) fn assemble_board_data(
         fleet_health,
         drive_queue,
         roll_pending,
+        concurrency,
         approved_submissions,
         // #2895: reaching `assemble_board_data` at all means a board was
         // successfully fetched — the hard "no board service" error is raised
@@ -3002,6 +3004,10 @@ pub(crate) fn load_data_remote(url: &str, token: Option<&str>) -> BoardData {
         // `#[serde(default)]`) on daemons that predate #2608, or when no
         // roll is currently pending.
         payload.roll_pending,
+        // #3428 (#3408 item 3) / #102: server-resolved concurrency ceilings +
+        // provenance + occupancy; `None` (via `#[serde(default)]`) on
+        // daemons that predate #3428.
+        payload.concurrency,
         // #2532: server-computed approved-submissions list (repos already
         // resolved via #2531's project↔repo mapping); empty (via
         // `#[serde(default)]`) on daemons that predate #2532.

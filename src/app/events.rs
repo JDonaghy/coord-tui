@@ -2268,6 +2268,16 @@ impl CoordApp {
                         self.queue_resume_selected();
                         needs_redraw = true;
                     }
+                    // #102 item 3: toggle the concurrency readout's
+                    // provenance detail (the resolved `source` behind each
+                    // ceiling) — off by default, so it stays "behind a key"
+                    // per the issue's own framing rather than always on
+                    // screen. `c` is free here (`x`/`u`/`r` above are this
+                    // panel's only other bare-letter bindings).
+                    Key::Char('c') if self.active_view == SidebarView::Queue => {
+                        self.queue_concurrency_detail_open = !self.queue_concurrency_detail_open;
+                        needs_redraw = true;
+                    }
 
                     // ── Merge Queue keyboard nav (#737) ──────────────────
                     Key::Char('j') | Key::Named(NamedKey::Down)

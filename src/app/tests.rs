@@ -59521,26 +59521,35 @@ Milestone tracking issue.
         // `tuidriver_queue_grid_scrollbar_thumb_drag_scrolls_the_grid`
         // proves for the vertical track.
         //
-        // Observed via the header row's rendered text (row 0 — Queue has
-        // no panel toolbar, so the grid starts at the very top of the
-        // main panel): `driver_with_shell` wraps the app in a private
-        // `ShellAdapter` this crate can't see through, so there is no
-        // `driver.app().queue_h_scroll` to poke — every Queue mouse test
-        // in this file asserts on rendered content instead. Comparing the
-        // WHOLE row (sidebar included) is still exact: the sidebar's
-        // portion of row 0 never changes across these steps, so any
-        // difference is entirely inside the grid.
+        // Observed via the header row's rendered text: `driver_with_shell`
+        // wraps the app in a private `ShellAdapter` this crate can't see
+        // through, so there is no `driver.app().queue_h_scroll` to poke —
+        // every Queue mouse test in this file asserts on rendered content
+        // instead. Comparing the WHOLE row (sidebar included) is still
+        // exact: the sidebar's portion of the header row never changes
+        // across these steps, so any difference is entirely inside the
+        // grid. The row itself is found via `Issue`'s own y (#102: the
+        // grid no longer starts at the very top of the main panel — the
+        // concurrency readout now sits above it), captured ONCE before any
+        // scrolling starts — the row's vertical position never moves as
+        // the grid scrolls horizontally, only which columns are visible.
         let mut driver = queue_driver(queue_fixture_json(), QUEUE_NARROW_COLS, 30);
+        let (_hx, header_y) = driver
+            .find("Issue")
+            .unwrap_or_else(|| panic!("Issue header must render:\n{}", driver.screen()));
         let (_sep_x, sep_y) = find_queue_separator(&driver);
         let screen = driver.screen();
         let (sb_y, track_x0, track_x1) =
-            hscrollbar_track_in_row(&screen, 0, sep_y as usize).unwrap_or_else(|| {
-                panic!("horizontal scrollbar must render at {QUEUE_NARROW_COLS} cols:\n{screen}")
-            });
+            hscrollbar_track_in_row(&screen, header_y as usize, sep_y as usize)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "horizontal scrollbar must render at {QUEUE_NARROW_COLS} cols:\n{screen}"
+                    )
+                });
 
         driver.mouse_down(track_x0, sb_y);
         driver.render();
-        let header_after_down = screen_row(&driver.screen(), 0.0);
+        let header_after_down = screen_row(&driver.screen(), header_y);
 
         // Drag to the middle and check the header followed, then drag on
         // to the far right and check it moved further still. A single
@@ -59551,7 +59560,7 @@ Milestone tracking issue.
         let mid_x = (track_x0 + track_x1) / 2.0;
         driver.mouse_move(mid_x, sb_y);
         driver.render();
-        let header_mid = screen_row(&driver.screen(), 0.0);
+        let header_mid = screen_row(&driver.screen(), header_y);
         assert_ne!(
             header_mid, header_after_down,
             "#2043: dragging the h-thumb to the middle of the track must \
@@ -59561,7 +59570,7 @@ Milestone tracking issue.
 
         driver.mouse_move(track_x1, sb_y);
         driver.render();
-        let header_end = screen_row(&driver.screen(), 0.0);
+        let header_end = screen_row(&driver.screen(), header_y);
         assert_ne!(
             header_end, header_mid,
             "#2043: continuing the drag to the track's far right must keep \
@@ -59579,7 +59588,7 @@ Milestone tracking issue.
 
         driver.mouse_up(track_x1, sb_y);
         driver.render();
-        let header_after_up = screen_row(&driver.screen(), 0.0);
+        let header_after_up = screen_row(&driver.screen(), header_y);
         assert_eq!(
             header_after_up, header_end,
             "#2043: `MouseUp` must not itself move the scroll position — it \
@@ -59593,7 +59602,7 @@ Milestone tracking issue.
         driver.mouse_move(track_x0, sb_y);
         driver.render();
         assert_eq!(
-            screen_row(&driver.screen(), 0.0),
+            screen_row(&driver.screen(), header_y),
             header_after_up,
             "#2043: `MouseUp` must clear `queue_hscroll_drag`, or this \
              later unrelated `MouseMoved` would keep scrubbing the \
@@ -59608,12 +59617,14 @@ Milestone tracking issue.
         // text changing (screen-only; see the thumb-drag test's comment
         // above for why), dispatched at a position over a column that's
         // actually visible at `h_scroll == 0.0` (`Issue`, unlike `Reason`
-        // in this narrow terminal).
+        // in this narrow terminal). The header row's own y is `Issue`'s —
+        // #102's concurrency readout now sits above the grid, so the
+        // header is no longer pinned to the very top of the main panel.
         let mut driver = queue_driver(queue_fixture_json(), QUEUE_NARROW_COLS, 30);
         let (gx, gy) = driver
             .find("Issue")
             .unwrap_or_else(|| panic!("Issue header must render:\n{}", driver.screen()));
-        let header_before = screen_row(&driver.screen(), 0.0);
+        let header_before = screen_row(&driver.screen(), gy);
 
         for _ in 0..60 {
             driver.dispatch(quadraui::UiEvent::Scroll {
@@ -59624,7 +59635,7 @@ Milestone tracking issue.
             driver.render();
         }
 
-        let header_after = screen_row(&driver.screen(), 0.0);
+        let header_after = screen_row(&driver.screen(), gy);
         assert_ne!(
             header_before, header_after,
             "#2043: a horizontal wheel notch over the grid must scroll \

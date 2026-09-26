@@ -856,6 +856,12 @@ pub(crate) struct BoardPayload {
     /// `null` (no roll pending).
     #[serde(default)]
     pub(crate) roll_pending: Option<RollPending>,
+    /// #3428 (#3408 item 3) / #102: server-resolved concurrency ceilings +
+    /// provenance + occupancy — see [`BoardConcurrency`]'s own doc comment.
+    /// `None` (via `#[serde(default)]`) on daemons that predate #3428, or
+    /// whenever `_compute_board_concurrency` fails open server-side.
+    #[serde(default)]
+    pub(crate) concurrency: Option<BoardConcurrency>,
     /// #2532 (ms-67 contract §5): portal submissions ready for
     /// decomposition into coordinator work — `signoff.approved` today.
     /// Server-computed (`coord/approved_work.py`, injected by
@@ -1693,6 +1699,104 @@ pub(crate) struct RollPending {
     /// fleet still busy — bumped by the shell each tick it defers the roll.
     #[serde(default)]
     pub(crate) deferrals: i64,
+}
+
+/// #3428/#102: one LOSING source's own opinion for a [`BoardCeiling`] — the
+/// wire twin of one `(name, value)` pair in `coord.drive_queue.
+/// CeilingResolution.losing` (`coord.board_schema.BoardCeilingSource`).
+/// This is the whole point of shipping provenance at all: it is what tells
+/// an operator that editing `coordinator.yml`/`coord-settings` is futile
+/// while some other source (a machine-local systemd flag, most often)
+/// outranks it — the #3408 reported incident.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub(crate) struct BoardCeilingSource {
+    #[serde(default)]
+    pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) source_kind: String,
+    #[serde(default)]
+    pub(crate) value: i64,
+}
+
+/// #3428/#102: one resolved concurrency ceiling + provenance — the `/board`
+/// wire twin of `coord.drive_queue.CeilingResolution`
+/// (`coord.board_schema.BoardCeiling`), the exact resolution `coord config
+/// --effective` and `coord drive-queue tick` themselves already use (#2085
+/// "one question, one answer": this is never a second, independently-derived
+/// answer). `source` is the free-text prose a human reads in `coord config
+/// --effective`'s output; `source_kind` is its machine-readable
+/// classification (`coord.board_schema.classify_ceiling_source`'s closed
+/// value set) — style/filter off `source_kind`, never off `source`'s
+/// wording, which is free to change. `losing` is `None` (not `[]`) when
+/// nothing else was configured, matching `CeilingResolution.losing`'s own
+/// "empty means nobody else had an opinion" contract.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub(crate) struct BoardCeiling {
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) value: i64,
+    #[serde(default)]
+    pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) source_kind: String,
+    #[serde(default)]
+    pub(crate) losing: Option<Vec<BoardCeilingSource>>,
+}
+
+/// #3428 (#3408 item 3) / #102: the `/board` payload's optional `concurrency`
+/// sibling key (`coord.board_schema.BoardConcurrency`) — every ceiling
+/// `coord drive-queue tick` actually enforces, resolved on the DAEMON host,
+/// plus current occupancy against each. Additive and absent-tolerant, same
+/// posture as `roll_pending`/`goal_header`: an older daemon simply omits the
+/// `concurrency` key entirely (never an empty object), and `#[serde(default)]`
+/// on `BoardPayload::concurrency` leaves this `None` in that case — the Queue
+/// panel's readout renders the #2133-style "unknown" treatment rather than
+/// guessing a number or showing `0/0`.
+///
+/// **Resolved server-side, always.** A machine-local systemd `--max-parallel`
+/// flag (#3408's reported incident) is invisible to this thin client by
+/// construction; the daemon is the only host that can see its own installed
+/// unit, so every ceiling here — including `source`/`source_kind` — is read
+/// off this block verbatim, never re-derived from a locally-cached
+/// `coordinator.yml`.
+///
+/// `repo_overrides` carries only the repos whose OWN `repos[].max_parallel`
+/// (#3423) actually differs from `max_parallel_per_repo`'s fleet-wide value —
+/// listing every repo would bury the ones that matter.
+///
+/// **Occupancy is nullable, and says why (#2096).** `occupied`/
+/// `repo_occupied` are `None` — labelled by `occupancy_state` — whenever the
+/// daemon has not taken a live `tmux list-sessions` reading yet, or its last
+/// one is too stale to be evidence about now (#2862); never a
+/// confidently-wrong `0` a client would render as "all slots free". The
+/// CEILINGS themselves are unaffected: they are resolved from config + the
+/// host's systemd unit on every build, so they stay populated even when
+/// occupancy is unknown.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub(crate) struct BoardConcurrency {
+    #[serde(default)]
+    pub(crate) max_parallel: BoardCeiling,
+    #[serde(default)]
+    pub(crate) max_parallel_per_repo: BoardCeiling,
+    #[serde(default)]
+    pub(crate) max_workers: BoardCeiling,
+    #[serde(default)]
+    pub(crate) repo_overrides: std::collections::HashMap<String, BoardCeiling>,
+    /// `None` unless `occupancy_state` is `"observed"`.
+    #[serde(default)]
+    pub(crate) occupied: Option<i64>,
+    #[serde(default)]
+    pub(crate) repo_occupied: Option<std::collections::HashMap<String, i64>>,
+    /// One of `"observed"` / `"unobserved"` / `"stale"`
+    /// (`coord.drive_sessions_snapshot.OCCUPANCY_STATES`). `#[serde(default)]`
+    /// leaves this `""` — rendered the same as `"unobserved"` — on a daemon
+    /// old enough to omit the key but new enough to emit `concurrency` at
+    /// all (should not happen in practice, but never trusted to be absent).
+    #[serde(default)]
+    pub(crate) occupancy_state: String,
+    #[serde(default)]
+    pub(crate) occupancy_observed_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -2558,6 +2662,11 @@ pub struct BoardData {
     /// comment. `None` on the local-SQLite-mode read path (no daemon to read
     /// the marker file from) and on daemons older than #2608.
     pub(crate) roll_pending: Option<RollPending>,
+    /// #3428/#102: mirrors `BoardPayload::concurrency` — see
+    /// `BoardConcurrency`'s doc comment. `None` on the local-SQLite-mode
+    /// read path (no daemon to resolve ceilings from) and on daemons older
+    /// than #3428.
+    pub(crate) concurrency: Option<BoardConcurrency>,
     /// #2532: mirrors `BoardPayload::approved_submissions` — portal
     /// submissions ready for decomposition. Empty on daemons older than #2532.
     pub(crate) approved_submissions: Vec<ApprovedSubmission>,

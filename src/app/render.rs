@@ -741,7 +741,7 @@ impl ShellApp for CoordApp {
 
         // ── Toast overlay (bottom-right of main content) ────────────────
         if let Some(stack) = self.toast_stack() {
-            backend.draw_toast_stack(layout.main_content_bounds, &stack);
+            backend.draw_toast_overlay(layout.main_content_bounds, &stack);
         }
 
         // ── #259: open context menu (above everything except dialogs) ───

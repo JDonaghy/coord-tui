@@ -807,9 +807,15 @@ mod tests {
             "the live drive (#42) must render the '[driving]' badge:\n{screen}"
         );
         assert!(
-            screen.contains("[drive exited]"),
-            "the drive that exited without finishing (#43) must render the \
-             '[drive exited]' badge, distinguishable from both '[driving]' \
+            // quadraui#1183 (bump target #114): the TUI tree rasteriser now
+            // clamps an over-long label to leave a gap before the row's
+            // real right-aligned badge ("ready") instead of overwriting it,
+            // ending the clamped label with "…" — in this fixture's default
+            // (35-col) sidebar that eats the closing "]", so match the
+            // stable, still-unambiguous prefix rather than the full label.
+            screen.contains("[drive exited"),
+            "the drive that exited without finishing (#43) must render a \
+             '[drive exited…]' badge, distinguishable from both '[driving]' \
              and no badge at all:\n{screen}"
         );
     }
@@ -1068,8 +1074,12 @@ mod tests {
         driver.click(dx, dy - 0.1);
 
         let screen = driver.screen();
+        // The toast body word-wraps inside its narrow box ("queuing myrepo"
+        // / "#42…" on two lines, quadraui#1182's per-corner-toast wrapping,
+        // picked up by the #114 bump) — match both wrapped fragments
+        // rather than the joined string.
         assert!(
-            screen.contains("queuing myrepo #42"),
+            screen.contains("queuing myrepo") && screen.contains("#42"),
             "#2634: clicking the primary 'Drive (automated)' item must \
              toast the drive-queue confirmation ('queuing myrepo #42…'), \
              not silently launch a local tmux session; got:\n{screen}",

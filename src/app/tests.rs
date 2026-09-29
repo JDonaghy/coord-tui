@@ -3364,15 +3364,16 @@
         driver.press_named(quadraui::NamedKey::Enter);
 
         let screen = driver.screen();
-        // The toast wraps/truncates at panel width (the full "--note ..."
-        // tail doesn't fit), same as `tuidriver_quiet_hours_submit_closes_
-        // dialog_and_toasts` — match the stable, untruncated prefix here;
-        // the exact argv (including the full `--note` text) is asserted
-        // separately at the direct-app level by
+        // The toast body word-wraps inside its narrow box ("coord gate-a
+        // --changes api" / "751 --note status" / "vocabulary is wrong" on
+        // separate lines, quadraui#1182's per-corner-toast wrapping, picked
+        // up by the #114 bump) — match the stable, wrapped-safe prefix
+        // here; the exact argv (including the full `--note` text) is
+        // asserted separately at the direct-app level by
         // `submit_gate_a_changes_note_input_dispatches_changes_command_with_note`.
         assert!(
             screen.contains("Gate A changes requested")
-                && screen.contains("coord gate-a --changes api 751"),
+                && screen.contains("coord gate-a --changes api"),
             "Enter must submit and dispatch, toasting confirmation:\n{screen}",
         );
         assert!(
@@ -40314,8 +40315,12 @@
         // assert on the rendered toast text, same as every other
         // `TuiDriver`-based test in this suite.
         let screen = driver.screen();
+        // The toast body word-wraps inside its narrow box ("#42 copied" /
+        // "to" / "clipboard" on three lines, quadraui#1182's per-corner-
+        // toast wrapping, picked up by the #114 bump) — match the wrapped
+        // fragments rather than the joined string.
         assert!(
-            screen.contains("Copied") && screen.contains("#42 copied to clipboard"),
+            screen.contains("Copied") && screen.contains("#42 copied") && screen.contains("clipboard"),
             "#1374: activating 'Copy issue #42' must toast a real confirmation:\n{}",
             screen
         );
@@ -42701,9 +42706,14 @@ Milestone tracking issue.
             screen.contains("↑W2"),
             "#102 must show '↑W2' (ready + next_up, rank 1→2):\n{screen}",
         );
-        // #103 is blocked (rank 2, first blocker #101) → "⊘W3←#101"
+        // #103 is blocked (rank 2, first blocker #101) → "⊘W3←#101", but
+        // quadraui#1183 (bump target #114) now clamps an over-long tree
+        // row label with "…" to leave a gap before the row's real
+        // right-aligned badge ("work") instead of overwriting it — in this
+        // fixture's default sidebar that ellipsizes to "⊘W3←#1…", so match
+        // the stable, still-unambiguous prefix.
         assert!(
-            screen.contains("⊘W3←#101"),
+            screen.contains("⊘W3←#1"),
             "#103 must show '⊘W3←#101' (blocked rank 2→3, first dep #101):\n{screen}",
         );
         // #104 is ready but claimed (rank 3, next_up=false, blocked_on=[])
@@ -47149,8 +47159,12 @@ Milestone tracking issue.
             "#977: Enter must dispatch and toast 'Plan captured':\n{}",
             driver.screen(),
         );
+        // The toast body word-wraps inside its narrow box (quadraui#1182's
+        // per-corner-toast wrapping, picked up by the #114 bump) — "Redesign"
+        // and "onboarding" land on separate lines, so match them
+        // individually rather than the joined string.
         assert!(
-            driver.screen_contains("Redesign onboarding"),
+            driver.screen_contains("Redesign") && driver.screen_contains("onboarding"),
             "#977: the toast must name the captured plan title:\n{}",
             driver.screen(),
         );
@@ -50521,8 +50535,12 @@ Milestone tracking issue.
         // limitation documented on `sessions_panel_stop_running_session_shows_feedback_toast`).
 
         let screen = driver.screen();
+        // The toast body word-wraps inside its narrow box ("adding coord" /
+        // "label…)" on separate lines, quadraui#1182's per-corner-toast
+        // wrapping, picked up by the #114 bump) — match both wrapped
+        // fragments rather than the joined string.
         assert!(
-            screen.contains("adding coord label"),
+            screen.contains("adding coord") && screen.contains("label"),
             "expected the 'Send to Pipeline' success toast body \
              ('#42 → Pipeline (adding coord label…)'), got:\n{}",
             screen
@@ -50673,8 +50691,11 @@ Milestone tracking issue.
         );
 
         let screen = driver.screen();
+        // The toast body word-wraps inside its narrow box (quadraui#1182's
+        // per-corner-toast wrapping, picked up by the #114 bump) — match
+        // both wrapped fragments rather than the joined string.
         assert!(
-            screen.contains("adding coord label"),
+            screen.contains("adding coord") && screen.contains("label"),
             "expected the 'Send to Pipeline' success toast body \
              ('#500 → Pipeline (adding coord label…)'), got:\n{}",
             screen
@@ -50789,8 +50810,12 @@ Milestone tracking issue.
         driver.press_named(NamedKey::Enter);
 
         let screen = driver.screen();
+        // The toast body word-wraps inside its narrow box ("queuing repo-a"
+        // / "#42…" on two lines, quadraui#1182's per-corner-toast wrapping,
+        // picked up by the #114 bump) — match both wrapped fragments
+        // rather than the joined string.
         assert!(
-            screen.contains("queuing repo-a #42"),
+            screen.contains("queuing repo-a") && screen.contains("#42"),
             "#2494: activating 'Add to drive queue' must toast a confirmation \
              ('queuing repo-a #42…'), got:\n{}",
             screen
@@ -52671,11 +52696,15 @@ Milestone tracking issue.
         driver.click(sx, sy);
 
         let screen = driver.screen();
-        // The toast wraps/truncates at panel width ("...quiet hours set
-        // 21:00-06" in a 140-col terminal) — match the stable prefix rather
-        // than the full window text.
+        // The toast body now word-wraps line-by-line inside its narrow box
+        // and caps at 3 lines, ellipsizing the last one (quadraui#1182's
+        // per-corner-toast wrapping, picked up by the #114 bump) — "dellserver:"
+        // / "quiet hours" / "set…" on three separate lines, which pushes the
+        // submitted window ("21:00-06:00") off the toast entirely rather than
+        // merely truncating it mid-string as before. Match what's actually
+        // still visible ("quiet hours set…") rather than the full window text.
         assert!(
-            screen.contains("quiet hours set 21:00-06"),
+            screen.contains("quiet hours") && screen.contains("set"),
             "#2147: a well-formed submit must toast confirmation:\n{screen}",
         );
         assert!(
@@ -58560,9 +58589,13 @@ Milestone tracking issue.
         let screen = driver.screen();
         // The write is a queued `coord` invocation whose effect only lands
         // on the next `/board` poll, so the observable-on-screen half is the
-        // toast naming the exact move.
+        // toast naming the exact move. The toast body word-wraps inside its
+        // narrow box ("moving myrepo" / "#702 to" / "position 3…" on
+        // separate lines, quadraui#1182's per-corner-toast wrapping, picked
+        // up by the #114 bump) — match both wrapped fragments rather than
+        // the joined string.
         assert!(
-            screen.contains("moving myrepo #702"),
+            screen.contains("moving myrepo") && screen.contains("#702"),
             "#1866: `J` over the second row must dispatch a move for THAT \
              row (`j` having moved the cursor to it first):\n{screen}"
         );

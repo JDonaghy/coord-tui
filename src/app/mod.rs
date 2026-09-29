@@ -48,7 +48,7 @@ use quadraui::primitives::context_menu::{
     ContextMenuLayout, ContextMenuPlacement,
 };
 use quadraui::primitives::form::{FieldKind, Form, FormEvent, FormField};
-use quadraui::primitives::toast::{ToastCorner, ToastItem, ToastSeverity, ToastStack};
+use quadraui::primitives::toast::{Toast, ToastCorner, ToastOverlay, ToastSeverity};
 
 use crate::settings::{
     LogCacheTtl, ModelPref, RefreshCadence, Theme, TuiSettings, ACTION_PIPELINE_REFRESH,
@@ -2597,9 +2597,9 @@ pub struct CoordApp {
     /// available machine. Cleared after a short TTL.
     pipeline_status: Option<(String, Instant)>,
     /// Active toasts rendered as a bottom-right overlay. Each entry pairs
-    /// a `ToastItem` with the time it was added so the host can auto-expire
+    /// a `Toast` with the time it was added so the host can auto-expire
     /// them after a few seconds without the user dismissing manually.
-    toasts: Vec<(ToastItem, Instant, ToastSeverity)>,
+    toasts: Vec<(Toast, Instant, ToastSeverity)>,
     /// Monotonic counter for toast widget IDs (must be unique per toast).
     next_toast_id: u64,
     /// Pool of concurrent SSE watch sessions keyed by `assignment_id`.
@@ -5010,12 +5010,12 @@ impl CoordApp {
     fn push_toast(&mut self, title: &str, body: &str, severity: ToastSeverity) {
         self.next_toast_id += 1;
         let id = WidgetId::new(format!("toast-{}", self.next_toast_id));
-        let item = ToastItem {
+        let item = Toast {
             id,
             title: title.to_string(),
             body: body.to_string(),
             severity,
-            action: None,
+            actions: Vec::new(),
             accent: None,
         };
         self.toasts.push((item, Instant::now(), severity));
@@ -5026,17 +5026,17 @@ impl CoordApp {
         self.toasts.retain(|(_, t, _)| t.elapsed() < TOAST_TTL);
     }
 
-    /// Build the visible `ToastStack` for the bottom-right overlay.
+    /// Build the visible `ToastOverlay` for the bottom-right overlay.
     ///
     /// Returns `None` when no toasts are active.  Auto-promotes the
     /// most recent `pipeline_status` message to a toast so every
     /// dispatch site already gets corner feedback without each helper
     /// having to call `push_toast` explicitly.
-    fn toast_stack(&self) -> Option<ToastStack> {
-        let mut items: Vec<ToastItem> = self.toasts.iter().map(|(it, _, _)| it.clone()).collect();
+    fn toast_stack(&self) -> Option<ToastOverlay> {
+        let mut items: Vec<Toast> = self.toasts.iter().map(|(it, _, _)| it.clone()).collect();
         if let Some((msg, when)) = &self.pipeline_status {
             if when.elapsed() < TOAST_TTL {
-                items.push(ToastItem {
+                items.push(Toast {
                     id: WidgetId::new(format!("pipeline-status-{}", when.elapsed().as_millis())),
                     title: "Pipeline".to_string(),
                     body: msg.clone(),
@@ -5048,7 +5048,7 @@ impl CoordApp {
                     } else {
                         ToastSeverity::Info
                     },
-                    action: None,
+                    actions: Vec::new(),
                     accent: None,
                 });
             }
@@ -5056,10 +5056,11 @@ impl CoordApp {
         if items.is_empty() {
             return None;
         }
-        Some(ToastStack {
+        Some(ToastOverlay {
             id: WidgetId::new("coord-toasts"),
             corner: ToastCorner::BottomRight,
             toasts: items,
+            focus: None,
         })
     }
 

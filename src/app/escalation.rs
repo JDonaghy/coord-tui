@@ -824,8 +824,13 @@ mod tests {
         driver.click(rx, ry - 0.1);
 
         let toast_screen = driver.screen();
+        // The toast body word-wraps inside its narrow box (quadraui#1182's
+        // per-corner-toast wrapping, picked up by the #114 bump) — match
+        // the wrapped fragments rather than the joined string.
         assert!(
-            toast_screen.contains("running option 0 for myrepo #42"),
+            toast_screen.contains("running")
+                && toast_screen.contains("option 0 for")
+                && toast_screen.contains("myrepo #42"),
             "clicking the submenu's 'Recommended' entry must dispatch `coord decide \
              myrepo 42 0` and toast that it's running:\n{toast_screen}"
         );

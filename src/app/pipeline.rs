@@ -7059,13 +7059,30 @@ impl CoordApp {
         })
     }
 
-    /// #585: is there a manual/interactive smoke (or test-chat) session in
+    /// #585: is there a `type="smoke"` or `type="test-chat"` assignment in
     /// flight for *issue*?  Mirrors [`has_active_conflict_fix`] for the Merge
-    /// box: while the operator is re-verifying, the Test box should read blue
-    /// (Active) — even over a prior automated `passed` verdict — so the green
-    /// box doesn't imply the verdict is already in when it isn't yet.  The
-    /// interactive testing agent (`--smoke-of`) is `type="smoke"`; the
-    /// conversational gate is `type="test-chat"`.
+    /// box: while a leg is (re-)verifying, the Test box should read blue
+    /// (Active) — even over a prior `passed` verdict — so the green box
+    /// doesn't imply the verdict is already in when it isn't yet.
+    ///
+    /// #48: originally this matched only the manual/interactive testing
+    /// agent (`--smoke-of`, human-attended) and the conversational
+    /// `test-chat` gate — both genuinely interactive. Since
+    /// code-coordinator#3182 the Test stage also dispatches one **automated**
+    /// `type="smoke"` row per capability partition (a fan-out round), and
+    /// those trip this match too: `Assignment` carries no field that
+    /// distinguishes a fan-out leg from an interactive session (no
+    /// capability/partition tag on the wire, and `is_interactive` isn't a
+    /// reliable discriminator here — nothing currently guarantees it's set
+    /// while a `type="smoke"` row is merely `running`/`pending`, only that it
+    /// ends up correct once the row settles). So this deliberately stays the
+    /// **wide** match: any running/pending smoke leg — interactive or
+    /// automated — keeps the Test box Active. That's the behaviour you want
+    /// anyway (a fan-out round in flight shouldn't paint a stale green), it's
+    /// just no longer exclusively about a *manual* session, and the verdict
+    /// itself still resolves from the parent work row's `test_state`
+    /// (`test_stage_status_for` below), so a multi-leg round folds back to a
+    /// single Test box once every leg settles — never one box per leg.
     pub(crate) fn has_active_smoke_session(&self, issue: &PipelineIssue) -> bool {
         self.data.assignments.iter().any(|a| {
             a.issue_number == issue.number

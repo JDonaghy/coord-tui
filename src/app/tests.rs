@@ -11791,6 +11791,73 @@
     }
 
     #[test]
+    fn test_stage_active_while_smoke_fanout_legs_running() {
+        // #48: code-coordinator#3182 fans the Test stage out into one
+        // `type="smoke"` row per capability partition (e.g. gtk+windows and
+        // macos), all children of the same parent work row. `Assignment`
+        // carries no per-leg capability tag, so `has_active_smoke_session`
+        // matches on `type` alone and stays Active for as long as ANY leg is
+        // running/pending — a two-leg round must still resolve to exactly
+        // ONE Test box, not one per leg, and must not read as a retry.
+        let mut app = make_pipeline_app_with_test_gate();
+        app.data
+            .assignments
+            .push(_work_assignment("w1", 100.0, "done", Some("passed")));
+        // No smoke legs yet → the prior verdict stands (Done/green).
+        assert_eq!(
+            app.stage_status_for(&app.pipeline_issues[0], "test"),
+            StageStatus::Done
+        );
+
+        // Fan-out dispatches two concurrent smoke legs under the same parent.
+        app.data
+            .assignments
+            .push(_stage_assignment("smoke-gtk", "smoke", 200.0, "running"));
+        app.data
+            .assignments
+            .push(_stage_assignment("smoke-macos", "smoke", 200.0, "pending"));
+        // Both legs in flight → a single Active Test box, not two, and not a
+        // "retry" read (still just one `stage_status_for("test")` call).
+        assert_eq!(
+            app.stage_status_for(&app.pipeline_issues[0], "test"),
+            StageStatus::Active
+        );
+
+        // One leg finishes; the other is still running → still Active.
+        app.data
+            .assignments
+            .iter_mut()
+            .find(|a| a.id == "smoke-macos")
+            .unwrap()
+            .status = "done".to_string();
+        assert_eq!(
+            app.stage_status_for(&app.pipeline_issues[0], "test"),
+            StageStatus::Active
+        );
+
+        // Both legs settle, and (mirroring `finalize_smoke_fanout` on the
+        // coordinator side) the folded verdict lands on the parent work
+        // row's `test_state` — the Test box resolves back to a single
+        // green, not a per-leg readout.
+        app.data
+            .assignments
+            .iter_mut()
+            .find(|a| a.id == "smoke-gtk")
+            .unwrap()
+            .status = "done".to_string();
+        app.data
+            .assignments
+            .iter_mut()
+            .find(|a| a.id == "w1")
+            .unwrap()
+            .test_state = Some("passed".to_string());
+        assert_eq!(
+            app.stage_status_for(&app.pipeline_issues[0], "test"),
+            StageStatus::Done
+        );
+    }
+
+    #[test]
     fn test_stage_survives_review_bounce_fix_work_with_no_verdict() {
         // #310: a review bounce creates a new fix-work assignment (dispatched
         // later) that carries no test_state. The earlier work genuinely passed.

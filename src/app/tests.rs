@@ -39899,6 +39899,126 @@
         );
     }
 
+    /// #112 (refiled from quadraui#373): clicking one pull-right submenu
+    /// parent and then a *sibling* parent at the same level must move that
+    /// level's own keyboard-highlight to the newly-clicked parent — not
+    /// leave the first parent's row rendered selected too. Opens the
+    /// Pipeline row menu (root offers "Start (interactive)" and
+    /// "Start (automated)" as sibling submenu parents), clicks
+    /// "Start (interactive)" then "Start (automated)", and asserts only
+    /// the automated row paints with the inverted "selected" style
+    /// (`quadraui::tui::context_menu::draw_context_menu` swaps fg/bg for
+    /// `vis.item_idx == menu.selected_idx`) while the interactive row does
+    /// not.
+    #[test]
+    fn tuidriver_context_menu_click_sibling_parent_moves_level_selection() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = make_pipeline_app();
+        app.active_view = SidebarView::Pipeline;
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 140, 40);
+
+        // #857: the "No milestone" bucket under #42's repo ("api") starts
+        // collapsed — click it to reveal #42 underneath, same expand step
+        // `tuidriver_pipeline_new_row_right_click_offers_mark_ready` uses.
+        // #42's repo is declared first, so the FIRST "No milestone" match
+        // is its own.
+        let (mex, mey) = driver.find("No milestone").unwrap_or_else(|| {
+            panic!(
+                "#112: 'No milestone' group header not found on initial render:\n{}",
+                driver.screen()
+            )
+        });
+        driver.click(mex, mey);
+
+        let (x, y) = driver.find("#42").unwrap_or_else(|| {
+            panic!("#112: New row #42 must render after expanding its bucket:\n{}", driver.screen())
+        });
+
+        // Right-click the row to open the context menu.
+        driver.right_click(x, y);
+        let screen = driver.screen();
+        assert!(
+            screen.contains("Start (interactive)") && screen.contains("Start (automated)"),
+            "#112: Pipeline row menu must offer the two sibling submenu \
+             parents 'Start (interactive)' / 'Start (automated)':\n{}",
+            screen
+        );
+
+        // Baseline, captured before either parent is clicked: `open_context_menu`
+        // seeds `selected_idx` with the first selectable item, which is
+        // "Start (interactive)" (declared first, `dialogs.rs`) — so right now
+        // it is the highlighted row and "Start (automated)" is not. Record
+        // both styles here as the ground truth for "selected" vs "not
+        // selected", rather than assuming which theme colour each maps to —
+        // `draw_context_menu` swaps fg/bg for whichever row is selected, so a
+        // bare colour-equality check can't tell WHICH row is selected on its
+        // own (#112 review note: it's symmetric either way).
+        let interactive_bounds0 = driver
+            .find_bounds("Start (interactive)")
+            .expect("#112: 'Start (interactive)' not found after right-click");
+        let automated_bounds0 = driver
+            .find_bounds("Start (automated)")
+            .expect("#112: 'Start (automated)' not found after right-click");
+        let selected_style = driver
+            .style_at(interactive_bounds0.x as u16, interactive_bounds0.y as u16)
+            .expect("#112: no style at 'Start (interactive)' cell");
+        let unselected_style = driver
+            .style_at(automated_bounds0.x as u16, automated_bounds0.y as u16)
+            .expect("#112: no style at 'Start (automated)' cell");
+        assert_ne!(
+            selected_style.bg, unselected_style.bg,
+            "#112 precondition: menu must open with exactly 'Start (interactive)' \
+             selected, distinguishable from 'Start (automated)' by background:\n{}",
+            driver.screen()
+        );
+
+        // Click the first parent — opens its submenu and (per this fix)
+        // moves the root level's own selection onto it (a no-op here, since
+        // it was already selected).
+        driver.click(
+            interactive_bounds0.x + 0.5,
+            interactive_bounds0.y + interactive_bounds0.height / 2.0,
+        );
+
+        // Click the sibling parent next. The root menu stays on screen
+        // alongside the (now-open) submenu, so "Start (automated)" is
+        // still findable at the same coordinates.
+        driver.click(
+            automated_bounds0.x + 0.5,
+            automated_bounds0.y + automated_bounds0.height / 2.0,
+        );
+
+        // Re-read both rows' final styles.
+        let interactive_style = driver
+            .style_at(interactive_bounds0.x as u16, interactive_bounds0.y as u16)
+            .expect("#112: no style at 'Start (interactive)' cell after clicks");
+        let automated_style = driver
+            .style_at(automated_bounds0.x as u16, automated_bounds0.y as u16)
+            .expect("#112: no style at 'Start (automated)' cell after clicks");
+
+        // The bug: clicking "Start (automated)" opens its submenu but never
+        // moves the root level's own `selected_idx` off "Start (interactive)"
+        // — so "Start (interactive)" would still carry `selected_style` here.
+        // The fix: the last-clicked parent, "Start (automated)", now carries
+        // `selected_style`, and "Start (interactive)" has reverted to
+        // `unselected_style` — exactly one row highlighted at this level.
+        assert_eq!(
+            automated_style.bg, selected_style.bg,
+            "#112: 'Start (automated)' (last clicked) must carry the \
+             highlighted style after this click:\n{}",
+            driver.screen()
+        );
+        assert_eq!(
+            interactive_style.bg, unselected_style.bg,
+            "#112: 'Start (interactive)' must NOT still carry the highlighted \
+             style once its sibling parent 'Start (automated)' was clicked — \
+             both rows highlighted at once was the bug:\n{}",
+            driver.screen()
+        );
+    }
+
     /// #17 (sibling of quadraui#429): on a "down-drop" terminal that never
     /// delivers `MouseDown` — only `MouseUp` — clicking outside an open
     /// context menu must still dismiss it. Before the fix, the outside-click

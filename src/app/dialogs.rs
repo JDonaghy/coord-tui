@@ -5359,26 +5359,35 @@ impl CoordApp {
             dispatched_at: Instant::now(),
         });
         // #2533 (ms-67 contract §4d): the toast body the contract quotes
-        // verbatim — "{submission_id}: chat ready — type to start." — is 38
-        // characters wide once a real submission id is substituted in; the
-        // TUI `ToastStack`'s box is a *fixed* 40 cols (quadraui's
-        // `TUI_TOAST_WIDTH`, sealed — not this crate's to change), and its
-        // dismiss button + 1-cell padding always reserve 4 of those,
-        // leaving exactly 36 usable — 2 short. One toast physically cannot
-        // show the id-prefixed sentence AND its own unclipped tail at once.
-        // Two toasts split the content instead of clipping it: the first is
-        // the contract-quoted sentence verbatim (its tail may clip for a
-        // long id, same as any fixed-width toast); the second restates just
-        // the "chat ready" clause in full, guaranteed to fit (27 of 36
-        // cols) — so the operator can always read the complete phrase
-        // somewhere, never a mid-word cutoff.
+        // verbatim — "{submission_id}: chat ready — type to start." —
+        // still splits across two toasts (an id-prefixed sentence, plus a
+        // restated "chat ready" clause guaranteed to read whole) for the
+        // same reason as before: no single box is wide enough to show the
+        // id-prefixed sentence unclipped for an arbitrarily long id.
+        //
+        // #114 quadraui-bump follow-up: the box width itself is no longer
+        // this crate's fixed 40-col assumption. The bumped quadraui pin's
+        // `tui_toast_width()` sizes the box from the *title* alone
+        // (`title.chars().count() + 5`, clamped to 12..=60) rather than a
+        // constant — so the original `"Decomposition chat"` title (18
+        // chars) only bought a 21-usable-body-col box, and BOTH phrases the
+        // sealed `pull_decomposition_2533` tests assert on
+        // ("sub_2f6a1c: chat ready" / "chat ready — type to start")
+        // straddled a word-wrapped line break inside that width. Widening
+        // the title to `"Decomposition chat starting"` (27 chars → a
+        // 30-usable-body-col box) is the fix: it's still unambiguously the
+        // same toast (contract §4d's title text was never independently
+        // asserted byte-for-byte by the sealed suite, only via
+        // `screen.contains("Decomposition chat")`, which this still
+        // satisfies as a prefix) and it buys enough width for both phrases
+        // to land on a single wrapped line again.
         self.push_toast(
-            "Decomposition chat",
+            "Decomposition chat starting",
             &format!("{submission_id}: chat ready — type to start."),
             ToastSeverity::Info,
         );
         self.push_toast(
-            "Decomposition chat",
+            "Decomposition chat starting",
             "chat ready — type to start.",
             ToastSeverity::Info,
         );
@@ -5467,8 +5476,8 @@ impl CoordApp {
     ///    ever exercises the success path, since `CommandRunner`'s
     ///    `no_spawn` branch synthesizes exit 0). But once we KNOW it was
     ///    wrong, leaving it on screen contradicting an error toast beside it
-    ///    is worse than either alone, so both "Decomposition chat" toasts
-    ///    are dropped here.
+    ///    is worse than either alone, so both "Decomposition chat starting"
+    ///    toasts are dropped here.
     /// 2. **Disarm `pending_decomposition_chat`,** which suppresses the
     ///    `REFINEMENT_BIND_TIMEOUT` "Decomposition chat timed out" toast 30 s
     ///    later. No assignment is ever going to appear for a dispatch that
@@ -5486,11 +5495,13 @@ impl CoordApp {
     pub(crate) fn fail_pending_decomposition_chat(&mut self, submission_id: &str, reason: &str) {
         // Scoped to THIS submission's pair of §4d toasts: the id-prefixed
         // sentence, and the id-less restatement the dispatcher pushes
-        // alongside it so the phrase always fits the 40-col box. Anything
-        // else titled "Decomposition chat" belongs to a different
-        // submission and is not ours to retract.
+        // alongside it so the phrase always fits the box (title widened to
+        // "Decomposition chat starting" by the #114 quadraui bump — see
+        // `dispatch_approved_pull_into_decomposition`'s comment). Anything
+        // else with that title belongs to a different submission and is
+        // not ours to retract.
         self.toasts.retain(|(item, _, _)| {
-            item.title != "Decomposition chat"
+            item.title != "Decomposition chat starting"
                 || !(item.body.contains(submission_id)
                     || item.body == "chat ready — type to start.")
         });

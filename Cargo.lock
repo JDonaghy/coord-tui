@@ -1159,7 +1159,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps 9.0.0",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2315,11 +2315,12 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 [[package]]
 name = "quadraui"
 version = "0.0.1"
-source = "git+https://github.com/JDonaghy/quadraui?rev=18533850e9dd9f7e55a2d7c2d670786edfe9ba88#18533850e9dd9f7e55a2d7c2d670786edfe9ba88"
+source = "git+https://github.com/JDonaghy/quadraui?rev=81a9656d5492b16e49da56f407aff4121ee26877#81a9656d5492b16e49da56f407aff4121ee26877"
 dependencies = [
  "arboard",
  "gtk4",
  "keyring",
+ "libc",
  "pangocairo",
  "pkg-config",
  "portable-pty",
@@ -2944,10 +2945,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3252,7 +3253,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

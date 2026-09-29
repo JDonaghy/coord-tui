@@ -789,4 +789,8 @@ pub(crate) struct BoardDriveQueueEntry {
     #[allow(dead_code)]
     #[serde(default)]
     pub(crate) apply_verdict_at: Option<f64>,
+    /// Wire field from `coord.board_schema` (#1941) — no TUI consumer yet.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) legs_at_enqueue: i64,
 }

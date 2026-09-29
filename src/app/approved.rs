@@ -1143,7 +1143,7 @@ mod tests {
         assert!(
             app.toasts
                 .iter()
-                .any(|(t, _, _)| t.title == "Decomposition chat"),
+                .any(|(t, _, _)| t.title == "Decomposition chat starting"),
             "contract §4d's optimistic toast must fire at dispatch time",
         );
         assert!(app.pending_decomposition_chat.is_some());
@@ -1155,7 +1155,7 @@ mod tests {
         assert!(
             !app.toasts
                 .iter()
-                .any(|(t, _, _)| t.title == "Decomposition chat"),
+                .any(|(t, _, _)| t.title == "Decomposition chat starting"),
             "the optimistic \"chat ready\" toast must be retracted once the \
              dispatch is known to have failed",
         );

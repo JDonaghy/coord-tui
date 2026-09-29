@@ -1632,6 +1632,17 @@ impl CoordApp {
                                 })
                                 .unwrap_or(0);
                             if let Some(state) = self.pending_context_menu.as_mut() {
+                                // #112: move this level's own keyboard selection
+                                // to the clicked parent first, so a click on a
+                                // sibling parent doesn't leave the previously
+                                // selected row highlighted alongside it.
+                                if depth_idx == 0 {
+                                    state.selected_idx = item_idx;
+                                } else if let Some(sel) =
+                                    state.submenu_selected.get_mut(depth_idx - 1)
+                                {
+                                    *sel = item_idx;
+                                }
                                 // Trim deeper submenus and open this one.
                                 state.submenu_path.truncate(depth_idx);
                                 state.submenu_selected.truncate(depth_idx);

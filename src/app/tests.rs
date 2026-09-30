@@ -30485,9 +30485,22 @@
         assert_eq!(SidebarView::Terminal.label(), "Terminal");
     }
 
+    // #115: coord-tui's own `key_to_pty_bytes` / `named_key_to_pty_bytes`
+    // encoder was deleted in favour of quadraui's canonical
+    // `terminal_engine::key_to_pty_bytes` (quadraui#342, `acddf0e`), which
+    // `TerminalSession::encode_key` wraps and coord-tui now calls
+    // directly (see `forward_key_to_pty` / `forward_key_to_detail_terminal`
+    // in `terminal.rs`). These tests re-point at the free function with
+    // `app_cursor = false` to keep behaviour coverage for every key the
+    // deleted local copy used to cover; `arrow_up_switches_to_ss3_when_decckm_enabled`
+    // below covers the new DECCKM behaviour through a live `TerminalSession`.
     #[test]
     fn key_to_pty_bytes_printable_ascii() {
-        let bytes = key_to_pty_bytes(Key::Char('a'), quadraui::Modifiers::default());
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(
+            Key::Char('a'),
+            quadraui::Modifiers::default(),
+            false,
+        );
         assert_eq!(bytes.as_deref(), Some(&b"a"[..]));
     }
 
@@ -30499,7 +30512,7 @@
             ctrl: true,
             ..quadraui::Modifiers::default()
         };
-        let bytes = key_to_pty_bytes(Key::Char('c'), mods);
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(Key::Char('c'), mods, false);
         assert_eq!(bytes.as_deref(), Some(&[0x03u8][..]));
     }
 
@@ -30509,7 +30522,7 @@
             ctrl: true,
             ..quadraui::Modifiers::default()
         };
-        let bytes = key_to_pty_bytes(Key::Char('d'), mods);
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(Key::Char('d'), mods, false);
         assert_eq!(bytes.as_deref(), Some(&[0x04u8][..]));
     }
 
@@ -30518,23 +30531,33 @@
         // The shell expects CR (\r), NOT LF (\n) — sending LF leaves
         // half-typed lines hanging.  This is the exact gotcha that
         // bit the PTY scrape work (#424 references it).
-        let bytes = key_to_pty_bytes(Key::Named(NamedKey::Enter), quadraui::Modifiers::default());
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(
+            Key::Named(NamedKey::Enter),
+            quadraui::Modifiers::default(),
+            false,
+        );
         assert_eq!(bytes.as_deref(), Some(&b"\r"[..]));
     }
 
     #[test]
     fn key_to_pty_bytes_arrow_up_unmodified() {
-        // Plain Up arrow → \x1b[A (cursor sequence, no modifier param).
-        let bytes = key_to_pty_bytes(Key::Named(NamedKey::Up), quadraui::Modifiers::default());
+        // Plain Up arrow, DECCKM off → \x1b[A (cursor sequence, no
+        // modifier param).
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(
+            Key::Named(NamedKey::Up),
+            quadraui::Modifiers::default(),
+            false,
+        );
         assert_eq!(bytes.as_deref(), Some(&b"\x1b[A"[..]));
     }
 
     #[test]
     fn key_to_pty_bytes_backspace_is_del() {
         // Most modern shells treat 0x7f (DEL) as backspace.
-        let bytes = key_to_pty_bytes(
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(
             Key::Named(NamedKey::Backspace),
             quadraui::Modifiers::default(),
+            false,
         );
         assert_eq!(bytes.as_deref(), Some(&[0x7fu8][..]));
     }
@@ -30543,11 +30566,84 @@
     fn key_to_pty_bytes_capslock_is_none() {
         // CapsLock has no PTY mapping — caller should NOT try to send
         // anything to the shell.
-        let bytes = key_to_pty_bytes(
+        let bytes = quadraui::terminal_engine::key_to_pty_bytes(
             Key::Named(NamedKey::CapsLock),
             quadraui::Modifiers::default(),
+            false,
         );
         assert_eq!(bytes, None);
+    }
+
+    /// #115: coord-tui's terminal key-forwarding now runs through
+    /// `TerminalSession::encode_key`, which reads the live session's
+    /// DECCKM (application-cursor) state instead of always emitting the
+    /// CSI form. Drive a real `/bin/sh` PTY, have it flip DECCKM on with
+    /// the same `ESC[?1h` sequence full-TUI programs (vim, claude) use,
+    /// then forward an Up arrow through `forward_key_to_pty` and read the
+    /// raw bytes the child actually received back off its own stdout
+    /// (via `head -c3 | od`, with the tty in `-icanon` mode so the bytes
+    /// aren't buffered behind a newline) — confirming the *wiring*, not
+    /// just the encoder quadraui already unit-tests.
+    #[test]
+    #[cfg(unix)]
+    fn arrow_up_switches_to_ss3_when_decckm_enabled() {
+        use std::time::{Duration, Instant};
+
+        fn poll_until(
+            sess: &mut quadraui::terminal_engine::TerminalSession,
+            max_ms: u64,
+            predicate: impl Fn(&quadraui::terminal_engine::TerminalSession) -> bool,
+        ) -> bool {
+            let start = Instant::now();
+            let limit = Duration::from_millis(max_ms);
+            while start.elapsed() < limit {
+                sess.poll();
+                if predicate(sess) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        }
+
+        let mut app = make_app_default();
+        let cwd = std::env::temp_dir();
+        let mut sess =
+            quadraui::terminal_engine::TerminalSession::spawn(80, 24, "/bin/sh", &cwd, 1000)
+                .expect("spawn /bin/sh");
+
+        assert!(!sess.application_cursor_keys());
+
+        // Put the tty in raw mode (no line buffering, no echo) so the 3
+        // bytes we forward below are delivered to `head` immediately
+        // rather than sitting in the canonical-mode line buffer, then
+        // flip DECCKM on, then read exactly 3 raw bytes back out as hex.
+        sess.send_str("stty -echo -icanon min 1 time 0; printf '\\033[?1h'; head -c 3 | od -An -tx1\n");
+        assert!(
+            poll_until(&mut sess, 5_000, |s| s.application_cursor_keys()),
+            "DECCKM should be enabled after child emits ESC[?1h"
+        );
+
+        app.terminal_session = Some(sess);
+
+        // With DECCKM on, unmodified Up must encode as SS3 (`ESC O A`),
+        // not the normal-mode CSI form (`ESC [ A`).
+        let consumed = app.forward_key_to_pty(&Key::Named(NamedKey::Up), &quadraui::Modifiers::default());
+        assert!(consumed, "forward_key_to_pty should consume the key");
+
+        let sess = app.terminal_session.as_mut().unwrap();
+        let found = poll_until(sess, 5_000, |s| {
+            s.full_text().replace([' ', '\n', '\r'], "").contains("1b4f41")
+        });
+        assert!(
+            found,
+            "expected the child to read back ESC O A (1b 4f 41) as the raw bytes \
+             forward_key_to_pty wrote; full_text={:?}",
+            sess.full_text(),
+        );
+
+        // Tidy up.
+        sess.write_input(b"\x04"); // EOT — end the raw `head` read's shell.
     }
 
     #[test]
@@ -30576,19 +30672,22 @@
                 .expect("spawn /bin/sh");
 
         // Type 'echo __coord_marker__' + Enter, then 'exit 0' + Enter.
-        // Each char comes through key_to_pty_bytes so we exercise the
-        // exact wire format the live pane sends.
+        // Each char comes through TerminalSession::encode_key so we
+        // exercise the exact wire format the live pane sends.
         let line = "echo __coord_marker__";
         for ch in line.chars() {
-            let bytes = key_to_pty_bytes(Key::Char(ch), quadraui::Modifiers::default())
+            let bytes = sess
+                .encode_key(Key::Char(ch), quadraui::Modifiers::default())
                 .expect("char must encode");
             sess.write_input(&bytes);
         }
-        let enter = key_to_pty_bytes(Key::Named(NamedKey::Enter), quadraui::Modifiers::default())
+        let enter = sess
+            .encode_key(Key::Named(NamedKey::Enter), quadraui::Modifiers::default())
             .expect("enter must encode");
         sess.write_input(&enter);
         for ch in "exit 0".chars() {
-            let bytes = key_to_pty_bytes(Key::Char(ch), quadraui::Modifiers::default())
+            let bytes = sess
+                .encode_key(Key::Char(ch), quadraui::Modifiers::default())
                 .expect("char must encode");
             sess.write_input(&bytes);
         }
@@ -31573,11 +31672,18 @@
 
         // Type 'echo __detail_marker__' + Enter via forward_key_to_detail_terminal.
         let line = "echo __detail_marker__";
-        let enter_bytes =
-            key_to_pty_bytes(Key::Named(NamedKey::Enter), quadraui::Modifiers::default())
-                .expect("enter must encode");
+        let enter_bytes = app
+            .detail_terminal_sessions
+            .get_mut(&issue_key)
+            .unwrap()
+            .encode_key(Key::Named(NamedKey::Enter), quadraui::Modifiers::default())
+            .expect("enter must encode");
         for ch in line.chars() {
-            let bytes = key_to_pty_bytes(Key::Char(ch), quadraui::Modifiers::default())
+            let bytes = app
+                .detail_terminal_sessions
+                .get_mut(&issue_key)
+                .unwrap()
+                .encode_key(Key::Char(ch), quadraui::Modifiers::default())
                 .expect("char must encode");
             app.detail_terminal_sessions.get_mut(&issue_key).unwrap().write_input(&bytes);
         }

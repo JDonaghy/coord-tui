@@ -8,7 +8,7 @@
 use super::*;
 // #5: word_wrap moved out of `format.rs` in favour of quadraui's own
 // implementation — see format.rs's module doc comment.
-use quadraui::text_util::word_wrap;
+use quadraui::text_util::{display_width, word_wrap};
 
 /// #67: the one font coord-tui ever measures wrap budgets from —
 /// `Backend::char_width()` on GTK reads back whatever `set_editor_font`
@@ -302,7 +302,16 @@ impl ShellApp for CoordApp {
                     let m = match self.pipeline_doc_tab_strip(m.width) {
                         Some(strip) => {
                             let strip_rect = Rect::new(m.x, m.y, m.width, tab_h);
-                            backend.draw_tab_bar(strip_rect, &strip, None);
+                            // #7: `_with_chrome` so §2c's `[`/`]` encloses the
+                            // rasteriser's own `×` (quadraui#631). The click
+                            // path asks for the SAME chrome via
+                            // `doc_tab_chrome` — see `resolve_tab_bar_click`.
+                            backend.draw_tab_bar_with_chrome(
+                                strip_rect,
+                                &strip,
+                                None,
+                                &doc_tab_chrome(),
+                            );
                             Rect::new(m.x, m.y + tab_h, m.width, (m.height - tab_h).max(0.0))
                         }
                         None => m,
@@ -2120,7 +2129,11 @@ impl CoordApp {
         let m = match self.board_doc_tab_strip(rect.width) {
             Some(strip) => {
                 let strip_rect = Rect::new(rect.x, rect.y, rect.width, tab_h);
-                backend.draw_tab_bar(strip_rect, &strip, None);
+                // #7: `_with_chrome` so §2c's `[`/`]` encloses the rasteriser's
+                // own §2d `×` (quadraui#631) instead of the app baking both
+                // into `TabItem::label`. The click path resolves against the
+                // SAME chrome — `events.rs::resolve_tab_bar_click`.
+                backend.draw_tab_bar_with_chrome(strip_rect, &strip, None, &doc_tab_chrome());
                 Rect::new(
                     rect.x,
                     rect.y + tab_h,
@@ -2202,12 +2215,12 @@ impl CoordApp {
     /// renders nothing and reserves no row" is expressed: the caller skips the
     /// row entirely rather than painting an empty bar.
     ///
-    /// Every tab's whole rendered form — brackets, close glyph and the trailing
-    /// separator — lives in `TabItem::label`; see [`doc_tab_label`] for why the
-    /// close glyph cannot come from `TabBar::show_tab_close`. `is_preview` is
-    /// still set so quadraui paints the preview tab italic (contract §1); the
-    /// `∘ ` marker inside the label is the symbols-only stand-in for that
-    /// styling, not a replacement for it.
+    /// #7: only the tab's **text** lives in `TabItem::label` — §2d's `×` comes
+    /// from `show_tab_close` + `is_closable`, and §2c's `[`/`]` framing from
+    /// [`doc_tab_chrome`], which every paint and hit-test site routes through.
+    /// `is_preview` is still set so quadraui paints the preview tab italic
+    /// (contract §1); the `∘ ` marker inside the label is the symbols-only
+    /// stand-in for that styling, not a replacement for it.
     ///
     /// #2288 (§9): reports the **currently-addressed pane** — the one the
     /// render loop is painting (`board_render_pane`), or the focused pane
@@ -2259,9 +2272,7 @@ impl CoordApp {
                 let is_preview = group.is_preview(idx);
                 let is_active = group.active_index() == Some(idx);
                 TabItem {
-                    label: doc_tab_label(
-                        repo, *number, &title, show_repo, is_preview, is_active, max_cols,
-                    ),
+                    label: doc_tab_label(repo, *number, &title, show_repo, is_preview, max_cols),
                     is_active,
                     is_dirty: false,
                     is_preview,
@@ -2275,10 +2286,11 @@ impl CoordApp {
             right_segments: Vec::new(),
             active_accent: None,
             scroll_offset: 0,
-            // The close glyph is painted as part of the label (§2c needs the
-            // active tab's `]` to land to the RIGHT of the `×`, which the
-            // rasteriser's own close-button slot cannot express).
-            show_tab_close: false,
+            // #7: the rasteriser paints §2d's `×` per tab, and [`doc_tab_chrome`]
+            // makes §2c's `]` land to the RIGHT of it (quadraui#631). Before
+            // that seam existed this had to be `false` with the whole tab baked
+            // into the label instead.
+            show_tab_close: true,
             compact: false,
         })
     }
@@ -2319,10 +2331,16 @@ impl CoordApp {
     /// `tab_bar_layout` hardcode `scroll_arrow_width: 0.0` ("no scroll
     /// arrows in TUI") and simply honour whatever `scroll_offset` the
     /// caller supplies. So this bakes `‹`/`›` into the boundary visible
-    /// tab's label, exactly the way [`doc_tab_label`] already bakes in the
-    /// close glyph and the §2c active bracket (both for the same root
-    /// reason: the close button can't land where §2c's bracket needs it to
-    /// via `TabBar::show_tab_close`).
+    /// tab's label.
+    ///
+    /// #7 unbaked the §2d close glyph and the §2c active bracket, which used
+    /// to ride along in `TabItem::label` for a related-but-different reason
+    /// (quadraui could not put `]` to the right of `×`; quadraui#631 fixed
+    /// that). These two markers are **not** fixable the same way: there is no
+    /// `TabFrame` for them, `TabBarHits` reports no arrow geometry, and every
+    /// backend's own `scroll_left`/`scroll_right` rects stay `None` while
+    /// `scroll_arrow_width` is zero — which it is, hardcoded, in TUI. Baked
+    /// label text is still the only way to paint them.
     ///
     /// The `scroll_arrow_width: 1.0` reservation (1 column each side,
     /// mirroring `TabBar::layout`'s own "reserve space for two, even if
@@ -2392,7 +2410,6 @@ impl CoordApp {
                         &title,
                         show_repo,
                         is_preview,
-                        is_active,
                         // #2288 ships side-by-side splitting for the Board
                         // panel only (§9's mock is Board's), so Pipeline's
                         // strip always uses §2b's undivided budget.
@@ -2411,7 +2428,9 @@ impl CoordApp {
             right_segments: Vec::new(),
             active_accent: None,
             scroll_offset: 0,
-            show_tab_close: false,
+            // #7: same as the Board strip above — the backend paints §2d's `×`
+            // and [`doc_tab_chrome`] frames it with §2c's brackets.
+            show_tab_close: true,
             compact: false,
         })
     }
@@ -2464,16 +2483,25 @@ impl CoordApp {
         if bar.tabs.is_empty() || width <= 0.0 {
             return;
         }
-        let label_lens: Vec<f32> = bar
+        // #7: the label no longer carries the whole tab, so its own width is no
+        // longer the tab's painted width — add back what the rasteriser reserves
+        // for the `×` and the §2c framing (`doc_tab_chrome_cols`). Without this
+        // every tab would measure 2–3 columns narrow and the strip would
+        // conclude that tabs fit when the paint clips them.
+        let tab_cols: Vec<f32> = bar
             .tabs
             .iter()
-            .map(|t| t.label.chars().count() as f32)
+            .map(|t| {
+                (display_width(&t.label)
+                    + doc_tab_chrome_cols(t.is_active, bar.show_tab_close && t.is_closable))
+                    as f32
+            })
             .collect();
         let layout = bar.layout(
             width,
             1.0,
             1.0,
-            |i| TabMeasure::new(label_lens[i], 0.0),
+            |i| TabMeasure::new(tab_cols[i], 0.0),
             |_| SegmentMeasure::new(0.0),
         );
         bar.scroll_offset = layout.resolved_scroll_offset;

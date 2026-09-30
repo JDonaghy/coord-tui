@@ -48,7 +48,7 @@ use std::path::PathBuf;
 
 use quadraui::primitives::split_tree::SplitDirection;
 use quadraui::text_util::{display_width, fuzzy_score};
-use quadraui::{PaletteItem, SplitTree, StyledSpan, StyledText};
+use quadraui::{PaletteItem, SplitTree, StyledSpan, StyledText, TabBar, TabChrome, TabFrame};
 use serde::{Deserialize, Serialize};
 
 use crate::app::drive_queue::repo_alias;
@@ -101,13 +101,18 @@ pub(crate) const PREVIEW_MARKER: &str = "∘ ";
 /// §4 (#2283) overflow affordances: baked into the leftmost/rightmost
 /// *visible* tab's label when tabs exist beyond that edge of the strip.
 ///
-/// Baked into label text for the same reason [`PREVIEW_MARKER`] and the
-/// close glyph are (see [`doc_tab_label`]'s doc comment): quadraui's TUI
-/// tab-bar rasteriser never paints scroll arrows itself —
+/// Baked into label text for the same reason [`PREVIEW_MARKER`] is: quadraui's
+/// TUI tab-bar rasteriser never paints scroll arrows itself —
 /// `TuiBackend::draw_tab_bar` / `tab_bar_layout` hardcode
 /// `scroll_arrow_width: 0.0` ("no scroll arrows in TUI") and simply honour
 /// whatever `scroll_offset` the caller supplies — so the app has to paint
 /// them. See `CoordApp::board_doc_tab_strip` (render.rs).
+///
+/// #7 note: the `×` close glyph and the §2c `[`/`]` framing are **no longer**
+/// baked this way — they come off `TabBar::show_tab_close` and
+/// [`doc_tab_chrome`] now. These two markers are the only survivors, because
+/// no backend paints a scroll arrow for a bar whose `scroll_arrow_width` is
+/// zero and `TabBarHits` reports no arrow geometry to hit-test against.
 pub(crate) const SCROLL_LEFT_MARKER: char = '‹';
 pub(crate) const SCROLL_RIGHT_MARKER: char = '›';
 
@@ -121,19 +126,62 @@ pub(crate) const SCROLL_RIGHT_MARKER: char = '›';
 /// its own code point to be unambiguous. §9 pins this one.
 pub(crate) const PANE_DIVIDER_CHAR: char = '║';
 
-/// #3: quadraui's `tui` backend feature is optional (see `Cargo.toml`'s `tui`
-/// feature) so `quadraui::tui::TAB_CLOSE_CHAR` isn't reachable in a
-/// GTK-only build. The glyph itself carries no TUI-specific behavior — it's
-/// just the close-glyph app-level tab labels embed regardless of backend
-/// (see [`doc_tab_label`]) — so mirror its value here rather than pull the
-/// whole `quadraui::tui` module back in. This duplication is a stopgap:
-/// properly unbaking `doc_tab_label`'s tab-strip rendering needs a
-/// backend-neutral home for the constant in quadraui first (out of scope
-/// for #3).
-#[cfg(feature = "tui")]
-const TAB_CLOSE_CHAR: char = quadraui::tui::TAB_CLOSE_CHAR;
-#[cfg(not(feature = "tui"))]
-const TAB_CLOSE_CHAR: char = '×';
+/// #7: the chrome every doc-tab strip is painted and hit-tested with —
+/// [`TabFrame::Brackets`], i.e. contract §2c's "the active tab is wrapped in
+/// `[` `]`", expressed declaratively so the *backend* paints the framing
+/// around its own close glyph.
+///
+/// One function rather than a `const` because `TabChrome` is
+/// `#[non_exhaustive]`-adjacent (its `TabFrame` is), and because every caller
+/// wants it by reference anyway. Every paint site
+/// (`draw_tab_bar_with_chrome`) and every hit-test site
+/// (`tab_bar_layout_with_chrome`, via `events.rs::resolve_tab_bar_click`)
+/// goes through this one function, so the two can't be asked for different
+/// framing — which is what would silently shift `close_bounds` out from
+/// under the click path.
+///
+/// Before quadraui#631 this was impossible: the rasteriser painted the close
+/// glyph *after* the label and followed it with a separator space, so §2c's
+/// closing `]` could not land to the right of the `×`. That gap is why
+/// `doc_tab_label` used to bake the whole tab — brackets, `×` and all — into
+/// `TabItem::label`, and why the close hit-test used to scan the label string
+/// backwards for the glyph.
+pub(crate) fn doc_tab_chrome() -> TabChrome {
+    TabChrome::new(TabFrame::Brackets)
+}
+
+/// Columns the doc-tab rasteriser reserves for tab chrome *beyond* the tab's
+/// own [`doc_tab_label`] text, given that tab's active/closable state.
+///
+/// Mirrors `TuiBackend::draw_tab_bar_with_chrome`'s own measurer
+/// (quadraui `tui/backend.rs`) exactly:
+///
+/// | tab | reservation | cells |
+/// |---|---|---|
+/// | closable, active   | `[` + `×` + `]` (#631 — the `]` takes the separator's place) | 3 |
+/// | closable, inactive | `×` + inter-tab separator (`quadraui::tui::TAB_CLOSE_COLS`)  | 2 |
+/// | non-closable, active | `[` + `]` | 2 |
+/// | non-closable, inactive | — | 0 |
+///
+/// Used only by `CoordApp::bake_doc_tab_overflow_markers` (render.rs), which
+/// has to resolve `scroll_offset` in the rasteriser's own unit before the
+/// backend ever sees the bar — see that function's own "Known GTK gap (#24)"
+/// note for why an app-side cell measurement is still the only handle
+/// available for the `‹`/`›` affordances. Nothing else measures tabs
+/// app-side: the click path reads `TabBarHits` instead (#7).
+///
+/// Drift guard: `board_doc_tab_strip_measures_tabs_as_the_rasteriser_paints_them`
+/// (tests.rs) renders a real strip through `TuiDriver` and compares the painted
+/// row against these numbers, so a quadraui reservation change fails loudly
+/// here rather than silently mis-placing the overflow markers.
+pub(crate) fn doc_tab_chrome_cols(is_active: bool, is_closable: bool) -> usize {
+    match (is_active, is_closable) {
+        (true, true) => 3,
+        (true, false) => 2,
+        (false, true) => 2,
+        (false, false) => 0,
+    }
+}
 
 /// Truncate `s` to at most `max_cols` display columns, appending `…` (which
 /// occupies the last column) when anything was dropped.
@@ -1483,21 +1531,18 @@ pub(crate) fn known_doc_keys(data: &BoardData) -> HashSet<DocKey> {
     out
 }
 
-/// Build one document tab's rendered label (contract §2b/§2c/§2d/§1).
+/// Build one document tab's **label text** (contract §2b/§1 + #2641).
 ///
-/// Shape, outermost first:
+/// Shape:
 ///
 /// ```text
-/// active   [∘ CW#101 Fix login race… ×]␠
-/// inactive  ∘ CW#101 Fix login race… ×␠
-///           ^ ^^                     ^
-///           | |└─ `#<N> <title>` truncated to `max_cols` columns
-///           | └─ #2641: repo alias (repo_alias, `owner/` stripped first),
-///           |    joined directly to `#N` with no space — only when the
-///           |    open set spans >1 repo
-///           └─ §1 preview marker, only on the preview tab
-///
-/// (`×` at the end is the §2d close glyph, TAB_CLOSE_CHAR.)
+/// ∘ CW#101 Fix login race…␠
+/// ^ ^^                    ^
+/// | |└─ `#<N> <title>` truncated to `max_cols` columns
+/// | └─ #2641: repo alias (repo_alias, `owner/` stripped first),
+/// |    joined directly to `#N` with no space — only when the
+/// |    open set spans >1 repo
+/// └─ §1 preview marker, only on the preview tab
 /// ```
 ///
 /// `max_cols` is [`DOC_TAB_LABEL_COLS`] (20, §2b) for an undivided strip
@@ -1507,25 +1552,45 @@ pub(crate) fn known_doc_keys(data: &BoardData) -> HashSet<DocKey> {
 /// preview marker pushes the *rendered* width out by its own 2 columns in
 /// both cases (22 / 16) rather than eating into the budget.
 ///
-/// The trailing space is the inter-tab separator: quadraui's TUI tab-bar
-/// rasteriser paints labels back-to-back with no gap of its own, so without it
-/// `#101 …×#102 …` would run together. It sits *outside* the §2c brackets,
-/// which wrap the tab's own content only.
+/// # What is NOT in here any more (#7)
 ///
-/// The whole tab — close glyph included — lives in `TabItem::label` rather than
-/// being assembled from `TabBar::show_tab_close`, because the rasteriser paints
-/// the close glyph *after* the label and follows it with a separator space:
-/// there is no way to get the §2c closing `]` to land to the right of `×` via
-/// that path. `is_preview` is still set on the `TabItem` so the italic styling
-/// the contract asks for is real; the `∘ ` marker is the symbols-only stand-in
-/// for it, not a substitute (see [`PREVIEW_MARKER`]).
+/// The §2d `×` close glyph and the §2c `[`/`]` active framing used to be
+/// concatenated on here, and the close hit-test used to find the glyph by
+/// scanning this string backwards. Both are now the rasteriser's job:
+/// `TabBar::show_tab_close` + `TabItem::is_closable` paint the glyph,
+/// [`doc_tab_chrome`] paints the framing *around* it (quadraui#631), and
+/// [`resolve_doc_tab_click`] hit-tests the close button from the
+/// backend-reported `TabBarHits::close_bounds`. So this function no longer
+/// mentions a close glyph at all, and nothing under `src/` names quadraui's
+/// tab-bar close-glyph constant any more.
+///
+/// The **trailing space is still ours**, and is the one piece of
+/// label-embedded spacing that has to be: quadraui's close reservation puts
+/// the glyph flush against the last label cell (`TabMeasure::close_width`
+/// starts at `total - close_width`, and the TUI rasteriser paints `×` at the
+/// first column past the label), so §2d's pinned `"… ×"` gap has to come out
+/// of the label. It is a *space*, not a glyph — it carries no rendering
+/// constant and no backend assumption beyond "a space is a space".
+///
+/// `max_cols` also stays. The issue that unbaked the glyph proposed dropping
+/// it and letting the backend truncate, but §2b pins truncation at 20 display
+/// columns **with a `…` marker inside the budget**
+/// (`"#101 Fix login race…"`), and no `TabBar`/`TabItem` field expresses a
+/// per-tab ellipsised width budget — a backend only ever *clips* a label, and
+/// only once the whole strip overflows. Dropping the pre-truncation would
+/// therefore break contract §2b (and the sealed ms-65 slices that pin those
+/// exact strings) rather than fix anything, so the budget stays app-side
+/// until quadraui grows a real per-tab max-width knob.
+///
+/// `is_preview` is still set on the `TabItem` by the callers so the italic
+/// styling the contract asks for is real; the `∘ ` marker is the
+/// symbols-only stand-in for it, not a substitute (see [`PREVIEW_MARKER`]).
 pub(crate) fn doc_tab_label(
     repo: &str,
     number: u64,
     title: &str,
     show_repo: bool,
     is_preview: bool,
-    is_active: bool,
     max_cols: usize,
 ) -> String {
     let base = truncate_with_ellipsis(&format!("#{number} {title}"), max_cols);
@@ -1543,35 +1608,10 @@ pub(crate) fn doc_tab_label(
         inner.push_str(&repo_alias(basename));
     }
     inner.push_str(&base);
+    // §2d's pinned `"… ×"` gap — see the doc comment above for why this one
+    // space stays in the label while the glyph itself does not.
     inner.push(' ');
-    inner.push(TAB_CLOSE_CHAR);
-    if is_active {
-        format!("[{inner}] ")
-    } else {
-        format!("{inner} ")
-    }
-}
-
-/// Character offset of the §2d close glyph within a rendered tab label, or
-/// `None` if the label carries none (shouldn't happen — every tab built by
-/// [`doc_tab_label`] appends exactly one, per
-/// `every_label_carries_the_close_glyph` below). Used by the click
-/// hit-test ([`resolve_doc_tab_click`]) to tell a click on the `×` from a
-/// click on the rest of the tab.
-///
-/// The **last** occurrence is the close glyph, never the first:
-/// [`doc_tab_label`] embeds the issue title verbatim (modulo truncation), so
-/// a title like "Fix 2×2 grid" puts a `×` in the label's *body*. The glyph
-/// [`doc_tab_label`] appends is always to the right of every title char
-/// (only `]` and the separator space follow it), so scanning from the end
-/// finds it unambiguously.
-pub(crate) fn doc_tab_close_col(label: &str) -> Option<usize> {
-    let total = label.chars().count();
-    label
-        .chars()
-        .rev()
-        .position(|c| c == TAB_CLOSE_CHAR)
-        .map(|from_end| total - 1 - from_end)
+    inner
 }
 
 /// Which part of a tab a resolved click landed on — contract §4's
@@ -1593,58 +1633,99 @@ pub(crate) enum TabClickKind {
     Overflow(usize),
 }
 
-/// Resolve a click at `click_x` (same coordinate space as `origin_x`)
-/// against a rendered doc-tab strip's labels, honouring `scroll_offset`
-/// exactly the way `hit_tab_index_from_labels` (dialogs.rs) does — tabs
-/// before `scroll_offset` are skipped, and labels are walked left-to-right
-/// from `origin_x` accumulating `chars().count()` widths, matching what the
-/// TUI rasteriser actually paints (§0: every glyph this milestone
-/// introduces, including `×`/`‹`/`›`, is one display column).
+/// Resolve a click at `click` — in the **backend's own unit**, relative to the
+/// strip rect's left edge — against the geometry the backend reported for that
+/// strip: `slot_positions[i]` is tab `i`'s full span and `close_bounds[i]` its
+/// close-button box, both straight off
+/// `Backend::tab_bar_layout_with_chrome` (see
+/// `events.rs::resolve_tab_bar_click`, this function's only non-test caller).
 ///
-/// Deliberately reimplemented here rather than calling
-/// `hit_tab_index_from_labels` and separately re-deriving each tab's start
-/// column: the close-glyph offset needs the SAME cumulative-width walk that
-/// function already does internally, and duplicating just the "where does
-/// tab `idx` start" half without the shared loop would be the real second
-/// algorithm the ms-65 design note warns against.
+/// # Why the geometry is an argument (#7)
+///
+/// This used to take `&[&str]` labels and walk them left-to-right counting
+/// `chars()`, deciding "close" by finding the `×` the app had itself baked
+/// into the label. Three things were wrong with that and all three are fixed
+/// by reading `close_bounds` instead:
+///
+/// 1. A character count is not a position on a pixel backend — under GTK the
+///    close hit zone was meaningless.
+/// 2. The scan looked for a TUI *rendering constant* — quadraui's tab-bar
+///    close-glyph `char` — from a backend-neutral module; under GTK the glyph
+///    is whatever the rasteriser paints, so the scan could miss entirely.
+/// 3. A tab whose issue title itself contains `×` ("Fix 2×2 grid") only
+///    worked because the baked glyph was guaranteed to be the *last* one in
+///    the string — a property one extra suffix would have silently broken.
+///    `close_bounds` cannot be confused by label text at all.
+///
+/// Scrolled-out tabs need no special casing: every backend reports
+/// `(0.0, 0.0)` for a tab it did not paint, and `end <= start` skips those —
+/// a tab that isn't on screen can't be clicked.
+///
+/// The one thing still resolved from label *text* is §4/#2642's baked
+/// `‹`/`›` overflow marker, which no backend paints or reports (see
+/// [`SCROLL_LEFT_MARKER`]). Those two checks win over both the close box and
+/// the body, because a marker cell belongs to the picker rather than to
+/// whichever tab it happens to be painted into. Their column is derived from
+/// `close_bounds` rather than from the slot's left edge, which is what makes
+/// them survive §2c's opening `[`: the rasteriser paints the framing *outside*
+/// the label, so `close_start - display_width(label)` is the label's true
+/// origin whether the tab is bracket-framed or not, and this module never has
+/// to know which.
 pub(crate) fn resolve_doc_tab_click(
-    labels: &[&str],
-    origin_x: f32,
-    click_x: f32,
-    scroll_offset: usize,
+    bar: &TabBar,
+    slot_positions: &[(f64, f64)],
+    close_bounds: &[Option<(f64, f64)>],
+    click: f64,
 ) -> Option<TabClickKind> {
-    let mut cursor = origin_x;
-    for (i, label) in labels.iter().enumerate().skip(scroll_offset) {
-        let chars: Vec<char> = label.chars().collect();
-        let width = chars.len() as f32;
-        let end = cursor + width;
-        if click_x >= cursor && click_x < end {
-            let offset_in_tab = (click_x - cursor).floor() as usize;
-            // #2642: a `‹`/`›` overflow marker is baked into column 0 or the
-            // very last column of the boundary tab's label
-            // (`bake_doc_tab_overflow_markers`, render.rs) — check those two
-            // fixed positions before falling through to close/body so a
-            // click there routes to the picker instead of activating (or, for
-            // `‹`, closing — column 0 never carries the close glyph, but the
-            // check still has to win the race) the tab it happens to be
-            // painted into.
-            if offset_in_tab == 0 && chars.first() == Some(&SCROLL_LEFT_MARKER) {
-                return Some(TabClickKind::Overflow(i));
-            }
-            if !chars.is_empty()
-                && offset_in_tab == chars.len() - 1
-                && chars.last() == Some(&SCROLL_RIGHT_MARKER)
-            {
-                return Some(TabClickKind::Overflow(i));
-            }
-            return Some(match doc_tab_close_col(label) {
-                Some(close_col) if close_col == offset_in_tab => TabClickKind::Close(i),
-                _ => TabClickKind::Body(i),
-            });
+    for (idx, &(start, end)) in slot_positions.iter().enumerate() {
+        if end <= start || click < start || click >= end {
+            continue;
         }
-        cursor = end;
+        let label = bar.tabs.get(idx).map(|t| t.label.as_str()).unwrap_or("");
+        let close = close_bounds.get(idx).copied().flatten();
+        if doc_tab_overflow_marker_hit(label, start, close, click) {
+            return Some(TabClickKind::Overflow(idx));
+        }
+        if let Some((close_start, close_end)) = close {
+            if click >= close_start && click < close_end {
+                return Some(TabClickKind::Close(idx));
+            }
+        }
+        return Some(TabClickKind::Body(idx));
     }
     None
+}
+
+/// Did `click` land on a `‹`/`›` overflow marker baked into `label`?
+///
+/// `slot_start` / `close` are tab-relative geometry in the backend's unit, as
+/// in [`resolve_doc_tab_click`]. The marker occupies the label's first (`‹`)
+/// or last (`›`) cell; the label's origin is `close_start` minus the label's
+/// own display width, so the §2c opening bracket the rasteriser paints before
+/// the label shifts the marker's column automatically.
+///
+/// Cell-unit by construction, and so is the bake that produces the markers —
+/// `CoordApp::bake_doc_tab_overflow_markers` (render.rs) documents that whole
+/// affordance as TUI-only (its "Known GTK gap (#24)" note): under GTK the
+/// measurement concludes nothing overflows, no marker is ever baked, and both
+/// branches below are dead rather than wrong.
+fn doc_tab_overflow_marker_hit(
+    label: &str,
+    slot_start: f64,
+    close: Option<(f64, f64)>,
+    click: f64,
+) -> bool {
+    let cols = display_width(label) as f64;
+    if cols <= 0.0 {
+        return false;
+    }
+    let label_start = match close {
+        Some((close_start, _)) => close_start - cols,
+        None => slot_start,
+    };
+    let on_cell = |cell_x: f64| click >= cell_x && click < cell_x + 1.0;
+    (label.starts_with(SCROLL_LEFT_MARKER) && on_cell(label_start))
+        || (label.ends_with(SCROLL_RIGHT_MARKER) && on_cell(label_start + cols - 1.0))
 }
 
 // ── #2642 (ms-65 §… quick-pick): Ctrl+E open-tabs picker ─────────────────
@@ -1748,6 +1829,7 @@ pub(crate) fn doc_tab_picker_items(rows: &[DocTabPickerRow], show_repo: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quadraui::TabItem;
 
     fn k(n: u64) -> DocKey {
         ("claude-coordinator".to_string(), n)
@@ -2027,69 +2109,165 @@ mod tests {
 
     // ── click resolution: contract §4 ─────────────────────────────────────
 
-    #[test]
-    fn doc_tab_close_col_finds_the_close_glyph() {
-        let label = doc_tab_label("claude-coordinator", 101, "Fix login race timeout", false, false, false, DOC_TAB_LABEL_COLS);
-        // "#101 Fix login race… × " — 20-column base + a space, so × sits at
-        // char index 21.
-        assert_eq!(doc_tab_close_col(&label), Some(21));
+    /// One `TabItem` shaped the way the doc-tab strips build them
+    /// (`board_doc_tab_bar_for_pane` / `pipeline_doc_tab_bar`, render.rs):
+    /// always closable, never dirty.
+    fn tab(label: &str, is_active: bool) -> TabItem {
+        TabItem {
+            label: label.to_string(),
+            is_active,
+            is_dirty: false,
+            is_preview: false,
+            is_closable: true,
+        }
     }
 
-    #[test]
-    fn doc_tab_close_col_skips_a_close_char_inside_the_title() {
-        // The title itself contains `×` ("2×2"), which lands in the rendered
-        // label verbatim. The close glyph is the LAST occurrence — the one
-        // doc_tab_label appends — never the title's.
-        let label = doc_tab_label("claude-coordinator", 104, "Fix 2×2 grid layout", false, false, false, DOC_TAB_LABEL_COLS);
-        let col = doc_tab_close_col(&label).expect("label carries a close glyph");
-        let title_x = label
-            .chars()
-            .position(|c| c == TAB_CLOSE_CHAR)
-            .unwrap();
-        assert!(
-            col > title_x,
-            "close col {col} must be the trailing glyph, not the title's × at {title_x}: {label:?}"
-        );
-        // And it is genuinely the appended glyph: only the separator space
-        // (and, on an active tab, `]`) may follow it.
-        assert_eq!(label.chars().nth(col), Some(TAB_CLOSE_CHAR));
-        assert_eq!(label.chars().skip(col + 1).collect::<String>(), " ");
+    /// `(slot_positions, close_bounds)` — the two `TabBarHits` fields
+    /// [`resolve_doc_tab_click`] consumes, as [`cell_geometry`] models them.
+    type CellGeometry = (Vec<(f64, f64)>, Vec<Option<(f64, f64)>>);
+
+    /// A doc-tab strip with `show_tab_close` on, as both real builders set it.
+    fn strip(tabs: Vec<TabItem>) -> TabBar {
+        TabBar {
+            id: quadraui::WidgetId::new("doc-tabs"),
+            tabs,
+            right_segments: Vec::new(),
+            active_accent: None,
+            scroll_offset: 0,
+            show_tab_close: true,
+            compact: false,
+        }
+    }
+
+    /// The `(slot_positions, close_bounds)` pair a backend reports for
+    /// `strip`, laid out in **cells** exactly the way
+    /// `TuiBackend::draw_tab_bar_with_chrome` → `TabBar::layout` does, with
+    /// the first tab flush at column 0.
+    ///
+    /// Written out here rather than obtained from a live backend because
+    /// [`resolve_doc_tab_click`] is a pure predicate over that geometry, and a
+    /// unit test wants the geometry visible. The end-to-end agreement between
+    /// this model and the real rasteriser is covered by the `TuiDriver` tests
+    /// in `tests.rs` (`clicking_a_doc_tabs_close_glyph_*`), which click
+    /// through `Backend::tab_bar_layout_with_chrome` for real.
+    ///
+    /// Mirrors [`doc_tab_chrome_cols`]: a closable inactive tab spends its
+    /// last two cells on `×` + inter-tab separator (both inside
+    /// `close_bounds`, which is quadraui's own convention — `tab_close_center`
+    /// aims at that box's centre), while §2c's bracket-framed ACTIVE tab
+    /// spends `[` + `×` + `]` with `close_bounds` covering just the `×`.
+    fn cell_geometry(bar: &TabBar) -> CellGeometry {
+        let mut slots = Vec::new();
+        let mut closes = Vec::new();
+        let mut x = 0.0f64;
+        for t in &bar.tabs {
+            let closable = bar.show_tab_close && t.is_closable;
+            let total =
+                display_width(&t.label) as f64 + doc_tab_chrome_cols(t.is_active, closable) as f64;
+            // `TabMeasure::close_width` / `::trailing_width`, in cells.
+            let (close_w, trailing) = match (t.is_active, closable) {
+                (_, false) => (0.0, 0.0),
+                (true, true) => (1.0, 1.0),
+                (false, true) => (2.0, 0.0),
+            };
+            slots.push((x, x + total));
+            closes.push((close_w > 0.0).then_some((
+                x + total - trailing - close_w,
+                x + total - trailing,
+            )));
+            x += total;
+        }
+        (slots, closes)
     }
 
     #[test]
     fn resolve_doc_tab_click_distinguishes_body_from_close() {
-        // Two 4-char labels back-to-back: "ab×d" then "ef×h", starting at x=10.
-        let labels = ["ab×d", "ef×h"];
-        // Body click on the first tab.
-        assert_eq!(
-            resolve_doc_tab_click(&labels, 10.0, 10.5, 0),
-            Some(TabClickKind::Body(0))
-        );
-        // Close click on the first tab's × (offset 2 within the label).
-        assert_eq!(
-            resolve_doc_tab_click(&labels, 10.0, 12.5, 0),
-            Some(TabClickKind::Close(0))
-        );
-        // Close click on the second tab's ×, at absolute column 16.
-        assert_eq!(
-            resolve_doc_tab_click(&labels, 10.0, 16.5, 0),
-            Some(TabClickKind::Close(1))
-        );
+        // "ab " (inactive: + × + separator = 5 cells, close box at 3..5)
+        // "cd " (inactive: cells 5..10, close box at 8..10)
+        let bar = strip(vec![tab("ab ", false), tab("cd ", false)]);
+        let (slots, closes) = cell_geometry(&bar);
+        let hit = |x: f64| resolve_doc_tab_click(&bar, &slots, &closes, x);
+
+        assert_eq!(hit(0.5), Some(TabClickKind::Body(0)));
+        assert_eq!(hit(2.5), Some(TabClickKind::Body(0)));
+        // The `×` the RASTERISER paints, one cell past the label.
+        assert_eq!(hit(3.5), Some(TabClickKind::Close(0)));
+        assert_eq!(hit(5.5), Some(TabClickKind::Body(1)));
+        assert_eq!(hit(8.5), Some(TabClickKind::Close(1)));
         // Past the last tab.
-        assert_eq!(resolve_doc_tab_click(&labels, 10.0, 18.5, 0), None);
+        assert_eq!(hit(10.5), None);
+    }
+
+    /// §2c's bracket framing shifts the label one cell right and puts the
+    /// closing `]` *after* the `×` (quadraui#631), so the active tab's close
+    /// box is a single cell rather than glyph-plus-separator. Resolving from
+    /// `close_bounds` gets that for free; the old character scan had to know
+    /// the bracket was there.
+    #[test]
+    fn resolve_doc_tab_click_handles_the_active_tabs_bracket_framing() {
+        // "[ab ×]" = 6 cells, close box at cell 4 only.
+        let bar = strip(vec![tab("ab ", true)]);
+        let (slots, closes) = cell_geometry(&bar);
+        let hit = |x: f64| resolve_doc_tab_click(&bar, &slots, &closes, x);
+
+        assert_eq!(hit(0.5), Some(TabClickKind::Body(0)), "the `[` itself");
+        assert_eq!(hit(1.5), Some(TabClickKind::Body(0)), "the label");
+        assert_eq!(hit(4.5), Some(TabClickKind::Close(0)), "the `×`");
+        assert_eq!(hit(5.5), Some(TabClickKind::Body(0)), "the `]`");
+    }
+
+    /// #7's headline case: an issue title that itself contains `×` ("Fix 2×2
+    /// grid"). The old hit-test scanned the label string backwards for the
+    /// close glyph and existed *only* to get this right; reading
+    /// `close_bounds` cannot be fooled by label text at all, so the title's
+    /// `×` resolves to `Body` and only the real close box closes.
+    #[test]
+    fn a_close_char_inside_the_title_is_never_the_close_button() {
+        let label = doc_tab_label(
+            "claude-coordinator",
+            104,
+            "Fix 2×2 grid layout",
+            false,
+            false,
+            DOC_TAB_LABEL_COLS,
+        );
+        let title_x = label
+            .chars()
+            .position(|c| c == '×')
+            .expect("the fixture title carries a `×`");
+        let bar = strip(vec![tab(&label, false)]);
+        let (slots, closes) = cell_geometry(&bar);
+
+        assert_eq!(
+            resolve_doc_tab_click(&bar, &slots, &closes, title_x as f64 + 0.5),
+            Some(TabClickKind::Body(0)),
+            "the title's own `×` at column {title_x} must activate, not close: {label:?}"
+        );
+        let (close_start, _) = closes[0].expect("a closable tab reports a close box");
+        assert_eq!(
+            resolve_doc_tab_click(&bar, &slots, &closes, close_start + 0.5),
+            Some(TabClickKind::Close(0)),
+            "…and the backend-reported close box still closes: {label:?}"
+        );
     }
 
     #[test]
-    fn resolve_doc_tab_click_honours_scroll_offset() {
-        let labels = ["ab×d", "ef×h"];
-        // With the first tab scrolled out, the second starts at origin_x.
+    fn resolve_doc_tab_click_skips_tabs_the_backend_did_not_paint() {
+        // A scrolled-out tab is reported as the `(0.0, 0.0)` sentinel, so tab
+        // 1 starts at column 0 and nothing ever resolves to tab 0.
+        let bar = strip(vec![tab("ab ", false), tab("cd ", false)]);
+        let (_, closes_all) = cell_geometry(&bar);
+        let slots = vec![(0.0, 0.0), (0.0, 5.0)];
+        let closes = vec![None, closes_all[1].map(|(s, e)| (s - 5.0, e - 5.0))];
+
         assert_eq!(
-            resolve_doc_tab_click(&labels, 10.0, 12.5, 1),
+            resolve_doc_tab_click(&bar, &slots, &closes, 0.5),
+            Some(TabClickKind::Body(1))
+        );
+        assert_eq!(
+            resolve_doc_tab_click(&bar, &slots, &closes, 3.5),
             Some(TabClickKind::Close(1))
         );
-        // A click before origin_x (where the hidden tab would have been)
-        // never resolves to the hidden tab.
-        assert_eq!(resolve_doc_tab_click(&labels, 10.0, 8.0, 1), None);
     }
 
     #[test]
@@ -2098,37 +2276,39 @@ mod tests {
         // tab's label, and a right marker baked into the LAST column of
         // the LAST visible tab's label — exactly what
         // `bake_doc_tab_overflow_markers` (render.rs) produces.
-        let labels = [format!("{SCROLL_LEFT_MARKER}ab×d"), format!("ef×h{SCROLL_RIGHT_MARKER}")];
-        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        // Column 0 of the first tab: the `‹` marker, not its body.
-        assert_eq!(
-            resolve_doc_tab_click(&refs, 10.0, 10.5, 0),
-            Some(TabClickKind::Overflow(0))
-        );
+        let bar = strip(vec![
+            tab(&format!("{SCROLL_LEFT_MARKER}ab "), false),
+            tab(&format!("cd {SCROLL_RIGHT_MARKER}"), false),
+        ]);
+        let (slots, closes) = cell_geometry(&bar);
+        let hit = |x: f64| resolve_doc_tab_click(&bar, &slots, &closes, x);
+
+        // Tab 0 is "‹ab " + × + separator = 6 cells; the marker is cell 0.
+        assert_eq!(hit(0.5), Some(TabClickKind::Overflow(0)));
         // Body / close columns of the SAME (marker-carrying) label are
         // unaffected — everything just shifts one column right.
-        assert_eq!(
-            resolve_doc_tab_click(&refs, 10.0, 11.5, 0),
-            Some(TabClickKind::Body(0))
-        );
-        assert_eq!(
-            resolve_doc_tab_click(&refs, 10.0, 13.5, 0),
-            Some(TabClickKind::Close(0))
-        );
-        // The last column of the second tab: the `›` marker.
-        assert_eq!(
-            resolve_doc_tab_click(&refs, 10.0, 19.5, 0),
-            Some(TabClickKind::Overflow(1))
-        );
-        // Body / close columns of that label are unaffected.
-        assert_eq!(
-            resolve_doc_tab_click(&refs, 10.0, 15.5, 0),
-            Some(TabClickKind::Body(1))
-        );
-        assert_eq!(
-            resolve_doc_tab_click(&refs, 10.0, 17.5, 0),
-            Some(TabClickKind::Close(1))
-        );
+        assert_eq!(hit(1.5), Some(TabClickKind::Body(0)));
+        assert_eq!(hit(4.5), Some(TabClickKind::Close(0)));
+        // Tab 1 is "cd ›" + × + separator = cells 6..12; `›` is cell 9.
+        assert_eq!(hit(9.5), Some(TabClickKind::Overflow(1)));
+        assert_eq!(hit(6.5), Some(TabClickKind::Body(1)));
+        assert_eq!(hit(10.5), Some(TabClickKind::Close(1)));
+    }
+
+    /// The `‹` marker on the ACTIVE tab sits *inside* §2c's `[`, so its
+    /// column is one to the right of the tab's own left edge. Deriving the
+    /// label origin from `close_bounds` rather than from the slot start is
+    /// what keeps that working without this module knowing the frame is a
+    /// bracket.
+    #[test]
+    fn an_overflow_marker_on_the_active_tab_lands_inside_the_bracket() {
+        let bar = strip(vec![tab(&format!("{SCROLL_LEFT_MARKER}ab "), true)]);
+        let (slots, closes) = cell_geometry(&bar);
+        let hit = |x: f64| resolve_doc_tab_click(&bar, &slots, &closes, x);
+
+        assert_eq!(hit(0.5), Some(TabClickKind::Body(0)), "the `[`");
+        assert_eq!(hit(1.5), Some(TabClickKind::Overflow(0)), "the `‹`");
+        assert_eq!(hit(5.5), Some(TabClickKind::Close(0)), "the `×`");
     }
 
     // ── per-document sub-state: contract §5 (#2285) ──────────────────────
@@ -2246,36 +2426,43 @@ mod tests {
         assert_eq!(display_width(&out), 6);
     }
 
-    /// Exact strings lifted from the ms-65 §2 mocks.
+    /// Exact strings lifted from the ms-65 §2 mocks, minus the chrome the
+    /// rasteriser now supplies: §2d's `×` and §2c's `[`/`]` are no longer in
+    /// the label (#7), so what is pinned here is the 20-column budget, the
+    /// `…` marker inside it, and the single trailing space that gives §2d's
+    /// `"… ×"` its gap. `board_doc_tab_strip_paints_the_pinned_mock_labels`
+    /// (tests.rs) pins the assembled row the user actually sees.
     #[test]
     fn pinned_inactive_label_matches_the_mock() {
         assert_eq!(
-            doc_tab_label("claude-coordinator", 101, "Fix login race timeout", false, false, false, DOC_TAB_LABEL_COLS),
-            "#101 Fix login race… × "
+            doc_tab_label("claude-coordinator", 101, "Fix login race timeout", false, false, DOC_TAB_LABEL_COLS),
+            "#101 Fix login race… "
         );
     }
 
+    /// The active tab's label is byte-identical to an inactive one: §2c's
+    /// framing is [`doc_tab_chrome`]'s job now, so `doc_tab_label` has no
+    /// `is_active` parameter left to branch on.
     #[test]
-    fn pinned_active_label_is_bracketed() {
+    fn the_label_carries_no_active_framing() {
         assert_eq!(
-            doc_tab_label("claude-coordinator", 103, "Race condition in poller", false, false, true, DOC_TAB_LABEL_COLS),
-            "[#103 Race condition… ×] "
+            doc_tab_label("claude-coordinator", 103, "Race condition in poller", false, false, DOC_TAB_LABEL_COLS),
+            "#103 Race condition… "
         );
     }
 
     #[test]
     fn preview_label_carries_the_marker_outside_the_20_column_budget() {
         let label =
-            doc_tab_label("claude-coordinator", 102, "Auth token refresh bug", false, true, true, DOC_TAB_LABEL_COLS);
-        assert_eq!(label, "[∘ #102 Auth token ref… ×] ");
-        assert!(label.contains("∘ #102 Auth token ref… ×"));
+            doc_tab_label("claude-coordinator", 102, "Auth token refresh bug", false, true, DOC_TAB_LABEL_COLS);
+        assert_eq!(label, "∘ #102 Auth token ref… ");
     }
 
     #[test]
     fn multi_repo_labels_carry_the_repo_prefix() {
         // #2641: the prefix is the two-letter repo alias joined directly to
         // `#N`, not the full repo name with a separating space.
-        let label = doc_tab_label("quadraui", 597, "Preview tier", true, false, false, DOC_TAB_LABEL_COLS);
+        let label = doc_tab_label("quadraui", 597, "Preview tier", true, false, DOC_TAB_LABEL_COLS);
         assert!(
             label.starts_with("Q#597 Preview tier"),
             "got {label:?}"
@@ -2293,7 +2480,6 @@ mod tests {
             "Fix the thing",
             true,
             false,
-            false,
             DOC_TAB_LABEL_COLS,
         );
         assert!(label.starts_with("CW#26 Fix the thing"), "got {label:?}");
@@ -2303,15 +2489,27 @@ mod tests {
         );
     }
 
+    /// #7: the property that replaces the old
+    /// `every_label_carries_the_close_glyph` —
+    /// no label may smuggle a close glyph (or §2c framing) in any more, since
+    /// the rasteriser paints exactly one `×` per closable tab and a second one
+    /// in the text would break §2e's "count the `×` occurrences" tab count.
     #[test]
-    fn every_label_carries_the_close_glyph() {
-        for active in [false, true] {
-            for preview in [false, true] {
-                let label = doc_tab_label("r", 1, "t", false, preview, active, DOC_TAB_LABEL_COLS);
-                assert_eq!(
-                    label.matches(TAB_CLOSE_CHAR).count(),
-                    1,
-                    "one close glyph per tab (active={active}, preview={preview})"
+    fn no_label_carries_chrome_the_rasteriser_paints() {
+        for preview in [false, true] {
+            for show_repo in [false, true] {
+                let label =
+                    doc_tab_label("r", 1, "t", show_repo, preview, DOC_TAB_LABEL_COLS);
+                for banned in ['×', '[', ']'] {
+                    assert!(
+                        !label.contains(banned),
+                        "{banned:?} is the rasteriser's to paint, not the label's \
+                         (preview={preview}, show_repo={show_repo}): {label:?}"
+                    );
+                }
+                assert!(
+                    label.ends_with(' '),
+                    "the pinned `… ×` gap comes from the label's trailing space: {label:?}"
                 );
             }
         }

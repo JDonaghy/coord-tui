@@ -8,6 +8,9 @@
     // both `TuiDriver` and `GtkDriver` (see
     // `assert_toolbar_add_click_opens_repo_picker`).
     use quadraui::testing::ConformanceDriver;
+    // #7: the default (no-framing) chrome every sub-tab bar is painted and
+    // hit-tested with — the doc-tab strips use `doc_tab_chrome()` instead.
+    use quadraui::TabChrome;
 
     /// Collect every `ToolbarButton::Action` label from a toolbar.
     /// Test-only convenience for assertions that previously walked
@@ -6570,7 +6573,8 @@
     fn hit_tab(labels: &[&str], bar_rect: Rect, click_x: f32, scroll_offset: usize) -> Option<usize> {
         let bar = tab_bar_from_labels(labels, 0, scroll_offset);
         let backend = quadraui::tui::TuiBackend::new();
-        resolve_tab_bar_click(&bar, bar_rect, click_x, &backend).map(tab_click_index)
+        resolve_tab_bar_click(&bar, bar_rect, click_x, &backend, &TabChrome::default())
+            .map(tab_click_index)
     }
 
     #[test]
@@ -6633,14 +6637,16 @@
         assert_eq!(hit_tab(&labels, bar_rect, 3.0, 0), Some(0));
     }
 
+    /// #7: the within-tab close/body split now comes off the BACKEND's
+    /// `close_bounds`, not off a character scan of the label. The bar here is
+    /// shaped the way the real doc-tab strips are — bare label text,
+    /// `show_tab_close: true`, `doc_tab_chrome()` — and the close column is
+    /// read back out of `tab_bar_layout_with_chrome` rather than computed from
+    /// `label.chars().count()`, so this test cannot pass by accident if the
+    /// rasteriser's reservation moves.
     #[test]
     fn resolve_tab_bar_click_splits_close_glyph_from_body() {
-        // The doc-tab strip bakes its close `×` into the label text (see
-        // `doc_tab_label`), so the within-tab split is still resolved from
-        // the label — but now from the click's *proportional* position in
-        // the slot the backend reported, not from raw x arithmetic.
-        let label = "#101 Fix… × ";
-        let close_col = label.chars().count() - 2; // the `×`
+        let label = "#101 Fix… ";
         let bar = TabBar {
             id: WidgetId::new("test-doc-tabs"),
             tabs: vec![TabItem {
@@ -6653,18 +6659,35 @@
             right_segments: vec![],
             active_accent: None,
             scroll_offset: 0,
-            show_tab_close: false,
+            show_tab_close: true,
             compact: true,
         };
         let backend = quadraui::tui::TuiBackend::new();
         let bar_rect = Rect::new(20.0, 0.0, 40.0, 1.0);
+        let close_x = {
+            #[allow(deprecated)]
+            let hits = backend.tab_bar_layout_with_chrome(
+                Rect::new(0.0, 0.0, bar_rect.width, bar_rect.height),
+                &bar,
+                &doc_tab_chrome(),
+            );
+            #[allow(deprecated)]
+            let (start, _) = hits.close_bounds[0].expect("a closable tab reports a close box");
+            start as f32
+        };
         assert_eq!(
-            resolve_tab_bar_click(&bar, bar_rect, 20.0 + close_col as f32 + 0.5, &backend),
+            resolve_tab_bar_click(
+                &bar,
+                bar_rect,
+                20.0 + close_x + 0.5,
+                &backend,
+                &doc_tab_chrome()
+            ),
             Some(TabClickKind::Close(0)),
-            "a click on the baked `×` closes",
+            "a click on the rasteriser's `×` closes",
         );
         assert_eq!(
-            resolve_tab_bar_click(&bar, bar_rect, 20.0 + 2.5, &backend),
+            resolve_tab_bar_click(&bar, bar_rect, 20.0 + 2.5, &backend, &doc_tab_chrome()),
             Some(TabClickKind::Body(0)),
             "a click on the label body activates",
         );
@@ -60535,9 +60558,16 @@ Milestone tracking issue.
         assert!(app.board_doc_tab_labels().is_empty());
     }
 
-    /// §2e rule 1 + §2b/§2c/§2d/§1, through the app rather than the bare
-    /// model: opening a document produces one italic, `∘ `-marked, bracketed,
-    /// `×`-terminated tab.
+    /// §2e rule 1 + §2b/§1, through the app rather than the bare model:
+    /// opening a document produces one italic, `∘ `-marked, active, closable
+    /// tab.
+    ///
+    /// #7: the §2c `[`/`]` and the §2d `×` are **not** in the label any more
+    /// — they are `is_active` + `doc_tab_chrome()` and
+    /// `show_tab_close` + `is_closable`, asserted as such below. The row the
+    /// user actually sees is pinned by
+    /// `board_doc_tab_strip_paints_the_pinned_mock_labels`, which renders
+    /// through the real rasteriser.
     #[test]
     fn board_doc_tab_strip_renders_one_preview_tab_after_open() {
         let mut app = doc_tab_app(DOC_TAB_BOARD_JSON);
@@ -60545,13 +60575,18 @@ Milestone tracking issue.
 
         let bar = app.board_doc_tab_bar().expect("one tab open → a strip");
         assert_eq!(bar.tabs.len(), 1);
-        assert_eq!(bar.tabs[0].label, "[∘ #102 Auth token ref… ×] ");
+        assert_eq!(bar.tabs[0].label, "∘ #102 Auth token ref… ");
         assert!(
             bar.tabs[0].is_preview,
             "#2282 §1: the TabItem must carry is_preview so quadraui paints it \
              italic — the `∘ ` marker is the symbols-only stand-in, not a substitute"
         );
         assert!(bar.tabs[0].is_active);
+        assert!(
+            bar.show_tab_close && bar.tabs[0].is_closable,
+            "#7 / §2d: the `×` is the rasteriser's to paint, so the bar must \
+             actually ask for it"
+        );
     }
 
     /// §2e rule 3: pinning drops both `is_preview` and the `∘ ` marker.
@@ -60561,7 +60596,7 @@ Milestone tracking issue.
         app.open_board_doc_tab(("claude-coordinator".to_string(), 102), true);
 
         let bar = app.board_doc_tab_bar().expect("one tab open → a strip");
-        assert_eq!(bar.tabs[0].label, "[#102 Auth token ref… ×] ");
+        assert_eq!(bar.tabs[0].label, "#102 Auth token ref… ");
         assert!(!bar.tabs[0].is_preview);
     }
 
@@ -61025,13 +61060,25 @@ Milestone tracking issue.
         doc_tabs_driver(&[101, 102, 103], width, height)
     }
 
+    /// The §2d close glyph the TUI rasteriser paints on every closable tab —
+    /// U+00D7 MULTIPLICATION SIGN.
+    ///
+    /// #7: spelled as a literal rather than reached for through
+    /// `quadraui::tui`, because the app no longer decides what this glyph is
+    /// (the rasteriser does, per backend) and so must not depend on the
+    /// constant either — `grep -rn` for quadraui's tab-bar close-glyph
+    /// constant under `src/` comes back empty, which is one of #7's
+    /// acceptance criteria. The sealed ms-65 slices pin the same literal for
+    /// the same reason.
+    const CLOSE_GLYPH: char = '×';
+
     /// How many doc tabs are currently painted — one `×` per open tab
     /// (contract §2d), and the strip is the only place the app paints that
     /// glyph (asserted by `zero_doc_tabs_paint_no_strip_chrome` below).
     fn painted_tab_count<A: quadraui::AppLogic>(
         d: &quadraui::tui::testing::TuiDriver<A>,
     ) -> usize {
-        d.screen().matches(quadraui::tui::TAB_CLOSE_CHAR).count()
+        d.screen().matches(CLOSE_GLYPH).count()
     }
 
     /// The `[bracketed]` active tab's issue number, per §2c.
@@ -61039,8 +61086,15 @@ Milestone tracking issue.
         d: &quadraui::tui::testing::TuiDriver<A>,
     ) -> Option<u64> {
         for n in [101u64, 102, 103] {
-            if d.screen_contains(&format!("[#{n} ")) {
-                return Some(n);
+            // #7: §2c's `[` is painted by the rasteriser now, immediately left
+            // of whatever the LABEL starts with — which may be §1's `∘ `
+            // preview marker or §4's baked `‹` overflow marker before the
+            // `#<N>` tag. Before #7 the label carried the bracket itself, so a
+            // baked prefix landed outside it and `"[#<N> "` was enough.
+            for lead in ["", "‹", "∘ ", "‹∘ "] {
+                if d.screen_contains(&format!("[{lead}#{n} ")) {
+                    return Some(n);
+                }
             }
         }
         None
@@ -61055,7 +61109,7 @@ Milestone tracking issue.
         n: u64,
         label: &str,
     ) -> ((f32, f32), (f32, f32)) {
-        let needle = format!("#{n} {label} {}", quadraui::tui::TAB_CLOSE_CHAR);
+        let needle = format!("#{n} {label} {CLOSE_GLYPH}");
         let b = d
             .find_bounds(&needle)
             .unwrap_or_else(|| panic!("#{n}'s tab must be painted:\n{}", d.screen()));
@@ -61409,8 +61463,17 @@ Milestone tracking issue.
         // 80 columns leaves the Board main panel too narrow for three
         // 20-column tabs (§2b) — the overflow the contract's mock depicts.
         let mut driver = three_pinned_tabs_driver(80, 40);
+        // `[‹#103 `, not `[#103 `: at 80 columns only one tab fits, so the
+        // active tab is *also* the leftmost visible one and §4's `‹` is baked
+        // into its label — which, since #7 moved §2c's framing out to the
+        // rasteriser, now paints *inside* the `[`. (Before #7 the label
+        // already carried the bracket, so a prefix landed outside it.) The
+        // marker is still one column from the strip's left edge and still
+        // routes to the #2642 picker; see
+        // `an_overflow_marker_on_the_active_tab_lands_inside_the_bracket`
+        // (doc_tabs.rs) for the hit-test half.
         assert!(
-            driver.screen_contains("[#103 "),
+            driver.screen_contains("#103 Race condition… ×]"),
             "precondition: the last tab is active and therefore visible:\n{}",
             driver.screen()
         );
@@ -61515,7 +61578,7 @@ Milestone tracking issue.
         let driver = doc_tabs_driver(&[], 120, 40);
         let screen = driver.screen();
         for glyph in [
-            quadraui::tui::TAB_CLOSE_CHAR.to_string(),
+            CLOSE_GLYPH.to_string(),
             SCROLL_LEFT_MARKER.to_string(),
             SCROLL_RIGHT_MARKER.to_string(),
             super::doc_tabs::PREVIEW_MARKER.to_string(),
@@ -61526,6 +61589,276 @@ Milestone tracking issue.
                  tabs open:\n{screen}"
             );
         }
+    }
+
+    // ── #7: the strip's chrome comes off the rasteriser, not the label ───
+    //
+    // `doc_tab_label` used to concatenate §2c's `[`/`]` and §2d's `×` onto the
+    // title, and the click hit-test used to find the close button by scanning
+    // that string. Both now belong to quadraui (`show_tab_close` +
+    // `doc_tab_chrome`, quadraui#631), so the tests that pin the *shape* have
+    // to read the painted grid — a label assertion can no longer see it.
+
+    /// The assembled strip row, from a bare label plus the rasteriser's own
+    /// chrome: ms-65 §2b's 20-column budget with its `…` inside it, §2d's
+    /// `"… ×"` gap, and §2c's framing landing **outside** the close glyph.
+    ///
+    /// These are the mock's pinned strings. Since #7 they are produced by two
+    /// cooperating parties rather than one `format!`, which is precisely why
+    /// the assertion moved from `TabItem::label` to the screen.
+    #[test]
+    fn board_doc_tab_strip_paints_the_pinned_mock_labels() {
+        let driver = three_pinned_tabs_driver(120, 40);
+        let screen = driver.screen();
+        for needle in [
+            // Inactive tabs: label, then the rasteriser's `×`.
+            "#101 Fix login race… ×",
+            "#102 Auth token ref… ×",
+            // §2c (#631): the active tab's `]` lands to the RIGHT of its `×`.
+            "[#103 Race condition… ×]",
+        ] {
+            assert!(
+                screen.contains(needle),
+                "#7 / §2b+§2c+§2d: the strip must paint {needle:?}:\n{screen}"
+            );
+        }
+    }
+
+    /// §1's preview marker survives the unbake — it is the one label-embedded
+    /// marker the contract still asks the app for (italic alone is not
+    /// assertable on a symbols-only grid).
+    #[test]
+    fn board_doc_tab_strip_paints_the_preview_marker_inside_the_framing() {
+        let mut app = doc_tab_app(DOC_TAB_BOARD_JSON);
+        app.open_board_doc_tab(("claude-coordinator".to_string(), 102), false);
+        let mut driver = quadraui::tui::testing::driver_with_shell(
+            app,
+            CoordApp::shell_config(),
+            120,
+            40,
+        );
+        driver.render();
+        assert!(
+            driver.screen_contains("[∘ #102 Auth token ref… ×]"),
+            "#7 + §1/§2c: the preview marker sits inside the framing, and the \
+             framing outside the close glyph:\n{}",
+            driver.screen()
+        );
+    }
+
+    /// Drift guard for `doc_tab_chrome_cols`.
+    ///
+    /// `bake_doc_tab_overflow_markers` (render.rs) still has to measure tabs
+    /// **app-side, in cells** to decide where §4's `‹`/`›` go, because no
+    /// backend paints or reports scroll arrows for a bar whose
+    /// `scroll_arrow_width` is zero. That measurement therefore duplicates the
+    /// rasteriser's own chrome reservation, and a quadraui change to it would
+    /// silently mis-place the markers (or mis-resolve `scroll_offset`) rather
+    /// than fail to compile.
+    ///
+    /// So: measure the strip's painted span off the grid and compare it to
+    /// what `doc_tab_chrome_cols` claims. Three 21-column labels plus 2 + 2 + 3
+    /// columns of chrome must paint exactly 70 columns wide.
+    #[test]
+    fn board_doc_tab_strip_measures_tabs_as_the_rasteriser_paints_them() {
+        use quadraui::text_util::display_width;
+
+        let driver = three_pinned_tabs_driver(120, 40);
+        let screen = driver.screen();
+        let row = screen
+            .lines()
+            .find(|r| r.contains(CLOSE_GLYPH))
+            .unwrap_or_else(|| panic!("the strip must paint:\n{screen}"));
+        let cells: Vec<char> = row.chars().collect();
+        let start = row
+            .find("#101")
+            .map(|b| row[..b].chars().count())
+            .unwrap_or_else(|| panic!("the first tab must paint:\n{screen}"));
+        let end = cells
+            .iter()
+            .rposition(|&c| c == ']')
+            .unwrap_or_else(|| panic!("§2c's closing bracket must paint:\n{screen}"))
+            + 1;
+
+        // #101/#102 inactive, #103 active — the order `three_pinned_tabs_driver`
+        // opens them in.
+        let expected: usize = [
+            ("#101 Fix login race… ", false),
+            ("#102 Auth token ref… ", false),
+            ("#103 Race condition… ", true),
+        ]
+        .iter()
+        .map(|(label, is_active)| {
+            display_width(label) + super::doc_tabs::doc_tab_chrome_cols(*is_active, true)
+        })
+        .sum();
+
+        assert_eq!(
+            end - start,
+            expected,
+            "#7: `doc_tab_chrome_cols` must equal what the rasteriser reserves \
+             — if quadraui's close/bracket reservation moved, §4's baked \
+             `‹`/`›` markers are now in the wrong place:\n{screen}"
+        );
+    }
+
+    /// An issue title that itself contains `×`: "Fix 2×2 grid layout".
+    ///
+    /// This is the case the old scan-from-the-end close hit-test existed to
+    /// handle, so it keeps a test — but now driven end to end and located
+    /// through quadraui's own `tab_close_center` / `tab_center`, which resolve
+    /// against the `TabBarLayout` the painter cached rather than against any
+    /// column this test computes.
+    const DOC_TAB_TIMES_TITLE_JSON: &str = r#"{
+      "issues": [
+        {"repo_name": "claude-coordinator", "number": 104, "title": "Fix 2×2 grid layout", "state": "open", "labels": ["coord"]},
+        {"repo_name": "claude-coordinator", "number": 105, "title": "Unrelated other tab", "state": "open", "labels": ["coord"]}
+      ]
+    }"#;
+
+    /// The `WidgetId` the Board doc-tab strip paints under
+    /// (`board_doc_tab_bar_for_pane`) — the handle `tab_center` /
+    /// `tab_close_center` resolve against.
+    fn board_doc_tab_bar_id() -> WidgetId {
+        WidgetId::new("board-doc-tabs")
+    }
+
+    fn times_title_driver() -> quadraui::tui::testing::TuiDriver<impl quadraui::AppLogic> {
+        let mut app = doc_tab_app(DOC_TAB_TIMES_TITLE_JSON);
+        for n in [104u64, 105] {
+            app.open_board_doc_tab(("claude-coordinator".to_string(), n), true);
+        }
+        let mut driver =
+            quadraui::tui::testing::driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        driver.set_double_click_folding(false);
+        driver.render();
+        driver
+    }
+
+    /// #7 AC: a tab whose title contains `×` still closes from the **real**
+    /// close button — located via `tab_close_center`, never a literal column.
+    #[test]
+    fn a_tab_whose_title_contains_the_close_char_closes_from_the_real_close_button() {
+        let mut driver = times_title_driver();
+        assert!(
+            driver.screen_contains("#104 Fix 2×2 grid l"),
+            "precondition: the `×`-carrying title is painted in the strip:\n{}",
+            driver.screen()
+        );
+        // Two tabs open ⇒ two rasteriser-painted `×`, plus the one inside the
+        // title: three occurrences on the row.
+        let (close_x, close_y) = driver
+            .tab_close_center(&board_doc_tab_bar_id(), 0)
+            .expect("tab 0 is painted and closable, so it reports a close box");
+        driver.click(close_x, close_y);
+        driver.render();
+
+        // Needles use the strip's own single-space + `…` truncation, so they
+        // can't be satisfied by the sidebar row for the same issue (which
+        // paints `#104  Fix 2×2 grid layout`, two spaces and untruncated).
+        assert!(
+            !driver.screen_contains("#104 Fix 2×2 grid l"),
+            "#7: clicking tab 0's real close button must close #104's tab:\n{}",
+            driver.screen()
+        );
+        assert!(
+            driver.screen_contains("#105 Unrelated othe… ×"),
+            "…and only that tab:\n{}",
+            driver.screen()
+        );
+    }
+
+    /// The other half: clicking the `×` **inside the title** must activate the
+    /// tab, not close it. Before #7 this only worked because the baked close
+    /// glyph happened to be the last `×` in the label string; now nothing about
+    /// label text can reach the close decision at all.
+    #[test]
+    fn the_close_char_inside_a_title_activates_instead_of_closing() {
+        let mut driver = times_title_driver();
+        let row = {
+            let screen = driver.screen();
+            screen
+                .lines()
+                .position(|r| r.contains("#104 Fix 2×2"))
+                .unwrap_or_else(|| panic!("the strip must paint:\n{screen}"))
+        };
+        let title_col = {
+            let screen = driver.screen();
+            let line = screen.lines().nth(row).unwrap().to_string();
+            let tag = line.find("#104").expect("the tab's `#104` tag");
+            line[tag..]
+                .char_indices()
+                .find(|(_, c)| *c == '×')
+                .map(|(b, _)| line[..tag + b].chars().count())
+                .expect("the title's own `×`")
+        };
+        assert_eq!(
+            driver.screen().lines().nth(row).unwrap().chars().nth(title_col),
+            Some('×'),
+            "precondition: the located column really carries the title's `×`"
+        );
+
+        driver.click(title_col as f32 + 0.5, row as f32 + 0.5);
+        driver.render();
+
+        assert!(
+            driver.screen_contains("#104 Fix 2×2 grid l"),
+            "#7 AC: the title's own `×` is label text, not a close button — \
+             clicking it must not close the tab:\n{}",
+            driver.screen()
+        );
+        assert!(
+            driver.screen_contains("[#104 Fix 2×2 grid l"),
+            "…it activates the tab instead (§2c brackets the active one):\n{}",
+            driver.screen()
+        );
+    }
+
+    /// §4 through quadraui's own targeting helpers rather than the painted
+    /// grid: `tab_center` activates, `tab_close_center` closes. Same two
+    /// gestures `clicking_a_doc_tabs_close_glyph_closes_exactly_that_tab`
+    /// covers, but resolved from the `TabBarLayout` the painter cached — which
+    /// is the geometry `resolve_doc_tab_click` now reads, so this is the
+    /// in-crate proof that the two agree.
+    #[test]
+    fn tab_center_and_tab_close_center_route_to_activate_and_close() {
+        let bar = board_doc_tab_bar_id();
+
+        let mut driver = three_pinned_tabs_driver(120, 40);
+        let (x, y) = driver
+            .tab_center(&bar, 0)
+            .expect("tab 0 is painted, so it reports a centre");
+        driver.click(x, y);
+        driver.render();
+        assert_eq!(
+            active_tab_number(&driver),
+            Some(101),
+            "`tab_center` click must ACTIVATE tab 0:\n{}",
+            driver.screen()
+        );
+        assert_eq!(
+            painted_tab_count(&driver),
+            3,
+            "…and close nothing:\n{}",
+            driver.screen()
+        );
+
+        let (x, y) = driver
+            .tab_close_center(&bar, 0)
+            .expect("tab 0 is closable, so it reports a close box");
+        driver.click(x, y);
+        driver.render();
+        assert_eq!(
+            painted_tab_count(&driver),
+            2,
+            "`tab_close_center` click must CLOSE tab 0:\n{}",
+            driver.screen()
+        );
+        assert!(
+            !driver.screen_contains("#101 Fix login race…"),
+            "…that tab specifically:\n{}",
+            driver.screen()
+        );
     }
 
     // ── #2642 (ms-65 §… quick-pick): Ctrl+E open-tabs picker ─────────────

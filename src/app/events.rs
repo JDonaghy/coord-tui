@@ -20,11 +20,12 @@
 #[allow(unused_imports)]
 use super::*;
 
-// #24: tab-bar hit-testing measures a label the way the rasteriser does —
-// in display columns (`display_width`), not `char`s. Imported explicitly
-// rather than leaned on through `use super::*` so the unit the tab hit-test
-// works in is visible at the top of the file that does the hit-testing.
-use quadraui::text_util::{char_cell_width, display_width};
+// #7: the tab hit-test no longer measures anything itself — it asks the
+// backend for the geometry of the bar as painted, which means it has to name
+// the chrome that bar was painted with. Imported explicitly rather than leaned
+// on through `use super::*` so that dependency is visible at the top of the
+// file that does the hit-testing. See `resolve_tab_bar_click`.
+use quadraui::TabChrome;
 
 // ─── Event dispatch ───────────────────────────────────────────────────────────
 
@@ -4254,6 +4255,7 @@ impl CoordApp {
                                     strip_rect,
                                     pos.x,
                                     &*backend,
+                                    &doc_tab_chrome(),
                                 ) {
                                     Some(TabClickKind::Close(idx) | TabClickKind::Body(idx)) => {
                                         Some(idx)
@@ -4520,7 +4522,13 @@ impl CoordApp {
                     return false;
                 }
                 let strip_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                match resolve_tab_bar_click(&strip, strip_rect, pos.x, &*backend) {
+                match resolve_tab_bar_click(
+                    &strip,
+                    strip_rect,
+                    pos.x,
+                    &*backend,
+                    &doc_tab_chrome(),
+                ) {
                     Some(TabClickKind::Close(idx) | TabClickKind::Body(idx)) => {
                         self.close_board_doc_tab(idx)
                     }
@@ -5730,7 +5738,13 @@ impl CoordApp {
                         // painted into, in the BACKEND's unit — see
                         // `resolve_tab_bar_click`.
                         let strip_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                        return match resolve_tab_bar_click(strip, strip_rect, pos.x, backend) {
+                        return match resolve_tab_bar_click(
+                            strip,
+                            strip_rect,
+                            pos.x,
+                            backend,
+                            &doc_tab_chrome(),
+                        ) {
                             Some(TabClickKind::Close(idx)) => self.close_board_doc_tab(idx),
                             Some(TabClickKind::Body(idx)) => self.activate_board_doc_tab(idx),
                             Some(TabClickKind::Overflow(_)) => {
@@ -5761,9 +5775,14 @@ impl CoordApp {
             if pos.y - main_b.y < tab_h {
                 let bar = self.board_detail_tab_bar();
                 let tab_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                if let Some(idx) = resolve_tab_bar_click(&bar, tab_rect, pos.x, backend)
-                    .map(tab_click_index)
-                {
+                let hit = resolve_tab_bar_click(
+                    &bar,
+                    tab_rect,
+                    pos.x,
+                    backend,
+                    &TabChrome::default(),
+                );
+                if let Some(idx) = hit.map(tab_click_index) {
                     let new_tab = match idx {
                         0 => BoardDetailTab::Board,
                         1 => BoardDetailTab::Issue,
@@ -5834,7 +5853,13 @@ impl CoordApp {
                         // marker click opens the picker instead (same
                         // reasoning as the Board arm above).
                         let strip_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                        return match resolve_tab_bar_click(strip, strip_rect, pos.x, backend) {
+                        return match resolve_tab_bar_click(
+                            strip,
+                            strip_rect,
+                            pos.x,
+                            backend,
+                            &doc_tab_chrome(),
+                        ) {
                             Some(TabClickKind::Close(idx)) => self.close_pipeline_doc_tab(idx),
                             Some(TabClickKind::Body(idx)) => self.activate_pipeline_doc_tab(idx),
                             Some(TabClickKind::Overflow(_)) => {
@@ -5866,9 +5891,14 @@ impl CoordApp {
                 // `bar.scroll_offset` verbatim, never actually applied).
                 let bar = self.pipeline_detail_tab_bar();
                 let tab_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                if let Some(idx) = resolve_tab_bar_click(&bar, tab_rect, pos.x, backend)
-                    .map(tab_click_index)
-                {
+                let hit = resolve_tab_bar_click(
+                    &bar,
+                    tab_rect,
+                    pos.x,
+                    backend,
+                    &TabChrome::default(),
+                );
+                if let Some(idx) = hit.map(tab_click_index) {
                     // #818: Overview / Issue / Log / Summary / Terminal,
                     // plus #2405's Completed grid at index 5.
                     let new_tab = match idx {
@@ -7057,61 +7087,45 @@ impl CoordApp {
 /// lands. `TabBar::layout` reads only `bar_width`/`bar_height`, so moving the
 /// probe origin cannot change the layout itself.
 ///
-/// # Why the *within-tab* split is still a character question
+/// # The *within-tab* split is the backend's answer too (#7)
 ///
-/// coord bakes the close `×`, the §2c active bracket and #2283's `‹`/`›`
-/// overflow markers into the label text itself (see `doc_tab_label`) rather
-/// than using `TabBar::show_tab_close`, so no backend reports their geometry
-/// — `TabBarHits::close_bounds` is `None` for every one of these tabs. Once
-/// the slot is known, the click's position *inside* it is therefore converted
-/// to a display column by proportion and handed to [`resolve_doc_tab_click`],
-/// the same tested predicate as before, on a single-label slice at origin 0.
+/// It used not to be. coord baked the close `×` and the §2c active bracket
+/// into the label text rather than using `TabBar::show_tab_close`, so
+/// `TabBarHits::close_bounds` was `None` for every doc tab and the click's
+/// position inside its slot had to be converted to a *display column* by
+/// proportion and matched against the glyph's character offset — exact on TUI,
+/// an approximation on GTK, and meaningless the moment a proportional font put
+/// the `×` somewhere other than `cols - 2`.
 ///
-/// On the TUI backend a slot is exactly `display_width(label)` cells wide, so
-/// that conversion is the identity and the outcome is byte-for-byte what the
-/// old walk produced (modulo the old walk's `chars().count()` bug on
-/// double-width glyphs, which this fixes). On GTK it is an approximation —
-/// good to about a character, since `Sans 11` is proportional and quadraui
-/// exposes no text-measure hook a caller could use to do better. Landing on
-/// the tab at all is the parity win; landing on its `×` to the pixel needs
-/// the upstream measure hook.
+/// Now the bar asks for `show_tab_close` + [`doc_tab_chrome`], so every
+/// backend reports the close button's real box and
+/// [`resolve_doc_tab_click`] simply tests the click against it. The only
+/// remaining character-shaped question is #2283's baked `‹`/`›` markers, and
+/// that one lives inside `resolve_doc_tab_click` with its own note.
+///
+/// `chrome` must be the **same** chrome the paint path passed to
+/// `draw_tab_bar*`: [`doc_tab_chrome`] for the doc-tab strips,
+/// `TabChrome::default()` for the plain sub-tab bars. Asking for different
+/// framing here than the painter asked for would shift `close_bounds` by the
+/// width of the opening bracket, which is exactly the class of paint/click
+/// disagreement this function exists to prevent.
 pub(crate) fn resolve_tab_bar_click(
     bar: &TabBar,
     bar_rect: Rect,
     click_x: f32,
     backend: &dyn Backend,
+    chrome: &TabChrome,
 ) -> Option<TabClickKind> {
     let probe = Rect::new(0.0, 0.0, bar_rect.width, bar_rect.height);
-    let hits = backend.tab_bar_layout(probe, bar);
-    let click = (click_x - bar_rect.x) as f64;
-    // `Backend::tab_bar_layout` only returns the deprecated `TabBarHits`; no
-    // `Backend` method returns the replacement `TabBarLayout` yet, so this
-    // can't migrate from here. See quadraui#823 and
-    // `quadraui/src/backend.rs:1456`.
+    // `Backend::tab_bar_layout_with_chrome` only returns the deprecated
+    // `TabBarHits`; the replacement `resolve_tab_bar_layout_with_chrome`
+    // exists but its default body drops the chrome, so it can't be used from
+    // here until every backend overrides it. See quadraui#823/#919.
     #[allow(deprecated)]
-    for (idx, &(start, end)) in hits.slot_positions.iter().enumerate() {
-        // `(0.0, 0.0)` is the sentinel for a tab scrolled (or clipped) out
-        // of view — `end <= start` catches it without special-casing, and
-        // skipping those is the point: a tab that isn't painted can't be
-        // clicked, which the old unbounded character walk got wrong too.
-        if end <= start || click < start || click >= end {
-            continue;
-        }
-        let label = bar.tabs.get(idx)?.label.as_str();
-        let cols = display_width(label);
-        if cols == 0 {
-            return Some(TabClickKind::Body(idx));
-        }
-        let frac = ((click - start) / (end - start)).clamp(0.0, 1.0);
-        let col = ((frac * cols as f64) as usize).min(cols - 1);
-        let within = resolve_doc_tab_click(&[label], 0.0, char_index_at_display_col(label, col), 0)?;
-        return Some(match within {
-            TabClickKind::Close(_) => TabClickKind::Close(idx),
-            TabClickKind::Body(_) => TabClickKind::Body(idx),
-            TabClickKind::Overflow(_) => TabClickKind::Overflow(idx),
-        });
-    }
-    None
+    let hits = backend.tab_bar_layout_with_chrome(probe, bar, chrome);
+    let click = (click_x - bar_rect.x) as f64;
+    #[allow(deprecated)]
+    resolve_doc_tab_click(bar, &hits.slot_positions, &hits.close_bounds, click)
 }
 
 /// The strip index a resolved tab click landed on, whatever part of the tab
@@ -7122,31 +7136,4 @@ pub(crate) fn tab_click_index(kind: TabClickKind) -> usize {
     match kind {
         TabClickKind::Close(i) | TabClickKind::Body(i) | TabClickKind::Overflow(i) => i,
     }
-}
-
-/// `char` index of the character covering display column `col` in `label`.
-///
-/// [`resolve_doc_tab_click`] and `doc_tab_close_col` both address labels by
-/// `char` index, while a tab slot's width is measured in *display columns*
-/// (`display_width`, i.e. 2 for a CJK/emoji glyph). For an all-single-width
-/// label — which every tab in this app has unless an issue title carries a
-/// wide glyph — the two are the same number and this is the identity.
-///
-/// Returns an `f32` because its one caller feeds it straight into
-/// `resolve_doc_tab_click`'s `click_x`, whose contract is "same coordinate
-/// space as `origin_x`" — here, characters from the label's start.
-/// Saturates at the last char rather than running off the end, so a click on
-/// the trailing half of a wide glyph still resolves to that glyph.
-fn char_index_at_display_col(label: &str, col: usize) -> f32 {
-    let mut acc = 0usize;
-    let mut last = 0usize;
-    for (i, ch) in label.chars().enumerate() {
-        last = i;
-        let w = (char_cell_width(ch) as usize).max(1);
-        if col < acc + w {
-            return i as f32;
-        }
-        acc += w;
-    }
-    last as f32
 }

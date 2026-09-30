@@ -188,9 +188,9 @@ pub(crate) mod approved;
 pub(crate) mod doc_tabs;
 #[allow(unused_imports)]
 use self::doc_tabs::{
-    doc_tab_label, resolve_doc_tab_click, DetailSubState, DocKey, DocTabPickerRow, DocTabs,
-    PanelScope, TabClickKind, DOC_TAB_LABEL_COLS, PANE_DIVIDER_CHAR, SCROLL_LEFT_MARKER,
-    SCROLL_RIGHT_MARKER, SPLIT_DOC_TAB_LABEL_COLS,
+    doc_tab_chrome, doc_tab_chrome_cols, doc_tab_label, resolve_doc_tab_click, DetailSubState,
+    DocKey, DocTabPickerRow, DocTabs, PanelScope, TabClickKind, DOC_TAB_LABEL_COLS,
+    PANE_DIVIDER_CHAR, SCROLL_LEFT_MARKER, SCROLL_RIGHT_MARKER, SPLIT_DOC_TAB_LABEL_COLS,
 };
 #[allow(unused_imports)]
 use self::types::*;

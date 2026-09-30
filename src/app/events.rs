@@ -504,8 +504,8 @@ impl CoordApp {
         //     * F12 toggles `terminal_focused` (handled here always,
         //       regardless of current focus state).
         //     * When `terminal_focused == true`, every other KeyPressed
-        //       is encoded via `key_to_pty_bytes` and forwarded to the
-        //       PTY — TUI chrome (view-switch hotkeys 1/2/3/4/5, etc.)
+        //       is encoded via `TerminalSession::encode_key` and forwarded
+        //       to the PTY — TUI chrome (view-switch hotkeys 1/2/3/4/5, etc.)
         //       is INACTIVE in this mode.
         //     * When `terminal_focused == false`, keys flow through to
         //       the normal TUI dispatch (1/2/3/4/5 work).
@@ -594,7 +594,7 @@ impl CoordApp {
         //     OR `active_view == Board && board_detail_tab == Terminal` (#675):
         //     * F12 toggles `detail_terminal_focused`.
         //     * When focused, every other keypress is forwarded to the
-        //       selected issue's PTY via `key_to_pty_bytes`.  TUI
+        //       selected issue's PTY via `TerminalSession::encode_key`.  TUI
         //       chrome (tab switching, view nav) is INACTIVE.
         //     * When unfocused, keys flow through to normal dispatch.
         //   - Outside this condition this block is a no-op.

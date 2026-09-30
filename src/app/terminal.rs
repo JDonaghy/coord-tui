@@ -488,7 +488,8 @@ impl CoordApp {
     /// Forward a key press to the embedded terminal PTY (#424).
     ///
     /// Encodes the key + modifiers into the appropriate xterm-256color
-    /// escape sequence via [`key_to_pty_bytes`] and writes them to the
+    /// escape sequence via [`TerminalSession::encode_key`] (which honours
+    /// the PTY's application-cursor / DECCKM mode) and writes them to the
     /// PTY via [`TerminalSession::write_input`].  Returns `true` when
     /// the event was consumed (caller should suppress further routing
     /// and request a redraw); `false` when there is no live session or
@@ -770,7 +771,7 @@ impl CoordApp {
         // Any input pops the user back to the live view (matches the
         // quadraui terminal example's behaviour).
         sess.scroll_reset();
-        if let Some(bytes) = key_to_pty_bytes(key.clone(), *mods) {
+        if let Some(bytes) = sess.encode_key(key.clone(), *mods) {
             sess.write_input(&bytes);
         }
         true
@@ -1067,7 +1068,7 @@ impl CoordApp {
             return true;
         }
         sess.scroll_reset();
-        if let Some(bytes) = key_to_pty_bytes(key.clone(), *mods) {
+        if let Some(bytes) = sess.encode_key(key.clone(), *mods) {
             sess.write_input(&bytes);
         }
         true
@@ -1106,159 +1107,3 @@ impl CoordApp {
         true
     }
 }
-
-/// Convert a `Key` + `Modifiers` pair to the byte sequence sent to a
-/// PTY (#424).  Mirrors the helper that ships in
-/// `quadraui/examples/common/terminal_app.rs` — re-implemented here
-/// because the example file is not part of the published API.
-///
-/// Covers the common VT100 / xterm-256color sequences (cursor keys,
-/// function keys, Home/End/PgUp/PgDn, Ctrl+letter -> control codes,
-/// printable chars).  Keys with no PTY mapping (CapsLock, etc.) return
-/// `None`.
-pub(crate) fn key_to_pty_bytes(key: Key, mods: quadraui::Modifiers) -> Option<Vec<u8>> {
-    match key {
-        Key::Char(ch) => {
-            if mods.ctrl {
-                // Ctrl+A..Ctrl+Z → bytes 0x01..0x1A.
-                let c = ch.to_ascii_uppercase();
-                if c.is_ascii_alphabetic() {
-                    return Some(vec![c as u8 - b'@']);
-                }
-                // Ctrl+[ → ESC, Ctrl+\ → FS, Ctrl+] → GS, Ctrl+^ → RS, Ctrl+_ → US.
-                match ch {
-                    '[' => return Some(vec![0x1b]),
-                    '\\' => return Some(vec![0x1c]),
-                    ']' => return Some(vec![0x1d]),
-                    '^' => return Some(vec![0x1e]),
-                    '_' => return Some(vec![0x1f]),
-                    _ => {}
-                }
-            }
-            // Regular printable character — encode as UTF-8.
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            Some(s.as_bytes().to_vec())
-        }
-        Key::Named(named) => named_key_to_pty_bytes(named, mods),
-    }
-}
-
-/// Helper for [`key_to_pty_bytes`] — maps named keys to escape sequences.
-pub(crate) fn named_key_to_pty_bytes(key: quadraui::NamedKey, mods: quadraui::Modifiers) -> Option<Vec<u8>> {
-    use quadraui::NamedKey;
-    let mod_param = pty_modifier_param(mods);
-    match key {
-        NamedKey::Enter => Some(b"\r".to_vec()),
-        NamedKey::Tab => {
-            if mods.shift {
-                Some(b"\x1b[Z".to_vec()) // back-tab
-            } else {
-                Some(b"\t".to_vec())
-            }
-        }
-        NamedKey::BackTab => Some(b"\x1b[Z".to_vec()),
-        NamedKey::Backspace => Some(b"\x7f".to_vec()),
-        NamedKey::Delete => Some(pty_xterm_seq(b"3", mod_param)),
-        NamedKey::Escape => Some(b"\x1b".to_vec()),
-        NamedKey::Up => Some(pty_xterm_cursor_seq(b"A", mod_param)),
-        NamedKey::Down => Some(pty_xterm_cursor_seq(b"B", mod_param)),
-        NamedKey::Right => Some(pty_xterm_cursor_seq(b"C", mod_param)),
-        NamedKey::Left => Some(pty_xterm_cursor_seq(b"D", mod_param)),
-        NamedKey::Home => Some(pty_xterm_seq(b"1", mod_param)),
-        NamedKey::End => Some(pty_xterm_seq(b"4", mod_param)),
-        NamedKey::Insert => Some(pty_xterm_seq(b"2", mod_param)),
-        NamedKey::PageUp => Some(pty_xterm_seq(b"5", mod_param)),
-        NamedKey::PageDown => Some(pty_xterm_seq(b"6", mod_param)),
-        NamedKey::F(n) => pty_f_key_bytes(n, mod_param),
-        // Keys with no PTY mapping.
-        NamedKey::CapsLock | NamedKey::NumLock | NamedKey::ScrollLock | NamedKey::Menu => None,
-    }
-}
-
-/// Build an xterm modifier parameter (1-based; plain = `None`).
-pub(crate) fn pty_modifier_param(mods: quadraui::Modifiers) -> Option<u8> {
-    let n: u8 = 1
-        + if mods.shift { 1 } else { 0 }
-        + if mods.alt { 2 } else { 0 }
-        + if mods.ctrl { 4 } else { 0 };
-    if n == 1 {
-        None
-    } else {
-        Some(n)
-    }
-}
-
-/// Build `\x1b[<code>~` or `\x1b[<code>;<mod>~` for tilde-terminated sequences.
-pub(crate) fn pty_xterm_seq(code: &[u8], mod_param: Option<u8>) -> Vec<u8> {
-    let mut v = b"\x1b[".to_vec();
-    v.extend_from_slice(code);
-    if let Some(m) = mod_param {
-        v.push(b';');
-        v.push(b'0' + m);
-    }
-    v.push(b'~');
-    v
-}
-
-/// Build cursor-movement sequences: `\x1b[<letter>` or `\x1b[1;<mod><letter>`.
-pub(crate) fn pty_xterm_cursor_seq(letter: &[u8], mod_param: Option<u8>) -> Vec<u8> {
-    match mod_param {
-        None => {
-            let mut v = b"\x1b[".to_vec();
-            v.extend_from_slice(letter);
-            v
-        }
-        Some(m) => {
-            let mut v = b"\x1b[1;".to_vec();
-            v.push(b'0' + m);
-            v.extend_from_slice(letter);
-            v
-        }
-    }
-}
-
-/// Function-key byte sequences (xterm encoding).
-pub(crate) fn pty_f_key_bytes(n: u8, mod_param: Option<u8>) -> Option<Vec<u8>> {
-    let bytes = match n {
-        1 => {
-            if mod_param.is_none() {
-                b"\x1bOP".to_vec()
-            } else {
-                pty_xterm_cursor_seq(b"P", mod_param)
-            }
-        }
-        2 => {
-            if mod_param.is_none() {
-                b"\x1bOQ".to_vec()
-            } else {
-                pty_xterm_cursor_seq(b"Q", mod_param)
-            }
-        }
-        3 => {
-            if mod_param.is_none() {
-                b"\x1bOR".to_vec()
-            } else {
-                pty_xterm_cursor_seq(b"R", mod_param)
-            }
-        }
-        4 => {
-            if mod_param.is_none() {
-                b"\x1bOS".to_vec()
-            } else {
-                pty_xterm_cursor_seq(b"S", mod_param)
-            }
-        }
-        5 => pty_xterm_seq(b"15", mod_param),
-        6 => pty_xterm_seq(b"17", mod_param),
-        7 => pty_xterm_seq(b"18", mod_param),
-        8 => pty_xterm_seq(b"19", mod_param),
-        9 => pty_xterm_seq(b"20", mod_param),
-        10 => pty_xterm_seq(b"21", mod_param),
-        11 => pty_xterm_seq(b"23", mod_param),
-        12 => pty_xterm_seq(b"24", mod_param),
-        _ => return None,
-    };
-    Some(bytes)
-}
-

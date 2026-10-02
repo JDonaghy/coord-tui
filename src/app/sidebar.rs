@@ -73,12 +73,7 @@ impl CoordApp {
         }
         SidebarPanel {
             id: WidgetId::new("sidebar-panel"),
-            toolbar: Some(Toolbar {
-                focused_index: None,
-                id: WidgetId::new("sidebar-action-bar"),
-                buttons,
-                bg: None,
-            }),
+            toolbar: Some(Toolbar::new(WidgetId::new("sidebar-action-bar")).with_buttons(buttons)),
             toolbar_height: Some(self.sidebar_action_bar_height(lh)),
         }
     }
@@ -375,12 +370,11 @@ impl CoordApp {
             | SidebarView::Approved => return None,
         };
 
-        Some(self.resolve_toolbar_icons(Toolbar {
-            focused_index: None,
-            id: WidgetId::new("panel-toolbar"),
-            buttons,
-            bg: None,
-        }))
+        Some(
+            self.resolve_toolbar_icons(
+                Toolbar::new(WidgetId::new("panel-toolbar")).with_buttons(buttons),
+            ),
+        )
     }
 
     /// Bake `icon_for_action`'s Nerd-Font glyph into every `toolbar:<verb>`

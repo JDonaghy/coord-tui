@@ -375,7 +375,7 @@ pub(crate) const ACTIVITY_PANELS: &[PanelIconSpec] = &[
     // view. One row per milestone/epic with ready / blocked / in-flight /
     // done counts, sourced from the server-computed `plan_roster` on
     // `/board`. The old `panel:milestones` id is still recognised in
-    // `on_shell_event` for backward-compat with users who had it pinned, but
+    // `route_panel_changed` for backward-compat with users who had it pinned, but
     // the button surfaces as "Plans" now.
     PanelIconSpec {
         id: "panel:plans",
@@ -3493,17 +3493,18 @@ pub struct CoordApp {
     /// panel header) in sync, instead of the two drifting apart the way a
     /// raw `self.active_view = ...` write left them.
     pending_panel_switch: Option<WidgetId>,
-    /// #1029 bug B (iter-2): marks the *next* `on_shell_event` as the
-    /// programmatic replay of a queued [`Self::pending_panel_switch`] rather
-    /// than a fresh operator mouse click. Set in
+    /// #1029 bug B (iter-2): marks the *next* `route_panel_changed` call as
+    /// the programmatic replay of a queued [`Self::pending_panel_switch`]
+    /// rather than a fresh operator mouse click. Set in
     /// [`ShellApp::take_requested_panel`] the moment quadraui pulls the
     /// queued panel (it always follows that pull with an
-    /// `on_shell_event(PanelChanged)` — see quadraui `apply_requested_panel`),
-    /// and consumed by `on_shell_event`. Needed because both a real
-    /// ActivityBar click *and* our own programmatic switch funnel through the
-    /// same `on_shell_event`, but only a real click should invalidate the
-    /// `terminal_return_view` bookmark — the programmatic replay of a
-    /// milestone-chat launch must leave the freshly-set bookmark intact.
+    /// `on_shell_event_ctx(PanelChanged)` — see quadraui
+    /// `apply_requested_panel`), and consumed by `route_panel_changed`.
+    /// Needed because both a real ActivityBar click *and* our own
+    /// programmatic switch funnel through the same `route_panel_changed`,
+    /// but only a real click should invalidate the `terminal_return_view`
+    /// bookmark — the programmatic replay of a milestone-chat launch must
+    /// leave the freshly-set bookmark intact.
     pending_switch_is_programmatic: bool,
     /// #1029 bug B fix: the view to restore on Esc-close of a standalone
     /// Terminal session that was launched *from* somewhere other than the
@@ -3516,8 +3517,8 @@ pub struct CoordApp {
     /// from an earlier, unrelated flow (iter-2 fix): (1) `switch_active_view`
     /// clears it on *every* view switch — including switches *into* Terminal
     /// for an unrelated reason (review/fix/merge/fleet/reattach); (2)
-    /// `on_shell_event` clears it on every real (non-programmatic) ActivityBar
-    /// click. The single site that legitimately wants a bookmark
+    /// `route_panel_changed` clears it on every real (non-programmatic)
+    /// ActivityBar click. The single site that legitimately wants a bookmark
     /// (`launch_milestone_chat_session`) re-sets it *after* switching, and its
     /// programmatic replay is skipped via `pending_switch_is_programmatic`.
     terminal_return_view: Option<SidebarView>,
@@ -4924,8 +4925,8 @@ impl CoordApp {
     /// Switch `active_view`, keeping quadraui's AppShell chrome (ActivityBar
     /// highlight + sidebar panel header) in sync (#1029 bug A).
     ///
-    /// `on_shell_event` (`render.rs`) already keeps the two in sync for a
-    /// switch the operator drove by clicking the ActivityBar — the shell
+    /// `route_panel_changed` (`render.rs`) already keeps the two in sync for
+    /// a switch the operator drove by clicking the ActivityBar — the shell
     /// tells us about those. It has no equivalent for the *other*
     /// direction: an action handler (e.g. `launch_milestone_chat_session`)
     /// that decides on its own to jump to a different panel. A raw
@@ -4938,7 +4939,7 @@ impl CoordApp {
     /// instead of writing `active_view` directly; it queues the panel id
     /// for `ShellApp::take_requested_panel` to hand back to quadraui, which
     /// applies it to the real `AppShell` state and re-fires
-    /// `on_shell_event` exactly as a click would.
+    /// `on_shell_event_ctx` exactly as a click would.
     ///
     /// `MilestoneDag` has no ActivityBar entry of its own (reached only as
     /// a Plans drill-down — see `SidebarView::panel_widget_id`), so

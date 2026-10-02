@@ -516,11 +516,11 @@ impl SidebarView {
     /// Plans; see the `#975` note on the `Plans` variant above).
     ///
     /// This is the inverse of the `panel_id_str` match in
-    /// `render.rs::on_shell_event`. `CoordApp::switch_active_view` (#1029
-    /// bug A) uses it to keep quadraui's ActivityBar highlight + sidebar
-    /// header in sync with a *programmatic* view switch — one not already
-    /// driven by an ActivityBar click, which `on_shell_event` already
-    /// handles correctly.
+    /// `render.rs::route_panel_changed`. `CoordApp::switch_active_view`
+    /// (#1029 bug A) uses it to keep quadraui's ActivityBar highlight +
+    /// sidebar header in sync with a *programmatic* view switch — one not
+    /// already driven by an ActivityBar click, which `route_panel_changed`
+    /// already handles correctly.
     pub(crate) fn panel_widget_id(self) -> Option<WidgetId> {
         match self {
             SidebarView::Board => Some(WidgetId::new("panel:board")),

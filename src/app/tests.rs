@@ -30744,7 +30744,7 @@
     fn shell_config_advertises_terminal_panel() {
         // The activity bar's "5th slot" must be the Terminal panel — if
         // the panel definition ever gets dropped, the activity-bar
-        // click → on_shell_event("panel:terminal") wire breaks
+        // click → route_panel_changed("panel:terminal") wire breaks
         // silently.
         let cfg = CoordApp::shell_config();
         assert!(
@@ -30759,11 +30759,11 @@
         // view onto the plan roster; it subsumes the older MilestoneDag
         // "Milestones" entry.  No keyboard shortcut exists (#782 removed all
         // numeric view-switch keys), so the activity-bar button is the ONLY
-        // entry point — if this panel definition or the on_shell_event route
-        // ever gets dropped, the whole view becomes unreachable with no test
-        // failure elsewhere.  The legacy `panel:milestones` id is still
-        // recognised by `on_shell_event` for back-compat but no longer needs
-        // its own activity-bar entry.
+        // entry point — if this panel definition or the route_panel_changed
+        // route ever gets dropped, the whole view becomes unreachable with
+        // no test failure elsewhere.  The legacy `panel:milestones` id is
+        // still recognised by `route_panel_changed` for back-compat but no
+        // longer needs its own activity-bar entry.
         let cfg = CoordApp::shell_config();
         assert!(
             cfg.panels.iter().any(|p| p.id.as_str() == "panel:plans"),
@@ -55620,17 +55620,15 @@ Milestone tracking issue.
         // whatever view happened to be active (or nothing at all).
         let mut app = make_test_app(BoardData::default());
         app.active_view = SidebarView::Board;
-        // `on_shell_event_ctx` (quadraui#617) is the non-deprecated hook,
-        // but it takes a `&ShellContext` that only `ShellAdapter` can
+        // `ShellApp::on_shell_event_ctx` (quadraui#617) is the real trait
+        // hook, but it takes a `&ShellContext` that only `ShellAdapter` can
         // construct — this test drives a bare `CoordApp` directly, with no
-        // driver/adapter in the loop, so there is no `ShellContext` to
-        // hand it. `CoordApp` doesn't override `on_shell_event_ctx` itself,
-        // so the default impl just forwards to this deprecated method
-        // anyway (see quadraui's own `#[allow(deprecated)]` forwarding
-        // wrapper) — calling it directly here is equivalent and the only
-        // option available without a live shell.
-        #[allow(deprecated)]
-        app.on_shell_event(&quadraui::AppShellEvent::PanelChanged {
+        // driver/adapter in the loop, so there is no `ShellContext` to hand
+        // it. `route_panel_changed` is the plain-method routing logic
+        // `on_shell_event_ctx` forwards to (quadraui#1109's migration off
+        // the deprecated one-argument `on_shell_event` — see its doc),
+        // callable here with no shell in the loop.
+        app.route_panel_changed(&quadraui::AppShellEvent::PanelChanged {
             panel_id: WidgetId::new("panel:usage"),
         });
         assert_eq!(

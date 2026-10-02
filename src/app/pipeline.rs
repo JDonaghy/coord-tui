@@ -7848,10 +7848,8 @@ impl CoordApp {
     /// share one definition and can't drift apart.
     pub(crate) fn pipeline_action_bar_toolbar(&self) -> Option<Toolbar> {
         let (label, _stage_idx) = self.pipeline_action_button()?;
-        Some(Toolbar {
-            focused_index: None,
-            id: WidgetId::new("pipeline-action-bar"),
-            buttons: vec![ToolbarButton::Action {
+        Some(Toolbar::new(WidgetId::new("pipeline-action-bar")).with_buttons(vec![
+            ToolbarButton::Action {
                 id: WidgetId::new("pipeline-action:dispatch"),
                 label: label.clone(),
                 // #80: no icon today (`None`, not a fallback character), so
@@ -7866,9 +7864,8 @@ impl CoordApp {
                     "Dispatch {} for the active stage (Enter)",
                     label.to_lowercase()
                 ),
-            }],
-            bg: None,
-        })
+            },
+        ]))
     }
 
     pub(crate) fn build_pipeline_widget(&self) -> Option<QuiPipelineView> {

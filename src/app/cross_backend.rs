@@ -275,8 +275,8 @@ fn board_panel_renders_its_rows<D: ConformanceDriver>(d: &mut D) {
 
 /// Clicking the Pipeline icon in the activity bar swaps the panel.
 ///
-/// Covers the whole click → hit-test → `on_shell_event` → repaint loop, which
-/// is the routing path most likely to be backend-specific.
+/// Covers the whole click → hit-test → `on_shell_event_ctx` → repaint loop,
+/// which is the routing path most likely to be backend-specific.
 fn activity_bar_switches_to_pipeline<D: ConformanceDriver>(d: &mut D) {
     assert!(
         d.screen_has(BOARD_TITLE) && !d.screen_has(PIPELINE_TITLE),

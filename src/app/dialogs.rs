@@ -6400,38 +6400,33 @@ impl CoordApp {
 
             // Action bar with Refine + New Issue buttons.
             let repo_known = repo.is_some();
-            let toolbar = Toolbar {
-                focused_index: None,
-                id: WidgetId::new("board-chat-cta"),
-                buttons: vec![
-                    ToolbarButton::Action {
-                        id: WidgetId::new("board-chat:refine"),
-                        label: "Refine".to_string(),
-                        // #80: `None` today (not the `icon_for_action`
-                        // "refine" fallback `✎`) — this CTA button has
-                        // never painted an icon, and giving it one now
-                        // (even a "flag off" fallback) would itself be the
-                        // visible flag-off change #80 promises not to make.
-                        icon: None,
-                        key_hint: Some("r".to_string()),
-                        enabled: repo_known,
-                        is_active: false,
-                        tooltip: "Start a board-level refinement chat for the selected repo"
-                            .to_string(),
-                    },
-                    ToolbarButton::Action {
-                        id: WidgetId::new("board-chat:new-issue"),
-                        label: "New Issue".to_string(),
-                        // #80: same reasoning as "board-chat:refine" above.
-                        icon: None,
-                        key_hint: Some("n".to_string()),
-                        enabled: repo_known,
-                        is_active: false,
-                        tooltip: "Draft a new issue with AI assistance".to_string(),
-                    },
-                ],
-                bg: None,
-            };
+            let toolbar = Toolbar::new(WidgetId::new("board-chat-cta")).with_buttons(vec![
+                ToolbarButton::Action {
+                    id: WidgetId::new("board-chat:refine"),
+                    label: "Refine".to_string(),
+                    // #80: `None` today (not the `icon_for_action`
+                    // "refine" fallback `✎`) — this CTA button has
+                    // never painted an icon, and giving it one now
+                    // (even a "flag off" fallback) would itself be the
+                    // visible flag-off change #80 promises not to make.
+                    icon: None,
+                    key_hint: Some("r".to_string()),
+                    enabled: repo_known,
+                    is_active: false,
+                    tooltip: "Start a board-level refinement chat for the selected repo"
+                        .to_string(),
+                },
+                ToolbarButton::Action {
+                    id: WidgetId::new("board-chat:new-issue"),
+                    label: "New Issue".to_string(),
+                    // #80: same reasoning as "board-chat:refine" above.
+                    icon: None,
+                    key_hint: Some("n".to_string()),
+                    enabled: repo_known,
+                    is_active: false,
+                    tooltip: "Draft a new issue with AI assistance".to_string(),
+                },
+            ]);
             backend.draw_toolbar_interactive(bar_rect, &toolbar, &InteractionState::new());
 
             // Descriptive text below the buttons.

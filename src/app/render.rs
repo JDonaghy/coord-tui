@@ -834,101 +834,30 @@ impl ShellApp for CoordApp {
     /// §2 (#782): Settings lives in `with_bottom_items`, so clicking it
     /// fires `AppShellEvent::BottomItemClicked { id }` rather than
     /// `PanelChanged`.  Both variants are handled here.
-    fn on_shell_event(&mut self, event: &AppShellEvent) {
-        // §3 (#782): any activity-bar navigation resets keyboard focus back
-        // to Sidebar so Ctrl-W h/l starts from a known state.
-        let panel_id_str = match event {
-            AppShellEvent::PanelChanged { panel_id } => panel_id.as_str(),
-            AppShellEvent::BottomItemClicked { id } => id.as_str(),
-            _ => return,
-        };
-        self.focused_region = FocusedRegion::Sidebar;
-        // #1029 bug B (iter-2): a *real* ActivityBar click is always a fresh,
-        // explicit operator choice, so it invalidates any pending
-        // "return to origin on Esc" bookmark — even a click that lands on
-        // Terminal (a plain visit with nothing to return to). The one
-        // exception is the programmatic replay of our own queued panel switch
-        // (`pending_panel_switch`): quadraui pulls it via
-        // `take_requested_panel` and immediately re-fires this handler as a
-        // `PanelChanged`, but that replay must NOT wipe the bookmark a
-        // milestone-chat launch just set. `take_requested_panel` flags that
-        // one replay; consume the flag here and skip the clear for it only.
-        if self.pending_switch_is_programmatic {
-            self.pending_switch_is_programmatic = false;
-        } else {
-            self.terminal_return_view = None;
-        }
-        self.active_view = match panel_id_str {
-            "panel:board" => SidebarView::Board,
-            "panel:machines" => SidebarView::Machines,
-            "panel:pipeline" => {
-                self.maybe_kick_pipeline_loader();
-                SidebarView::Pipeline
-            }
-            "panel:settings" => SidebarView::Settings,
-            "panel:terminal" => {
-                // #424: entering the Terminal view defaults to
-                // PTY-focused so the user can start typing
-                // immediately.  F12 releases focus back to the TUI chrome.
-                self.terminal_focused = true;
-                SidebarView::Terminal
-            }
-            // §1 (#782): Kanban + Merge Queue activity-bar panels.
-            "panel:kanban" => SidebarView::Kanban,
-            "panel:mergequeue" => SidebarView::MergeQueue,
-            // #975: Plans panel — the ActivityBar item now labelled "Plans"
-            // (see shell_config()).  Legacy `panel:milestones` id still
-            // routes here so users who had the old button pinned land on
-            // the new Plans panel (which subsumes MilestoneDag's roster
-            // view); the MilestoneDag view itself remains accessible as a
-            // future drill-down but no longer has its own top-level entry.
-            "panel:plans" | "panel:milestones" => SidebarView::Plans,
-            // #1032: Sessions panel — fleet-wide machine → repo → session tree.
-            "panel:sessions" => SidebarView::Sessions,
-            // #1039: Audit panel — newest-first audit-trail list.
-            "panel:audit" => SidebarView::Audit,
-            // #1741: Reports panel — catalogue-driven collapsible sections.
-            //
-            // #1763 retired the #1116 Usage panel: its per-issue/repo
-            // cost+token rollup is now the `usage` entry in the server-side
-            // report catalogue, priced from the daemon's own `pricing:`
-            // config instead of a compiled-in snapshot. The legacy
-            // `panel:usage` id still routes here — exactly as
-            // `panel:milestones` still routes to Plans after #975 — so an
-            // operator who had that button pinned lands on the panel that
-            // subsumed it rather than on a dead view.
-            "panel:reports" | "panel:usage" => SidebarView::Reports,
-            // #1866 (Q-1): Queue panel — the live drive-queue grid. Carries
-            // no fetch of its own (`/board` already ships `drive_queue`), so
-            // unlike `panel:pipeline` above there is nothing to kick here.
-            "panel:queue" => SidebarView::Queue,
-            // #2532: Approved work items panel — no fetch to kick, same as
-            // Queue immediately above (rows ride the existing `/board` poll).
-            "panel:approved" => SidebarView::Approved,
-            _ => return,
-        };
-        // #1124: the `?` help overlay / `/` command palette are scoped to
-        // whichever view opened them — a real ActivityBar click is always
-        // an explicit "leave this view" choice (same reasoning as the
-        // `terminal_return_view` clear above), so close them rather than
-        // let them silently bleed into the newly-active view's screen.
-        if self.help_overlay.is_open() {
-            self.help_overlay.close();
-        }
-        self.command_palette = None;
+    ///
+    /// quadraui#1109: this overrides `on_shell_event_ctx` (the
+    /// non-deprecated hook added by quadraui#617) rather than the
+    /// now-`#[deprecated]` one-argument `on_shell_event` — `ctx` is unused
+    /// here since this handler only tracks local `CoordApp` state, not
+    /// shell-state mutations. The routing logic itself lives in
+    /// `route_panel_changed` so it stays reachable from tests without a
+    /// live `ShellContext` (only `ShellAdapter` can construct one).
+    fn on_shell_event_ctx(&mut self, event: &AppShellEvent, _ctx: &ShellContext) {
+        self.route_panel_changed(event);
     }
 
     /// #1029 bug A: hand quadraui the panel queued by
     /// `CoordApp::switch_active_view`, if any. `ShellAdapter` applies it to
     /// the real `AppShell` state (ActivityBar highlight + sidebar header)
-    /// and re-fires `on_shell_event(PanelChanged)` — the same notification
-    /// a mouse click produces, so `on_shell_event` above stays the single
-    /// place `active_view` gets set from shell-driven switches.
+    /// and re-fires `on_shell_event_ctx(PanelChanged)` — the same
+    /// notification a mouse click produces, so `route_panel_changed` above
+    /// stays the single place `active_view` gets set from shell-driven
+    /// switches.
     fn take_requested_panel(&mut self) -> Option<WidgetId> {
         let panel = self.pending_panel_switch.take();
         // #1029 bug B (iter-2): quadraui always follows a non-None pull here
-        // with an `on_shell_event(PanelChanged)` replay (see quadraui
-        // `apply_requested_panel`). Flag that replay so `on_shell_event`
+        // with an `on_shell_event_ctx(PanelChanged)` replay (see quadraui
+        // `apply_requested_panel`). Flag that replay so `route_panel_changed`
         // treats it as programmatic — leaving any freshly-set
         // `terminal_return_view` bookmark intact — instead of as a fresh
         // operator click that would clear it.
@@ -1871,6 +1800,95 @@ fn push_markdown_prose_rows(rows: &mut Vec<ListItem>, text: &str, wrap_width: us
 // ─── Pipeline display methods ─────────────────────────────────────────────────
 
 impl CoordApp {
+    /// Routing logic behind [`ShellApp::on_shell_event_ctx`] — split into a
+    /// plain method (rather than inlined in the trait override) so tests
+    /// can drive it directly with no `ShellContext` in hand (only
+    /// `ShellAdapter` can construct one; see
+    /// `legacy_panel_usage_id_lands_on_reports_not_a_dead_view`).
+    pub(crate) fn route_panel_changed(&mut self, event: &AppShellEvent) {
+        // §3 (#782): any activity-bar navigation resets keyboard focus back
+        // to Sidebar so Ctrl-W h/l starts from a known state.
+        let panel_id_str = match event {
+            AppShellEvent::PanelChanged { panel_id } => panel_id.as_str(),
+            AppShellEvent::BottomItemClicked { id } => id.as_str(),
+            _ => return,
+        };
+        self.focused_region = FocusedRegion::Sidebar;
+        // #1029 bug B (iter-2): a *real* ActivityBar click is always a fresh,
+        // explicit operator choice, so it invalidates any pending
+        // "return to origin on Esc" bookmark — even a click that lands on
+        // Terminal (a plain visit with nothing to return to). The one
+        // exception is the programmatic replay of our own queued panel switch
+        // (`pending_panel_switch`): quadraui pulls it via
+        // `take_requested_panel` and immediately re-fires this handler as a
+        // `PanelChanged`, but that replay must NOT wipe the bookmark a
+        // milestone-chat launch just set. `take_requested_panel` flags that
+        // one replay; consume the flag here and skip the clear for it only.
+        if self.pending_switch_is_programmatic {
+            self.pending_switch_is_programmatic = false;
+        } else {
+            self.terminal_return_view = None;
+        }
+        self.active_view = match panel_id_str {
+            "panel:board" => SidebarView::Board,
+            "panel:machines" => SidebarView::Machines,
+            "panel:pipeline" => {
+                self.maybe_kick_pipeline_loader();
+                SidebarView::Pipeline
+            }
+            "panel:settings" => SidebarView::Settings,
+            "panel:terminal" => {
+                // #424: entering the Terminal view defaults to
+                // PTY-focused so the user can start typing
+                // immediately.  F12 releases focus back to the TUI chrome.
+                self.terminal_focused = true;
+                SidebarView::Terminal
+            }
+            // §1 (#782): Kanban + Merge Queue activity-bar panels.
+            "panel:kanban" => SidebarView::Kanban,
+            "panel:mergequeue" => SidebarView::MergeQueue,
+            // #975: Plans panel — the ActivityBar item now labelled "Plans"
+            // (see shell_config()).  Legacy `panel:milestones` id still
+            // routes here so users who had the old button pinned land on
+            // the new Plans panel (which subsumes MilestoneDag's roster
+            // view); the MilestoneDag view itself remains accessible as a
+            // future drill-down but no longer has its own top-level entry.
+            "panel:plans" | "panel:milestones" => SidebarView::Plans,
+            // #1032: Sessions panel — fleet-wide machine → repo → session tree.
+            "panel:sessions" => SidebarView::Sessions,
+            // #1039: Audit panel — newest-first audit-trail list.
+            "panel:audit" => SidebarView::Audit,
+            // #1741: Reports panel — catalogue-driven collapsible sections.
+            //
+            // #1763 retired the #1116 Usage panel: its per-issue/repo
+            // cost+token rollup is now the `usage` entry in the server-side
+            // report catalogue, priced from the daemon's own `pricing:`
+            // config instead of a compiled-in snapshot. The legacy
+            // `panel:usage` id still routes here — exactly as
+            // `panel:milestones` still routes to Plans after #975 — so an
+            // operator who had that button pinned lands on the panel that
+            // subsumed it rather than on a dead view.
+            "panel:reports" | "panel:usage" => SidebarView::Reports,
+            // #1866 (Q-1): Queue panel — the live drive-queue grid. Carries
+            // no fetch of its own (`/board` already ships `drive_queue`), so
+            // unlike `panel:pipeline` above there is nothing to kick here.
+            "panel:queue" => SidebarView::Queue,
+            // #2532: Approved work items panel — no fetch to kick, same as
+            // Queue immediately above (rows ride the existing `/board` poll).
+            "panel:approved" => SidebarView::Approved,
+            _ => return,
+        };
+        // #1124: the `?` help overlay / `/` command palette are scoped to
+        // whichever view opened them — a real ActivityBar click is always
+        // an explicit "leave this view" choice (same reasoning as the
+        // `terminal_return_view` clear above), so close them rather than
+        // let them silently bleed into the newly-active view's screen.
+        if self.help_overlay.is_open() {
+            self.help_overlay.close();
+        }
+        self.command_palette = None;
+    }
+
     /// #81: reconcile the live `AppShell`'s activity-bar rows with the
     /// current `nerd_font_icons` setting.
     ///

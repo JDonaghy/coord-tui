@@ -74,7 +74,7 @@ test-support = []
 # quadraui checkout during co-development (a one-line, opt-in
 # `.cargo/config.toml` `paths` override — see
 # `tui/cargo-config-local-quadraui.toml.example`).
-quadraui = { git = "https://github.com/JDonaghy/quadraui", rev = "81a9656d5492b16e49da56f407aff4121ee26877", features = ["terminal"] }
+quadraui = { git = "https://github.com/JDonaghy/quadraui", rev = "ca7fcc83afad01ec3422f79366566f3a263b22bf", features = ["terminal"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

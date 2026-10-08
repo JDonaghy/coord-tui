@@ -1,20 +1,21 @@
-# #1973: opt-in local co-development override.
+# #1973 / #121: opt-in local co-development override.
 #
-# Cargo.toml pins `quadraui` to a git rev (protects coord-tui merges
-# from an in-flight quadraui change). To build coord-tui against your
-# local ~/src/quadraui checkout instead — e.g. while co-developing a
-# quadraui feature a coord-tui task depends on — copy this file to
-# `.cargo/config.toml` (untracked; git-ignored) and adjust the path
-# if your checkout lives somewhere else:
+# Cargo.toml depends on `quadraui` from crates.io (`version = "0.1"`).
+# To build coord-tui against your local ~/src/quadraui checkout instead
+# — e.g. while co-developing a quadraui feature a coord-tui task
+# depends on — copy this file to `.cargo/config.toml` (untracked;
+# git-ignored) and adjust the path if your checkout lives somewhere
+# else:
 #
 #   mkdir -p .cargo
 #   cp cargo-config-local-quadraui.toml.example .cargo/config.toml
 #
 # Cargo's `paths` override matches the local package by name + version
-# (not by rev/source), so this works regardless of what rev is pinned
-# in Cargo.toml and regardless of what branch/commit is checked out
-# locally — no Cargo.toml edit required. Delete .cargo/config.toml
-# to go back to building against the pinned rev.
+# (not by source), so this works regardless of what branch/commit is
+# checked out locally, as long as the local crate's version satisfies
+# the `^0.1` requirement — no Cargo.toml edit required. Delete
+# .cargo/config.toml to go back to building against the published
+# crates.io release.
 #
 # Docs: https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html#local-paths-overrides
 

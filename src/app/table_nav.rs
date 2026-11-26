@@ -136,7 +136,8 @@ pub(crate) fn track_vscroll_offset(pointer_y: f32, track: Rect, item_count: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quadraui::{Column, ColumnAlign, ColumnMeasure, ColumnWidth, DataTable, WidgetId};
+    use crate::app::contract::native_column_width;
+    use quadraui::{Column, ColumnAlign, ColumnMeasure, DataTable, WidgetId};
 
     /// Build a real `DataTableLayout` via quadraui's own `DataTable::layout`
     /// — not hand-rolled — so these tests exercise exactly the fields
@@ -151,7 +152,7 @@ mod tests {
             id: WidgetId::new("table-nav-test"),
             columns: vec![Column {
                 title: "A".to_string(),
-                width: ColumnWidth::FixedCells(10.0),
+                width: native_column_width(10.0),
                 align: ColumnAlign::Left,
             }],
             rows: Vec::new(),

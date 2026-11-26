@@ -112,8 +112,7 @@ impl ShellApp for CoordApp {
                     self.board_sidebar.render(backend, sidebar_rect);
                 }
                 SidebarView::Machines => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.machines_list(true));
+                    draw_list_view(backend, sidebar_rect, &self.machines_list(true));
                 }
                 SidebarView::Pipeline => {
                     // #2452: stash the tree's painted geometry the same way
@@ -131,8 +130,7 @@ impl ShellApp for CoordApp {
                     // nav.  Render an empty placeholder list so the sidebar
                     // slot keeps a header (consistent with other views)
                     // without offering a misleading affordance.
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.settings_sidebar_placeholder());
+                    draw_list_view(backend, sidebar_rect, &self.settings_sidebar_placeholder());
                 }
                 SidebarView::Terminal => {
                     // #953: left-pane machine-grouped tree of open
@@ -141,23 +139,20 @@ impl ShellApp for CoordApp {
                     // above this tree, see `build_sidebar_action_panel`) —
                     // kill is still a follow-up. The main area remains a
                     // single PTY surface.
-                    // TODO(quadraui widget contract): legacy `Backend::draw_tree` — move to `DrawsPrimitives` when quadraui ports TreeView (list/tree/table group, quadraui #2609).
+                    // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_tree` — `TreeView` is on the contract, but its cell-grid `Primitive::layout` takes the rightmost column for a scrollbar whenever the rows overflow, which the legacy TUI paint never draws; move to `draw_dyn` once that reservation matches (or this sidebar adopts the scrollbar deliberately).
                     backend.draw_tree(sidebar_rect, &self.terminal_tree_view());
                 }
                 // #638: Kanban sidebar is a placeholder — all content is in the main panel.
                 SidebarView::Kanban => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.kanban_sidebar_placeholder());
+                    draw_list_view(backend, sidebar_rect, &self.kanban_sidebar_placeholder());
                 }
                 // #737: Merge Queue sidebar — entry count + attention indicator.
                 SidebarView::MergeQueue => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.merge_queue_sidebar());
+                    draw_list_view(backend, sidebar_rect, &self.merge_queue_sidebar());
                 }
                 // #771: Milestone DAG sidebar — milestone-with-work-order list.
                 SidebarView::MilestoneDag => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.milestone_dag_sidebar());
+                    draw_list_view(backend, sidebar_rect, &self.milestone_dag_sidebar());
                 }
                 // #1121: Plans sidebar — repo->plan tree (All repos + one
                 // node per configured repo, expandable to milestones), same
@@ -165,19 +160,18 @@ impl ShellApp for CoordApp {
                 // Sessions trees. Was a static plan-count `ListView`
                 // placeholder (#975) before this.
                 SidebarView::Plans => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_tree` — move to `DrawsPrimitives` when quadraui ports TreeView (list/tree/table group, quadraui #2609).
+                    // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_tree` — `TreeView` is on the contract, but its cell-grid `Primitive::layout` takes the rightmost column for a scrollbar whenever the rows overflow, which the legacy TUI paint never draws; move to `draw_dyn` once that reservation matches (or this sidebar adopts the scrollbar deliberately).
                     backend.draw_tree(sidebar_rect, &self.plans_tree_view());
                 }
                 // #1032: Sessions sidebar — machine → repo → session tree,
                 // same raw-`TreeView` pattern as the #953 Terminal tree.
                 SidebarView::Sessions => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_tree` — move to `DrawsPrimitives` when quadraui ports TreeView (list/tree/table group, quadraui #2609).
+                    // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_tree` — `TreeView` is on the contract, but its cell-grid `Primitive::layout` takes the rightmost column for a scrollbar whenever the rows overflow, which the legacy TUI paint never draws; move to `draw_dyn` once that reservation matches (or this sidebar adopts the scrollbar deliberately).
                     backend.draw_tree(sidebar_rect, &self.sessions_tree_view());
                 }
                 // #1039: Audit sidebar — entry count + "N recent" badge.
                 SidebarView::Audit => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.audit_sidebar());
+                    draw_list_view(backend, sidebar_rect, &self.audit_sidebar());
                 }
                 // #1911: Reports sidebar — one collapsible section per
                 // catalogue entry (parameters + Run), moved here from the
@@ -189,15 +183,13 @@ impl ShellApp for CoordApp {
                 // (running / waiting / blocked / held). The grid itself
                 // lives in the main panel.
                 SidebarView::Queue => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.queue_sidebar());
+                    draw_list_view(backend, sidebar_rect, &self.queue_sidebar());
                 }
                 // #2532: Approved work items sidebar — the aggregate
                 // reading ("N ready to pull" + the conditional "missing a
                 // repo mapping" warning line, contract §3b).
                 SidebarView::Approved => {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(sidebar_rect, &self.approved_sidebar());
+                    draw_list_view(backend, sidebar_rect, &self.approved_sidebar());
                 }
             }
         }
@@ -285,8 +277,7 @@ impl ShellApp for CoordApp {
                 let detail_h = (m.height - chart_h).max(0.0);
                 let detail_rect = Rect::new(m.x, m.y, m.width, detail_h);
                 let chart_rect = Rect::new(m.x, m.y + detail_h, m.width, chart_h);
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(detail_rect, &self.machine_detail_list());
+                draw_list_view(backend, detail_rect, &self.machine_detail_list());
                 self.render_machine_sparklines(backend, chart_rect, lh);
             }
             SidebarView::Settings => {
@@ -301,8 +292,7 @@ impl ShellApp for CoordApp {
                 // Watch overlay takes over the entire main panel when active —
                 // tabs, pipeline view, meta line all hidden while watching.
                 if self.pipeline_sel.is_none() && self.pipeline_issues.is_empty() {
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(m, &self.pipeline_placeholder_list());
+                    draw_list_view(backend, m, &self.pipeline_placeholder_list());
                 } else {
                     // #2284 (ms-65 §3a): Pipeline's `panel_toolbar()` returns
                     // `None` — `m` above is the untouched `full_m` — so the
@@ -408,8 +398,7 @@ impl ShellApp for CoordApp {
                                     // TODO(quadraui widget contract): legacy `Backend::draw_pipeline_view` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
                                     .draw_pipeline_view(pv_rect, &pipeline_view_for_render(&view));
                             } else {
-                                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                                backend.draw_list(pv_rect, &self.pipeline_placeholder_list());
+                                draw_list_view(backend, pv_rect, &self.pipeline_placeholder_list());
                             }
                             // #55: stash content width so stage_content_review /
                             // stage_content_test / stage_content_plan can
@@ -428,8 +417,7 @@ impl ShellApp for CoordApp {
                             // merge-block reason all land here, and until now
                             // nothing on this pane was selectable.
                             let tab_body_list = self.pipeline_tab_body_list();
-                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                            backend.draw_list(meta_rect, &tab_body_list);
+                            draw_list_view(backend, meta_rect, &tab_body_list);
                             register_list_text(backend, "pipeline-tab-body", meta_rect, &tab_body_list);
                         }
                         PipelineDetailTab::Issue => {
@@ -442,8 +430,7 @@ impl ShellApp for CoordApp {
                             self.last_issue_panel_cols
                                 .set((body_rect.width / backend.char_width().max(1.0)) as usize);
                             let issue_body_list = self.pipeline_issue_body_list();
-                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                            backend.draw_list(body_rect, &issue_body_list);
+                            draw_list_view(backend, body_rect, &issue_body_list);
                             // #79: issue body carries the raw GitHub issue
                             // text — ids, URLs, commands the operator needs
                             // to copy out. Id matches `pipeline_issue_body_list`'s
@@ -513,15 +500,14 @@ impl ShellApp for CoordApp {
                                     visible as f32,
                                     1.0,
                                 );
-                                // TODO(quadraui widget contract): legacy `Backend::draw_scrollbar` — move to `DrawsPrimitives` when quadraui ports Scrollbar (scrollbar group).
+                                // TODO(quadraui widget contract, scrollbar group): `Backend::draw_scrollbar` — `Scrollbar` is on the contract, but its pixel `Primitive::paint` paints at full opacity, dropping the GTK idle fade the legacy paint applies; move to `draw_dyn` once the contract paint honours the fade.
                                 backend.draw_scrollbar(sb_track, &vsb);
                                 Some(vsb)
                             } else {
                                 None
                             };
 
-                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                            backend.draw_list(list_rect, &log_list);
+                            draw_list_view(backend, list_rect, &log_list);
                             // #312/#79: register as a selectable TextRegion so
                             // the quadraui runtime handles click-drag line
                             // selection and Ctrl-C copy (OSC52 + arboard)
@@ -537,8 +523,7 @@ impl ShellApp for CoordApp {
                             // #558/#876: session-history summary sourced from
                             // the in-memory board.
                             let summary_list = self.pipeline_summary_list();
-                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                            backend.draw_list(summary_body, &summary_list);
+                            draw_list_view(backend, summary_body, &summary_list);
                             // #79: session-history rows carry assignment ids
                             // and machine hostnames the operator needs to copy.
                             register_list_text(backend, "pipeline-summary", summary_body, &summary_list);
@@ -647,8 +632,7 @@ impl ShellApp for CoordApp {
                             Color::rgb(180, 180, 180)
                         },
                     );
-                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                    backend.draw_list(
+                    draw_list_view(backend, 
                         term_rect,
                         &ListView {
                             id: WidgetId::new("terminal-placeholder"),
@@ -666,8 +650,7 @@ impl ShellApp for CoordApp {
                 }
                 // #790: paint the hint strip last so it sits below the
                 // terminal content.
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(hint_rect, &self.terminal_copy_hint_list());
+                draw_list_view(backend, hint_rect, &self.terminal_copy_hint_list());
             }
             // #638: Kanban view — render the Board widget into the full main rect.
             SidebarView::Kanban => {
@@ -692,8 +675,7 @@ impl ShellApp for CoordApp {
             // leaf (assignment id, issue/repo, machine, type, status).
             SidebarView::Sessions => {
                 let sessions_detail = self.sessions_detail_list();
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(m, &sessions_detail);
+                draw_list_view(backend, m, &sessions_detail);
                 // #79: assignment ids and machine hostnames here need to be
                 // copyable without retyping.
                 register_list_text(backend, "sessions-detail", m, &sessions_detail);
@@ -728,8 +710,7 @@ impl ShellApp for CoordApp {
         let chat_is_board = self.chat_is_board_chat();
         if let Some(ref chat) = self.inject_chat {
             if !chat_is_refinement && !chat_is_board {
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(
+                draw_list_view(backend, 
                     m,
                     &ListView {
                         id: WidgetId::new("chat-backing"),
@@ -1897,8 +1878,7 @@ impl CoordApp {
         // `terminal_return_view` clear above), so close them rather than
         // let them silently bleed into the newly-active view's screen.
         if self.help_overlay.is_open() {
-            // TODO(quadraui widget contract): deprecated `HelpOverlayController::close` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy HelpOverlay event enum.
-            self.help_overlay.close();
+            self.help_overlay.close_action();
         }
         self.command_palette = None;
     }
@@ -2185,8 +2165,7 @@ impl CoordApp {
         backend.draw_dyn(tab_rect, &tab_bar, &InteractionState::new());
         match self.board_pane_detail_tab() {
             BoardDetailTab::Board => {
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(content_rect, &self.detail_list());
+                draw_list_view(backend, content_rect, &self.detail_list());
             }
             BoardDetailTab::Issue => {
                 // #669: stash content width so board_issue_body_list can
@@ -2206,8 +2185,7 @@ impl CoordApp {
                 self.stash_board_pane_issue_cols(
                     (content_rect.width / backend.char_width().max(1.0)) as usize,
                 );
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(content_rect, &self.board_issue_body_list());
+                draw_list_view(backend, content_rect, &self.board_issue_body_list());
             }
             // #316: Chat tab — empty state CTA or live board chat.
             BoardDetailTab::Chat => {

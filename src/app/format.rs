@@ -187,7 +187,7 @@ pub(crate) fn format_unix_time(ts: f64) -> String {
     // `fmt_dur`'s largest unit is the hour, which is fine for a *duration*
     // (where the extra precision is the point) but unbounded for an *age*:
     // a year-old row rendered `9732h35m ago` — 12 columns of mostly noise.
-    // The Audit table's Time column is `ColumnWidth::Fixed(11.0)` (10 usable
+    // The Audit table's Time column is `native_column_width(11.0)` (10 usable
     // cells, see `audit_columns`), so `draw_data_table` clipped that to
     // `9732h35m …` and ate the `ago` suffix entirely, breaking #1039
     // contract §4a ("the relative-time column ... must contain `ago`").

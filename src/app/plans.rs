@@ -779,8 +779,7 @@ impl CoordApp {
                  `coord serve` daemon that supports it (v0.4.64+); connect via \
                  ~/.coord/client.toml, or upgrade + restart the daemon if already connected."
             };
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(list_rect, &plain_list("plans-empty", message, 0));
+            draw_list_view(backend, list_rect, &plain_list("plans-empty", message, 0));
             return;
         }
 
@@ -791,8 +790,7 @@ impl CoordApp {
             // states above, which are about the board as a whole.
             let repo = self.plans_scope_repo().unwrap_or_default();
             let message = format!("  No plans for {repo}.");
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(list_rect, &plain_list("plans-empty-scoped", &message, 0));
+            draw_list_view(backend, list_rect, &plain_list("plans-empty-scoped", &message, 0));
             return;
         }
 
@@ -1000,8 +998,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: total > 10,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(list_rect, &list);
+        draw_list_view(backend, list_rect, &list);
         // #79: milestone/epic titles and issue ids here need to be copyable
         // without retyping.
         register_list_text(backend, "plans-list", list_rect, &list);
@@ -1015,7 +1012,7 @@ impl CoordApp {
         vec![
             Column {
                 title: "#".to_string(),
-                width: ColumnWidth::FixedCells(8.0),
+                width: native_column_width(8.0),
                 align: ColumnAlign::Left,
             },
             Column {
@@ -1025,12 +1022,12 @@ impl CoordApp {
             },
             Column {
                 title: "Status".to_string(),
-                width: ColumnWidth::FixedCells(13.0),
+                width: native_column_width(13.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Order".to_string(),
-                width: ColumnWidth::FixedCells(16.0),
+                width: native_column_width(16.0),
                 align: ColumnAlign::Left,
             },
         ]
@@ -1305,8 +1302,7 @@ impl CoordApp {
             "  {}   (Esc to go back)",
             Self::plans_tree_row_label(entry),
         );
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(
+        draw_list_view(backend, 
             caption_rect,
             &ListView {
                 id: WidgetId::new("plans-grid-caption"),
@@ -1338,8 +1334,7 @@ impl CoordApp {
         let rows = self.plans_grid_rows(entry);
         if rows.is_empty() {
             *self.plans_grid_table.layout.borrow_mut() = None;
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(
+            draw_list_view(backend, 
                 grid_rect,
                 &plain_list("plans-grid-empty", "  No issues on this milestone.", 0),
             );
@@ -1361,7 +1356,7 @@ impl CoordApp {
             column_overrides: self.plans_grid_table.column_overrides.clone(),
             footer: None,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
         let layout = backend.draw_data_table(grid_rect, &table, None);
         *self.plans_grid_table.layout.borrow_mut() = Some((grid_rect, layout));
     }
@@ -1683,8 +1678,7 @@ impl CoordApp {
     /// for `build_action_row_line`.
     fn render_plan_detail_pane(&self, backend: &mut dyn Backend, rect: Rect, _lh: f32) {
         let Some(entry) = self.plans_selected() else {
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(
+            draw_list_view(backend, 
                 rect,
                 &plain_list("plans-detail-empty", "  No plan selected.", 0),
             );
@@ -1709,8 +1703,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: total > 10,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(rect, &list);
+        draw_list_view(backend, rect, &list);
         // #79: the work-order body carries branch names, PR URLs, and
         // command snippets the operator needs to copy without retyping.
         register_list_text(backend, "plans-detail", rect, &list);
@@ -1975,8 +1968,7 @@ impl CoordApp {
                 decoration: Decoration::Normal,
             });
         }
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(
+        draw_list_view(backend, 
             rect,
             &ListView {
                 id: WidgetId::new("plans-goal-header"),
@@ -2414,8 +2406,7 @@ impl CoordApp {
             usize::MAX
         };
         let total = items.len();
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(
+        draw_list_view(backend, 
             rect,
             &ListView {
                 id: WidgetId::new("help-overlay"),
@@ -2484,8 +2475,7 @@ impl CoordApp {
             (outer.width - 2.0).max(0.0),
             label_h,
         );
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(
+        draw_list_view(backend, 
             label_rect,
             &ListView {
                 id: WidgetId::new("command-palette-section-label"),

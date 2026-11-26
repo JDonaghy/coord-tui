@@ -4906,8 +4906,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: false,
         };
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` — a bordered list stays here because the contract `ListView` paint strokes no `bordered` frame on pixel backends (GTK); move to `draw_primitive` once it does.
-        backend.draw_list(modal_rect, &list);
+        draw_list_view(backend, modal_rect, &list);
     }
 
     /// #264: shell `coord refine-chat <repo> <issue>` and arm
@@ -6057,8 +6056,7 @@ impl CoordApp {
 
         // Modal background (reuse the refinement-notes-modal pattern).
         let modal_rect = shrink_rect(content_rect, lh * 2.0);
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` — a bordered list stays here because the contract `ListView` paint strokes no `bordered` frame on pixel backends (GTK); move to `draw_primitive` once it does.
-        backend.draw_list(
+        draw_list_view(backend, 
             modal_rect,
             &ListView {
                 id: WidgetId::new("file-issue-modal-bg"),
@@ -6444,8 +6442,7 @@ impl CoordApp {
         let lh = backend.line_height();
         if self.chat_is_board_chat() {
             // Draw an opaque backing so the empty transcript area doesn't bleed through.
-            // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` — a bordered list stays here because the contract `ListView` paint strokes no `bordered` frame on pixel backends (GTK); move to `draw_primitive` once it does.
-            backend.draw_list(
+            draw_list_view(backend, 
                 content_rect,
                 &ListView {
                     id: WidgetId::new("board-chat-tab-bg"),

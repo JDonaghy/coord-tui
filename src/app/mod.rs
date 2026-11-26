@@ -39,7 +39,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 
 use quadraui::compose::app_shell::{AppShellEvent, AppShellLayout, PanelDefinition};
-use quadraui::compose::form_controller::{FormController, FormControllerEvent};
+use quadraui::compose::form_controller::{FormController, FormControllerAction};
 use quadraui::compose::sidebar_system::{
     NavigationMode, SidebarEvent, SidebarSectionDef, SidebarSystem,
 };
@@ -55,7 +55,7 @@ use crate::settings::{
 };
 use quadraui::accelerator::{parse_key_binding, ParsedBinding};
 use quadraui::{
-    Backend, Badge, Chart, ChartKind, ChatController, ChatControllerEvent, ChatRole, ChatTurn,
+    Backend, Badge, Chart, ChartKind, ChatController, ChatControllerAction, ChatRole, ChatTurn,
     Color, Decoration,
     Dialog, DialogButton, DialogHit, DialogInput, DialogLayout, DialogMeasure,
     DialogSeverity, DialogTextInput,
@@ -107,8 +107,8 @@ use quadraui::{
     SelectionMode, TreePath, TreeStyle, TreeView,
     // #1124: reusable quadraui help layer (#431) — `?` cheatsheet registry
     // + `/` command palette. See `plans.rs` module docs.
-    DualModePaletteController, DualModePaletteEvent, HelpAction, HelpNote, HelpOverlayController,
-    HelpOverlayEvent, HelpRegistry, ViewHelp, filter_help_actions, help_actions_to_palette_items,
+    DualModePaletteAction, DualModePaletteController, HelpAction, HelpNote, HelpOverlayController,
+    Handled, HelpOverlayAction, HelpRegistry, ViewHelp, filter_help_actions, help_actions_to_palette_items,
     PALETTE_CHROME_ROWS,
     // #2288 (ms-65 §9): the side-by-side pane split. `SplitTreeLayout` is
     // the geometry both the paint (`paint_board_pane_dividers`) and the
@@ -194,7 +194,10 @@ use self::doc_tabs::{
     PANE_DIVIDER_CHAR, SCROLL_LEFT_MARKER, SCROLL_RIGHT_MARKER, SPLIT_DOC_TAB_LABEL_COLS,
 };
 #[allow(unused_imports)]
-use self::contract::{draw_placed_context_menu, draw_placed_dialog, toolbar_hover};
+use self::contract::{
+    draw_list_view, draw_placed_context_menu, draw_placed_dialog, native_column_width,
+    toolbar_hover,
+};
 #[allow(unused_imports)]
 use quadraui::DrawsPrimitives;
 #[allow(unused_imports)]
@@ -1431,7 +1434,7 @@ fn kv_item(key: &str, val: &str, val_color: Option<Color>) -> ListItem {
 /// (OSC52 + system clipboard) — the same mechanism `render.rs`'s Pipeline
 /// Log tab has used alone since #312.
 ///
-/// Call this immediately after the matching `backend.draw_list(rect, list)`
+/// Call this immediately after the matching `draw_list_view(backend, rect, list)`
 /// (same `rect`, same `list`) for every **read-only** content pane that
 /// shows identifiers, URLs, commands, or log text — the TUI backend hit-tests
 /// `TextRegion`s to start a selection drag, so a pane with no registered
@@ -9708,8 +9711,7 @@ impl CoordApp {
             return;
         }
         let row = Rect::new(area.x, area.y, area.width, lh);
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(row, &ListView {
+        draw_list_view(backend, row, &ListView {
             id: WidgetId::new("metrics-unavailable"),
             title: None,
             items: vec![ListItem {

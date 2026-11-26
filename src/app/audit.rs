@@ -185,17 +185,17 @@ impl CoordApp {
         vec![
             Column {
                 title: "Time".to_string(),
-                width: ColumnWidth::FixedCells(11.0),
+                width: native_column_width(11.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Category".to_string(),
-                width: ColumnWidth::FixedCells(9.0),
+                width: native_column_width(9.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Actor".to_string(),
-                width: ColumnWidth::FixedCells(12.0),
+                width: native_column_width(12.0),
                 align: ColumnAlign::Left,
             },
             Column {
@@ -314,8 +314,7 @@ impl CoordApp {
             } else {
                 "  No audit events yet.".to_string()
             };
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(rect, &plain_list("audit-empty", &message, 0));
+            draw_list_view(backend, rect, &plain_list("audit-empty", &message, 0));
             return;
         }
 
@@ -360,7 +359,7 @@ impl CoordApp {
             // #1094: the audit table has no pinned summary row.
             footer: None,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
         let layout = backend.draw_data_table(list_rect, &table, None);
         // #70: cache the rect alongside the layout (mirrors
         // `reports_table_layout`) so hit-testing/scrolling/resize-drag no
@@ -370,8 +369,7 @@ impl CoordApp {
 
         if let Some(detail_rect) = detail_rect {
             if let Some(entry) = self.audit_selected() {
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(
+                draw_list_view(backend, 
                     detail_rect,
                     &ListView {
                         id: WidgetId::new("audit-detail"),

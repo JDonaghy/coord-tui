@@ -699,22 +699,18 @@ impl CoordApp {
                 } else {
                     10
                 };
-                // TODO(quadraui widget contract): deprecated `DualModePaletteController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Palette event enum.
-                match picker.handle(&event, visible_rows) {
-                    DualModePaletteEvent::Cancelled => {}
-                    DualModePaletteEvent::ItemConfirmed { idx } => {
+                match picker.handle_event(&event, visible_rows) {
+                    Handled::Event(DualModePaletteAction::Cancelled) => {}
+                    Handled::Event(DualModePaletteAction::ItemConfirmed { idx }) => {
                         let query = picker.query().to_string();
                         self.confirm_issue_finder(idx, &query);
                     }
-                    DualModePaletteEvent::QueryChanged { value } => {
+                    Handled::Event(DualModePaletteAction::QueryChanged { value }) => {
                         let items = self.issue_finder_items(&value);
                         picker.set_items(items);
                         self.issue_finder = Some(picker);
                     }
-                    DualModePaletteEvent::TextConfirmed { .. }
-                    | DualModePaletteEvent::ModeToggled { .. }
-                    | DualModePaletteEvent::Consumed
-                    | DualModePaletteEvent::Ignored => {
+                    Handled::Event(_) | Handled::Consumed | Handled::Ignored => {
                         self.issue_finder = Some(picker);
                     }
                 }
@@ -778,23 +774,19 @@ impl CoordApp {
                 } else {
                     10
                 };
-                // TODO(quadraui widget contract): deprecated `DualModePaletteController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Palette event enum.
-                match picker.palette.handle(&event, visible_rows) {
-                    DualModePaletteEvent::Cancelled => {}
-                    DualModePaletteEvent::ItemConfirmed { idx } => {
+                match picker.palette.handle_event(&event, visible_rows) {
+                    Handled::Event(DualModePaletteAction::Cancelled) => {}
+                    Handled::Event(DualModePaletteAction::ItemConfirmed { idx }) => {
                         let query = picker.palette.query().to_string();
                         self.confirm_doc_tab_picker(picker.scope, picker.pane, idx, &query);
                     }
-                    DualModePaletteEvent::QueryChanged { value } => {
+                    Handled::Event(DualModePaletteAction::QueryChanged { value }) => {
                         let items =
                             self.doc_tab_picker_items_for(picker.scope, picker.pane, &value);
                         picker.palette.set_items(items);
                         self.doc_tab_picker = Some(picker);
                     }
-                    DualModePaletteEvent::TextConfirmed { .. }
-                    | DualModePaletteEvent::ModeToggled { .. }
-                    | DualModePaletteEvent::Consumed
-                    | DualModePaletteEvent::Ignored => {
+                    Handled::Event(_) | Handled::Consumed | Handled::Ignored => {
                         self.doc_tab_picker = Some(picker);
                     }
                 }
@@ -860,10 +852,9 @@ impl CoordApp {
                     } else {
                         10
                     };
-                    // TODO(quadraui widget contract): deprecated `DualModePaletteController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Palette event enum.
-                    match palette.handle(&event, visible_rows) {
-                        DualModePaletteEvent::Cancelled => {}
-                        DualModePaletteEvent::ItemConfirmed { idx } => {
+                    match palette.handle_event(&event, visible_rows) {
+                        Handled::Event(DualModePaletteAction::Cancelled) => {}
+                        Handled::Event(DualModePaletteAction::ItemConfirmed { idx }) => {
                             let query = palette.query().to_string();
                             let matched = self.active_view_command_actions(&query);
                             if let Some(action) = matched.get(idx) {
@@ -871,15 +862,12 @@ impl CoordApp {
                                 self.activate_command_palette_action(&action_id);
                             }
                         }
-                        DualModePaletteEvent::QueryChanged { value } => {
+                        Handled::Event(DualModePaletteAction::QueryChanged { value }) => {
                             let matched = self.active_view_command_actions(&value);
                             palette.set_items(help_actions_to_palette_items(&matched, &value));
                             self.command_palette = Some(palette);
                         }
-                        DualModePaletteEvent::TextConfirmed { .. }
-                        | DualModePaletteEvent::ModeToggled { .. }
-                        | DualModePaletteEvent::Consumed
-                        | DualModePaletteEvent::Ignored => {
+                        Handled::Event(_) | Handled::Consumed | Handled::Ignored => {
                             self.command_palette = Some(palette);
                         }
                     }
@@ -901,14 +889,11 @@ impl CoordApp {
             // open, it's the only modal — `any_blocking_modal_active()`
             // is true only because of `help_overlay` itself).
             if self.help_overlay.is_open() || !self.any_blocking_modal_active() {
-                // TODO(quadraui widget contract): deprecated `HelpOverlayController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy HelpOverlay event enum.
-                match self.help_overlay.handle(&event) {
-                    HelpOverlayEvent::Opened
-                    | HelpOverlayEvent::Closed
-                    | HelpOverlayEvent::Consumed => {
+                match self.help_overlay.handle_event(&event) {
+                    Handled::Event(HelpOverlayAction::Opened | HelpOverlayAction::Closed) | Handled::Consumed => {
                         return Reaction::Redraw;
                     }
-                    HelpOverlayEvent::Ignored => {}
+                    Handled::Ignored => {}
                 }
             }
 
@@ -1199,13 +1184,12 @@ impl CoordApp {
                     .inject_chat
                     .as_mut()
                     .unwrap()
-                    // TODO(quadraui widget contract): deprecated `ChatController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Chat event enum.
-                    .handle(&event, backend, main_rect);
+                    .handle_event(&event, backend, main_rect);
                 match result {
-                    ChatControllerEvent::Submit { text } => {
+                    Handled::Event(ChatControllerAction::Submit { text }) => {
                         self.submit_inject(text);
                     }
-                    ChatControllerEvent::Cancelled => {
+                    Handled::Event(ChatControllerAction::Cancelled) => {
                         // Worker-guidance chat: Esc just closes the modal
                         // (worker keeps running because the user is
                         // mid-task).
@@ -5695,10 +5679,9 @@ impl CoordApp {
             let result = self
                 .settings_form
                 .borrow_mut()
-                // TODO(quadraui widget contract): deprecated `FormController::handle_cached` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Form event enum.
-                .handle_cached(&click_event, main_b);
+                .handle_cached_event(&click_event, main_b);
             match result {
-                FormControllerEvent::FormAction(ref form_event) => {
+                Handled::Event(FormControllerAction::FormAction(ref form_event)) => {
                     // Sync keyboard focus indicator to the clicked field so
                     // keyboard navigation picks up from where the mouse clicked.
                     let clicked_id = match form_event {
@@ -5717,8 +5700,8 @@ impl CoordApp {
                     }
                     return changed;
                 }
-                FormControllerEvent::ScrollChanged | FormControllerEvent::Consumed => return true,
-                FormControllerEvent::Ignored => return false,
+                Handled::Event(FormControllerAction::ScrollChanged) | Handled::Consumed => return true,
+                Handled::Ignored => return false,
             }
         }
         if self.active_view == SidebarView::Board {
@@ -6875,10 +6858,10 @@ impl CoordApp {
                     position: Point::new(0.0, 0.0),
                     delta,
                 };
-                self.settings_form
+                let _ = self
+                    .settings_form
                     .borrow_mut()
-                    // TODO(quadraui widget contract): deprecated `FormController::handle_cached` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Form event enum.
-                    .handle_cached(&scroll_event, main_b);
+                    .handle_cached_event(&scroll_event, main_b);
                 true
             }
             // #454: Terminal pane — forward scroll wheel to the PTY when

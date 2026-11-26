@@ -2761,8 +2761,7 @@ impl CoordApp {
                 // A bad control value is stated, not swallowed: rendering an
                 // empty grid for an unparseable `until` reads identically to
                 // "nothing completed", which is the wrong answer.
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(
+                draw_list_view(backend, 
                     body_rect,
                     &plain_list("completed-error", &format!("  {reason}"), 0),
                 );
@@ -2770,8 +2769,7 @@ impl CoordApp {
             }
         };
         if rows.is_empty() {
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(
+            draw_list_view(backend, 
                 body_rect,
                 &plain_list(
                     "completed-empty",
@@ -2816,7 +2814,7 @@ impl CoordApp {
             column_overrides: self.completed_grid.table.column_overrides.clone(),
             footer: None,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
         let layout = backend.draw_data_table(body_rect, &table, None);
         *self.completed_grid.table.layout.borrow_mut() = Some((body_rect, layout));
     }
@@ -2852,8 +2850,7 @@ impl CoordApp {
             }
             None => Self::COMPLETED_DETAIL_BACK_HINT.to_string(),
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(
+        draw_list_view(backend, 
             Rect::new(rect.x, rect.y, rect.width, back_h),
             &Self::completed_caption_list("completed-detail-back", &caption),
         );
@@ -2873,11 +2870,9 @@ impl CoordApp {
                 // see `render.rs`'s matching comment on the Overview arm's stash.
                 self.last_stage_content_cols
                     .set((body_rect.width / backend.char_width().max(1.0)) as usize);
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(body_rect, &self.pipeline_tab_body_list_for(Some(idx)))
+                draw_list_view(backend, body_rect, &self.pipeline_tab_body_list_for(Some(idx)))
             }
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            None => backend.draw_list(
+            None => draw_list_view(backend, 
                 body_rect,
                 &plain_list(
                     "completed-detail-missing",
@@ -3844,8 +3839,7 @@ impl CoordApp {
 
         // Empty-state: no staging AND no queue entries.
         if n == 0 && staging.is_empty() {
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(rect, &plain_list(
+            draw_list_view(backend, rect, &plain_list(
                 "mergequeue-empty",
                 "  No merge-queue entries — run `coord merge` to populate the queue.",
                 0,
@@ -3978,8 +3972,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: total > 10,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(rect, &list);
+        draw_list_view(backend, rect, &list);
         // #79: PR numbers, branch names, and block reasons in this list all
         // need to be copyable without retyping.
         register_list_text(backend, "mergequeue-list", rect, &list);
@@ -4156,8 +4149,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: total > 10,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(rect, &list);
+        draw_list_view(backend, rect, &list);
         // #79: PR numbers, branch names, and block reasons in this list all
         // need to be copyable without retyping.
         register_list_text(backend, "mergequeue-list", rect, &list);

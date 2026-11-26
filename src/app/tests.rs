@@ -259,7 +259,7 @@
     // `fmt_dur`'s largest unit is the hour, which is right for a *duration*
     // but unbounded for an *age*: a year-old timestamp rendered
     // `9732h35m ago` (12 cells) and got clipped to `9732h35m …` in the Audit
-    // Time column (`ColumnWidth::Fixed(11.0)` -> 10 usable), losing the `ago`
+    // Time column (`native_column_width(11.0)` -> 10 usable), losing the `ago`
     // suffix #1039 contract §4a requires. Ages now roll up to whole days.
     //
     // Helper: build a ts that is exactly `age_secs` in the past.
@@ -49430,7 +49430,7 @@ Milestone tracking issue.
     /// (`tests/acceptance/ms-33/audit_1039.rs`) pins *absolute* 2025
     /// timestamps, and as wall-clock drifted past them `format_unix_time`
     /// grew an unbounded hour count: `9732h35m ago`, 12 cells wide. The Time
-    /// column is `ColumnWidth::Fixed(11.0)` (10 usable), so `draw_data_table`
+    /// column is `native_column_width(11.0)` (10 usable), so `draw_data_table`
     /// clipped it to `9732h35m …` and the `ago` suffix vanished — a
     /// time-bomb failure of #1039 contract §4a that no commit introduced.
     ///
@@ -58311,7 +58311,7 @@ Milestone tracking issue.
             .nth(1)
             .expect("the Queue grid's DataTable literal must exist");
         let window = after_grid
-            // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
+            // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
             .split("backend.draw_data_table(list_rect, &table, None)")
             .next()
             .unwrap_or(after_grid);
@@ -63664,6 +63664,31 @@ Milestone tracking issue.
              be retracted, not applied on the way past:\n{}",
             driver.screen()
         );
+    }
+
+    /// At the narrowest split the Board ships (120 columns, `Ctrl-W v`), the
+    /// left pane's sub-tab bar still paints every sub-tab, `Terminal` last,
+    /// left of the pane divider. Each contract-painted sub-tab carries a
+    /// trailing `│` separator, so this is the width the bar runs out first.
+    #[test]
+    fn split_left_pane_sub_tab_bar_fits_every_sub_tab_at_120_columns() {
+        let driver = split_board_driver();
+        let col = divider_column(&driver);
+        let screen = driver.screen();
+        let row = screen
+            .lines()
+            .find(|line| {
+                let left: String = line.chars().take(col).collect();
+                left.contains("Board Chat")
+            })
+            .map(|line| line.chars().take(col).collect::<String>())
+            .unwrap_or_else(|| panic!("the left pane must paint its sub-tab bar:\n{screen}"));
+        for label in ["Board", "Issue", "Board Chat", "Terminal"] {
+            assert!(
+                row.contains(label),
+                "sub-tab `{label}` must fit left of the divider (column {col}): {row:?}\n{screen}"
+            );
+        }
     }
 
     /// §9 — the panel toolbar is panel-scoped: it spans the full width

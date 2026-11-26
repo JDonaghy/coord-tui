@@ -3015,15 +3015,13 @@ impl CoordApp {
                     rect.width,
                     rect.height - term_rect.height,
                 );
-                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-                backend.draw_list(hint_rect, &app.terminal_copy_hint_list());
+                draw_list_view(backend, hint_rect, &app.terminal_copy_hint_list());
             }
         };
 
         let Some(issue_key) = self.selected_issue_key() else {
             // No issue selected — show a neutral placeholder.
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(
+            draw_list_view(backend, 
                 term_rect,
                 &ListView {
                     id: WidgetId::new("detail-terminal-no-issue"),
@@ -3069,8 +3067,7 @@ impl CoordApp {
                     Color::rgb(180, 180, 180),
                 ),
             };
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(
+            draw_list_view(backend, 
                 term_rect,
                 &ListView {
                     id: WidgetId::new("detail-terminal-placeholder"),

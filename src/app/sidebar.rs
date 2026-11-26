@@ -755,16 +755,24 @@ pub(crate) fn icon_for_action(action_id: &str) -> Option<Icon> {
 ///
 /// TODO(quadraui SidebarSystem / list-tree-table group #2609): on a cell
 /// backend `SidebarSystem::handle` sizes a branch row's chevron hit region
-/// with the pixel formula `row_padding_x + indent * indent_px + glyph_w + 4`,
-/// and `row_padding_x` is now `Style::default().row_padding_x` (8) where it
-/// used to be 2. With `line_height` 1 that widens the region from
-/// `[0, 6.65 + indent)` to `[0, 12.65 + indent)` cells, so a click well into a
-/// branch row's title toggles it instead of selecting it. On a cell backend
-/// (`line_height() <= 1`) this turns a `RowToggleExpand` whose click lands
+/// with the pixel `layout_metrics::tree_layout` at
+/// `Style::default().row_padding_x` (8), where it used to use 2. With
+/// `line_height` 1 that widens the region from `[0, 6.65 + indent)` to
+/// `[0, 12.65 + indent)` cells, so a click well into a branch row's title
+/// toggles it instead of selecting it. On a cell grid
+/// (`Backend::cell_grid`) this turns a `RowToggleExpand` whose click lands
 /// past the original region back into the `RowSelected` the same click
 /// produced before. `SidebarSystem` has already selected the row for both
 /// outcomes, so only the event changes. Pixel backends and every other event
-/// pass through untouched.
+/// pass through untouched. Remove once `SidebarSystem` sizes chevrons from
+/// the cell tree geometry.
+///
+/// The region comes from quadraui's own `layout_metrics::tree_layout`
+/// (at the original 2-cell padding), so it follows any change to quadraui's
+/// chevron formula. It is measured from `rect.x`, while `SidebarSystem`
+/// measures from the section body's x; on a cell grid a vertical
+/// `MultiSectionView` gives every section body the sidebar's own x, which
+/// `sidebar_tests::cell_msv_section_bodies_start_at_the_sidebar_x` pins.
 pub(crate) fn tui_chevron_click_guard(
     result: SidebarEvent,
     event: &UiEvent,
@@ -772,8 +780,7 @@ pub(crate) fn tui_chevron_click_guard(
     backend: &dyn Backend,
     branch_indents: &std::collections::HashMap<(usize, TreePath), u16>,
 ) -> SidebarEvent {
-    let lh = backend.line_height();
-    if lh > 1.0 {
+    if !backend.cell_grid() {
         return result;
     }
     let UiEvent::MouseDown {
@@ -790,14 +797,131 @@ pub(crate) fn tui_chevron_click_guard(
     let Some(&indent) = branch_indents.get(&(section, path.clone())) else {
         return result;
     };
-    let indent_px = (lh * 0.9).round();
-    let chevron_end_x = 2.0 + indent as f32 * indent_px + lh * 0.65 + 4.0;
+    let Some(chevron_end_x) = original_chevron_end_x(indent, backend.line_height()) else {
+        return result;
+    };
     if position.x - rect.x < chevron_end_x {
         result
     } else {
         SidebarEvent::RowSelected {
             section,
             path: path.clone(),
+        }
+    }
+}
+
+/// Row padding `SidebarSystem` sized cell-backend chevron hit regions with
+/// before it moved to `Style::default().row_padding_x`.
+const ORIGINAL_SIDEBAR_ROW_PADDING_X: f32 = 2.0;
+
+/// The right edge (relative to the tree's x) of the chevron hit region a
+/// collapsed branch row at `indent` had, from quadraui's own tree layout at
+/// [`ORIGINAL_SIDEBAR_ROW_PADDING_X`].
+fn original_chevron_end_x(indent: u16, line_height: f32) -> Option<f32> {
+    let tree = TreeView {
+        id: WidgetId::new("chevron-probe"),
+        rows: vec![TreeRow {
+            path: vec![0],
+            indent,
+            icon: None,
+            text: StyledText::plain("x"),
+            badge: None,
+            is_expanded: Some(false),
+            decoration: Decoration::Normal,
+            edit: None,
+        }],
+        selection_mode: SelectionMode::Single,
+        selected_path: None,
+        scroll_offset: 0,
+        style: Default::default(),
+        has_focus: false,
+    };
+    let area = Rect::new(0.0, 0.0, 10_000.0, line_height * 4.0);
+    let layout = quadraui::primitives::layout_metrics::tree_layout(
+        &tree,
+        area,
+        line_height as f64,
+        ORIGINAL_SIDEBAR_ROW_PADDING_X,
+    );
+    layout.hit_regions.iter().find_map(|(r, hit)| {
+        matches!(hit, quadraui::TreeViewHit::Chevron(0)).then_some(r.x + r.width)
+    })
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+    use quadraui::{
+        MsvAxis, MultiSectionView, ScrollMode, Section, SectionBody, SectionHeader, SectionSize,
+    };
+
+    fn tree_section(id: &str, size: SectionSize) -> Section {
+        Section {
+            id: id.into(),
+            header: SectionHeader {
+                title: StyledText::plain(id),
+                show_chevron: true,
+                ..Default::default()
+            },
+            body: SectionBody::Tree(TreeView {
+                id: WidgetId::new(format!("{id}-tree")),
+                rows: Vec::new(),
+                selection_mode: SelectionMode::Single,
+                selected_path: None,
+                scroll_offset: 0,
+                style: Default::default(),
+                has_focus: false,
+            }),
+            aux: None,
+            size,
+            collapsed: false,
+            min_size: None,
+            max_size: None,
+        }
+    }
+
+    /// `tui_chevron_click_guard` measures click x from the sidebar rect
+    /// while `SidebarSystem` measures from the section body; the two agree
+    /// only while a cell-grid vertical `MultiSectionView` (the shape
+    /// `SidebarSystem` builds) starts every section body at the sidebar x.
+    #[test]
+    fn cell_msv_section_bodies_start_at_the_sidebar_x() {
+        let backend = quadraui::tui::TuiBackend::new();
+        let rect = Rect::new(3.0, 2.0, 40.0, 30.0);
+        for scroll_mode in [ScrollMode::PerSection, ScrollMode::WholePanel] {
+            let view = MultiSectionView {
+                id: WidgetId::new("sidebar-system"),
+                sections: vec![
+                    tree_section("a", SectionSize::Content),
+                    tree_section("b", SectionSize::EqualShare),
+                ],
+                active_section: Some(1),
+                axis: MsvAxis::Vertical,
+                allow_resize: false,
+                allow_collapse: true,
+                scroll_mode,
+                has_focus: true,
+                panel_scroll: 0.0,
+            };
+            let layout = backend.msv_layout(rect, &view);
+            assert_eq!(layout.sections.len(), 2);
+            for s in &layout.sections {
+                assert_eq!(
+                    s.body_bounds.x, rect.x,
+                    "{scroll_mode:?} section body x: {:?}",
+                    s.body_bounds
+                );
+            }
+        }
+    }
+
+    /// The derived region is the one coord-tui's sidebars have always had:
+    /// `[0, 6.65 + indent)` cells at a one-cell line height.
+    #[test]
+    fn original_chevron_region_matches_the_cell_formula() {
+        for indent in 0..4u16 {
+            let end = original_chevron_end_x(indent, 1.0).expect("a branch row has a chevron");
+            assert!((end - (6.65 + indent as f32)).abs() < 1e-4, "indent {indent}: {end}");
         }
     }
 }

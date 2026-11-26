@@ -185,20 +185,17 @@ impl CoordApp {
         vec![
             Column {
                 title: "Time".to_string(),
-                // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-                width: ColumnWidth::Fixed(11.0),
+                width: ColumnWidth::FixedCells(11.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Category".to_string(),
-                // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-                width: ColumnWidth::Fixed(9.0),
+                width: ColumnWidth::FixedCells(9.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Actor".to_string(),
-                // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-                width: ColumnWidth::Fixed(12.0),
+                width: ColumnWidth::FixedCells(12.0),
                 align: ColumnAlign::Left,
             },
             Column {

@@ -1199,8 +1199,7 @@ impl CoordApp {
         // #101: 9 chars fits the longest realistic `format_age` output
         // ("999d ago", 8) plus one to breathe — see `queue_reason_age_cell`'s
         // doc comment for why this is its own column instead of a suffix.
-        // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-        ("Age", ColumnWidth::Fixed(9.0), ColumnAlign::Left),
+        ("Age", ColumnWidth::FixedCells(9.0), ColumnAlign::Left),
     ];
 
     /// #2043: the Queue grid never squeezes its columns below this many

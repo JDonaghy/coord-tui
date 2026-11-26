@@ -329,52 +329,35 @@ impl CoordApp {
                 param.label.clone()
             };
             fields.push(FormField {
-                label_position: None,
-                label_align: None,
-                label_width: None,
-                tab_index: None,
-                control_width: None,
-                min_control_width: None,
-                row_align: None,
                 id,
                 label: StyledText::plain(label.as_str()),
                 kind,
                 hint: StyledText::plain(""),
                 disabled: false,
                 validation: None,
+                ..form_field_defaults()
             });
         }
         // The Run button is a form field, not a header action, so it lands
         // inside the collapsible body: collapsing a section must hide the
         // ability to fire it, not leave a dangling trigger in the header.
         fields.push(FormField {
-            label_position: None,
-            label_align: None,
-            label_width: None,
-            tab_index: None,
-            control_width: None,
-            min_control_width: None,
-            row_align: None,
             id: Self::reports_run_field_id(&def.id),
             label: StyledText::plain("Run"),
             kind: FieldKind::Button,
             hint: StyledText::plain(""),
             disabled: self.reports_running.is_some(),
             validation: None,
+            ..form_field_defaults()
         });
         let focused_field = focused.and_then(|i| fields.get(i)).map(|f| f.id.clone());
         Form {
-            label_position: Default::default(),
-            label_align: Default::default(),
-            label_width: None,
-            control_width: quadraui::ControlWidth::Content,
-            min_control_width: None,
-            spacing: Default::default(),
             id: WidgetId::new(format!("reports-form-{}", def.id)),
             fields,
             focused_field,
             scroll_offset: 0,
             has_focus: focused.is_some(),
+            ..form_base(ControlWidth::Content)
         }
     }
 

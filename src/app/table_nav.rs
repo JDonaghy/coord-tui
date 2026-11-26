@@ -151,7 +151,7 @@ mod tests {
             id: WidgetId::new("table-nav-test"),
             columns: vec![Column {
                 title: "A".to_string(),
-                width: ColumnWidth::Fixed(10.0),
+                width: ColumnWidth::FixedCells(10.0),
                 align: ColumnAlign::Left,
             }],
             rows: Vec::new(),

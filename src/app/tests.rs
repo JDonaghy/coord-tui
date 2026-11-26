@@ -6723,6 +6723,41 @@
         assert!(used <= 20, "tabs from the offset fit the available width");
     }
 
+    /// #605 end to end: on a main panel too narrow for all six Pipeline
+    /// detail tabs, the bar paints scrolled so the active Completed tab is
+    /// visible, and a click on a tab the scrolled bar painted — located by
+    /// the painted layout, not by coordinates — activates that tab. The
+    /// click path resolves the same corrected scroll offset the painter
+    /// used, so the click lands on the tab under the pointer.
+    #[test]
+    fn tuidriver_pipeline_detail_tab_click_on_scrolled_bar_activates_painted_tab() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let app = make_completed_app();
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 80, 30);
+        driver.render();
+        let bar = WidgetId::new("pipeline-detail-tabs");
+        let before = driver.screen();
+        assert!(
+            driver.tab_center(&bar, 0).is_none(),
+            "sanity: the bar must be scrolled past Overview at this width:\n{before}"
+        );
+        assert!(
+            driver.screen_contains("A#201"),
+            "sanity: the Completed grid must be showing:\n{before}"
+        );
+        let (x, y) = driver
+            .tab_center(&bar, 3)
+            .unwrap_or_else(|| panic!("Summary tab not painted:\n{before}"));
+        driver.click(x, y);
+        driver.render();
+        let after = driver.screen();
+        assert!(
+            !driver.screen_contains("A#201"),
+            "clicking the painted Summary tab must leave the Completed grid:\n{after}"
+        );
+    }
+
     #[test]
     fn mouse_main_click_below_tab_row_is_ignored() {
         let mut app = make_app_default();

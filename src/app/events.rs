@@ -4805,7 +4805,7 @@ impl CoordApp {
                             toolbar_height: Some(self.toolbar_height(lh)),
                         };
                         // #6: same backend-owned measurer the click path
-                        // and `render.rs`'s `draw_sidebar_panel` use — a
+                        // and `render.rs`'s `draw_dyn` use — a
                         // local cell-width copy tints the wrong button
                         // under GTK (see `hit_test_panel_toolbar`).
                         let layout = backend.layout_primitive(ctx.main_bounds(), &panel);
@@ -4826,7 +4826,7 @@ impl CoordApp {
                     // ([ Go ⏎ ] / [ Retry ⏎ ] strip below the tab row).
                     // Pipeline has no panel toolbar so content starts at
                     // main_b.y + tab_h — compute bar_rect the same way
-                    // the render path does and feed it to `toolbar_layout`.
+                    // the render path does and resolve its layout there.
                     if self.active_view == SidebarView::Pipeline
                         && self.pipeline_detail_tab == PipelineDetailTab::Overview
                     {
@@ -5904,21 +5904,19 @@ impl CoordApp {
                 // the painter drew from, so a narrow bar (7 tabs) still routes
                 // clicks to the tab actually under the cursor.
                 // #24: both halves of that now come off one
-                // `Backend::tab_bar_layout` call on the bar's own rect — the
+                // `layout_primitive` call on the bar's own rect — the
                 // offset the painter resolved AND per-tab slots in the
                 // backend's unit — instead of a local `fit_active_scroll_offset`
                 // guess in characters that GTK's pixel geometry made
                 // meaningless (and that the TUI painter, which honours
                 // `bar.scroll_offset` verbatim, never actually applied).
-                let bar = self.pipeline_detail_tab_bar();
+                let mut bar = self.pipeline_detail_tab_bar();
                 let tab_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                let hit = resolve_tab_bar_click(
-                    &bar,
-                    tab_rect,
-                    pos.x,
-                    backend,
-                    &TabChrome::default(),
-                );
+                // The same offset the painter resolves before `draw_dyn`
+                // (render.rs), so the slots below are the painted ones.
+                bar.scroll_offset = active_tab_scroll_offset(backend, tab_rect, &bar);
+                let hit =
+                    resolve_tab_bar_click(&bar, tab_rect, pos.x, backend, &TabChrome::default());
                 if let Some(idx) = hit.map(tab_click_index) {
                     // #818: Overview / Issue / Log / Summary / Terminal,
                     // plus #2405's Completed grid at index 5.
@@ -7089,50 +7087,37 @@ impl CoordApp {
 /// `Board / Issue / Board Chat / Terminal` sub-tab bars were dead the same
 /// way, which is most of what "interactive at TUI parity" means for a panel.
 ///
-/// [`Backend::tab_bar_layout`] is the paint-free twin of the `draw_tab_bar`
-/// the renderer calls on the same rect with the same [`TabBar`], and reports
-/// each tab's slot in the backend's own unit — so paint and click agree on
-/// both backends by construction, including which tabs are visible at all
-/// under the resolved scroll offset.
+/// [`DrawsPrimitives::layout_primitive`] on the same rect with the same
+/// [`TabBar`] the renderer hands `draw_dyn` resolves exactly the layout the
+/// paint used, and reports each tab's slot in the backend's own unit — so
+/// paint and click agree on both backends by construction, including which
+/// tabs are visible at all under the resolved scroll offset.
 ///
-/// # Why the layout is probed at a zero origin
+/// # Bar-relative geometry
 ///
-/// `Backend::tab_bar_layout`'s documented contract is target-surface
-/// (absolute) coordinates, but at the pinned quadraui rev the GTK impl
-/// applies `rect.x` **twice** — once through the shared
-/// `backend::shift_tab_bar_hits` helper and again through a hand-rolled
-/// `x_off` loop a few lines later (`gtk/backend.rs`), so a bar at `rect.x =
-/// 100` reports its first slot starting at 200. Verified directly against the
-/// pinned rev, and filed upstream; the TUI impl and GTK's *paint* path both
-/// shift once, so only the GTK no-paint path is wrong. Probing at `x = 0` —
-/// where one shift and two shifts are the same no-op — and adding `bar_rect.x`
-/// back here sidesteps the disputed half of the contract entirely: this is
-/// correct under either reading, and stays correct once the upstream fix
-/// lands. `TabBar::layout` reads only `bar_width`/`bar_height`, so moving the
+/// The resolved [`quadraui::TabBarLayout`] is bar-relative: its
+/// `visible_tabs[].bounds` and `close_bounds` start at the bar's own left
+/// edge whatever `rect.x` the layout was resolved at. The click is shifted
+/// into that space by subtracting `bar_rect.x`, and the layout is resolved
+/// at a zero origin so the answer cannot depend on how a backend treats the
+/// origin. `TabBar::layout` reads only the rect's width and height, so the
 /// probe origin cannot change the layout itself.
 ///
 /// # The *within-tab* split is the backend's answer too (#7)
 ///
-/// It used not to be. coord baked the close `×` and the §2c active bracket
-/// into the label text rather than using `TabBar::show_tab_close`, so
-/// `TabBarHits::close_bounds` was `None` for every doc tab and the click's
-/// position inside its slot had to be converted to a *display column* by
-/// proportion and matched against the glyph's character offset — exact on TUI,
-/// an approximation on GTK, and meaningless the moment a proportional font put
-/// the `×` somewhere other than `cols - 2`.
+/// The bar asks for `show_tab_close` + [`doc_tab_chrome`], so every backend
+/// reports the close button's real box in `VisibleTab::close_bounds` and
+/// [`resolve_doc_tab_click`] tests the click against it — exact on TUI and
+/// on a proportional GTK font alike. The only character-shaped question left
+/// is #2283's baked `‹`/`›` markers, and that one lives inside
+/// `resolve_doc_tab_click` with its own note.
 ///
-/// Now the bar asks for `show_tab_close` + [`doc_tab_chrome`], so every
-/// backend reports the close button's real box and
-/// [`resolve_doc_tab_click`] simply tests the click against it. The only
-/// remaining character-shaped question is #2283's baked `‹`/`›` markers, and
-/// that one lives inside `resolve_doc_tab_click` with its own note.
-///
-/// `chrome` must be the **same** chrome the paint path passed to
-/// `draw_tab_bar*`: [`doc_tab_chrome`] for the doc-tab strips,
-/// `TabChrome::default()` for the plain sub-tab bars. Asking for different
-/// framing here than the painter asked for would shift `close_bounds` by the
-/// width of the opening bracket, which is exactly the class of paint/click
-/// disagreement this function exists to prevent.
+/// `chrome` must be the **same** chrome the paint path set on the bar it
+/// painted: [`doc_tab_chrome`] for the doc-tab strips, `TabChrome::default()`
+/// for the plain sub-tab bars. Asking for different framing here than the
+/// painter used would shift `close_bounds` by the width of the opening
+/// bracket, which is exactly the class of paint/click disagreement this
+/// function exists to prevent.
 pub(crate) fn resolve_tab_bar_click(
     bar: &TabBar,
     bar_rect: Rect,
@@ -7145,16 +7130,31 @@ pub(crate) fn resolve_tab_bar_click(
         chrome: chrome.clone(),
         ..bar.clone()
     };
-    // `resolve_doc_tab_click` reads the per-tab `(start, end)` spans the
-    // layout's `TabBarHits` view carries.
-    #[allow(deprecated)]
-    let hits = quadraui::backend::tab_bar_hits_from_layout(
-        &backend.layout_primitive(probe, bar).layout,
-        bar,
-    );
+    let layout = backend.layout_primitive(probe, bar).layout;
+    let (slot_positions, close_bounds) = tab_spans(&layout, bar.tabs.len());
     let click = (click_x - bar_rect.x) as f64;
-    #[allow(deprecated)]
-    resolve_doc_tab_click(bar, &hits.slot_positions, &hits.close_bounds, click)
+    resolve_doc_tab_click(bar, &slot_positions, &close_bounds, click)
+}
+
+/// Per-tab `(start, end)` body spans and close-button spans out of a
+/// resolved bar-relative layout, indexed by tab — the shape
+/// [`resolve_doc_tab_click`] consumes. A tab the layout did not place
+/// (scrolled out behind `scroll_offset`) keeps the `(0.0, 0.0)` / `None`
+/// it starts with, which `resolve_doc_tab_click` skips.
+fn tab_spans(
+    layout: &quadraui::TabBarLayout,
+    tab_count: usize,
+) -> (Vec<(f64, f64)>, Vec<Option<(f64, f64)>>) {
+    let mut slots = vec![(0.0, 0.0); tab_count];
+    let mut closes = vec![None; tab_count];
+    let span = |r: Rect| (r.x as f64, (r.x + r.width) as f64);
+    for vt in &layout.visible_tabs {
+        if vt.tab_idx < tab_count {
+            slots[vt.tab_idx] = span(vt.bounds);
+            closes[vt.tab_idx] = vt.close_bounds.map(span);
+        }
+    }
+    (slots, closes)
 }
 
 /// The strip index a resolved tab click landed on, whatever part of the tab

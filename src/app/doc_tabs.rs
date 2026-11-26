@@ -103,7 +103,7 @@ pub(crate) const PREVIEW_MARKER: &str = "∘ ";
 ///
 /// Baked into label text for the same reason [`PREVIEW_MARKER`] is: quadraui's
 /// TUI tab-bar rasteriser never paints scroll arrows itself —
-/// `TuiBackend::draw_tab_bar` / `tab_bar_layout` hardcode
+/// its cell layout hardcodes
 /// `scroll_arrow_width: 0.0` ("no scroll arrows in TUI") and simply honour
 /// whatever `scroll_offset` the caller supplies — so the app has to paint
 /// them. See `CoordApp::board_doc_tab_strip` (render.rs).
@@ -112,7 +112,8 @@ pub(crate) const PREVIEW_MARKER: &str = "∘ ";
 /// baked this way — they come off `TabBar::show_tab_close` and
 /// [`doc_tab_chrome`] now. These two markers are the only survivors, because
 /// no backend paints a scroll arrow for a bar whose `scroll_arrow_width` is
-/// zero and `TabBarHits` reports no arrow geometry to hit-test against.
+/// zero and the resolved `TabBarLayout` carries no arrow geometry to
+/// hit-test against.
 pub(crate) const SCROLL_LEFT_MARKER: char = '‹';
 pub(crate) const SCROLL_RIGHT_MARKER: char = '›';
 
@@ -133,10 +134,9 @@ pub(crate) const PANE_DIVIDER_CHAR: char = '║';
 ///
 /// One function rather than a `const` because `TabChrome` is
 /// `#[non_exhaustive]`-adjacent (its `TabFrame` is), and because every caller
-/// wants it by reference anyway. Every paint site
-/// (`draw_tab_bar_with_chrome`) and every hit-test site
-/// (`tab_bar_layout_with_chrome`, via `events.rs::resolve_tab_bar_click`)
-/// goes through this one function, so the two can't be asked for different
+/// wants it by reference anyway. Every paint site (`TabBar::chrome` set
+/// before `draw_dyn`) and every hit-test site (`layout_primitive`, via
+/// `events.rs::resolve_tab_bar_click`) goes through this one function, so the two can't be asked for different
 /// framing — which is what would silently shift `close_bounds` out from
 /// under the click path.
 ///
@@ -153,8 +153,8 @@ pub(crate) fn doc_tab_chrome() -> TabChrome {
 /// Columns the doc-tab rasteriser reserves for tab chrome *beyond* the tab's
 /// own [`doc_tab_label`] text, given that tab's active/closable state.
 ///
-/// Mirrors `TuiBackend::draw_tab_bar_with_chrome`'s own measurer
-/// (quadraui `tui/backend.rs`) exactly:
+/// Mirrors the cell measurer quadraui's TUI `TabBar` painter resolves its
+/// layout through exactly:
 ///
 /// | tab | reservation | cells |
 /// |---|---|---|
@@ -168,7 +168,7 @@ pub(crate) fn doc_tab_chrome() -> TabChrome {
 /// backend ever sees the bar — see that function's own "Known GTK gap (#24)"
 /// note for why an app-side cell measurement is still the only handle
 /// available for the `‹`/`›` affordances. Nothing else measures tabs
-/// app-side: the click path reads `TabBarHits` instead (#7).
+/// app-side: the click path reads the resolved `TabBarLayout` instead (#7).
 ///
 /// Drift guard: `board_doc_tab_strip_measures_tabs_as_the_rasteriser_paints_them`
 /// (tests.rs) renders a real strip through `TuiDriver` and compares the painted
@@ -1560,7 +1560,7 @@ pub(crate) fn known_doc_keys(data: &BoardData) -> HashSet<DocKey> {
 /// `TabBar::show_tab_close` + `TabItem::is_closable` paint the glyph,
 /// [`doc_tab_chrome`] paints the framing *around* it (quadraui#631), and
 /// [`resolve_doc_tab_click`] hit-tests the close button from the
-/// backend-reported `TabBarHits::close_bounds`. So this function no longer
+/// backend-reported `VisibleTab::close_bounds`. So this function no longer
 /// mentions a close glyph at all, and nothing under `src/` names quadraui's
 /// tab-bar close-glyph constant any more.
 ///
@@ -1636,8 +1636,7 @@ pub(crate) enum TabClickKind {
 /// Resolve a click at `click` — in the **backend's own unit**, relative to the
 /// strip rect's left edge — against the geometry the backend reported for that
 /// strip: `slot_positions[i]` is tab `i`'s full span and `close_bounds[i]` its
-/// close-button box, both straight off
-/// `Backend::tab_bar_layout_with_chrome` (see
+/// close-button box, both read off the bar's resolved `TabBarLayout` (see
 /// `events.rs::resolve_tab_bar_click`, this function's only non-test caller).
 ///
 /// # Why the geometry is an argument (#7)
@@ -2122,7 +2121,7 @@ mod tests {
         }
     }
 
-    /// `(slot_positions, close_bounds)` — the two `TabBarHits` fields
+    /// `(slot_positions, close_bounds)` — the two per-tab span lists
     /// [`resolve_doc_tab_click`] consumes, as [`cell_geometry`] models them.
     type CellGeometry = (Vec<(f64, f64)>, Vec<Option<(f64, f64)>>);
 
@@ -2144,7 +2143,7 @@ mod tests {
 
     /// The `(slot_positions, close_bounds)` pair a backend reports for
     /// `strip`, laid out in **cells** exactly the way
-    /// `TuiBackend::draw_tab_bar_with_chrome` → `TabBar::layout` does, with
+    /// quadraui's TUI `TabBar` layout does, with
     /// the first tab flush at column 0.
     ///
     /// Written out here rather than obtained from a live backend because
@@ -2152,7 +2151,7 @@ mod tests {
     /// unit test wants the geometry visible. The end-to-end agreement between
     /// this model and the real rasteriser is covered by the `TuiDriver` tests
     /// in `tests.rs` (`clicking_a_doc_tabs_close_glyph_*`), which click
-    /// through `Backend::tab_bar_layout_with_chrome` for real.
+    /// through the bar's real `layout_primitive` geometry.
     ///
     /// Mirrors [`doc_tab_chrome_cols`]: a closable inactive tab spends its
     /// last two cells on `×` + inter-tab separator (both inside

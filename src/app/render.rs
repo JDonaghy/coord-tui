@@ -335,13 +335,11 @@ impl ShellApp for CoordApp {
                     let content_rect =
                         Rect::new(m.x, m.y + tab_h, m.width, (m.height - tab_h).max(0.0));
                     // #605: scroll the tab bar so the ACTIVE tab is visible on a
-                    // narrow width (7 tabs overflow a small screen). The TUI
+                    // narrow width (six tabs overflow a small screen). The TUI
                     // painter renders from `scroll_offset` verbatim, so resolve
                     // the offset that keeps the active tab on-screen before
-                    // drawing. The click hit-test below derives the same offset.
-                    tab_bar.scroll_offset = backend
-                        .layout_primitive(tab_rect, &tab_bar)
-                        .corrected_scroll_offset;
+                    // drawing. The click hit-test derives the same offset.
+                    tab_bar.scroll_offset = active_tab_scroll_offset(&*backend, tab_rect, &tab_bar);
                     backend.draw_dyn(tab_rect, &tab_bar, &InteractionState::new());
 
                     // #818: helper — draw the compact read-only stage strip
@@ -2368,9 +2366,8 @@ impl CoordApp {
     /// `TabBar::layout` (the primitive) DOES compute `scroll_left`/
     /// `scroll_right` authoritatively given a nonzero `scroll_arrow_width` —
     /// that's the part reused below, not reimplemented. But nothing
-    /// downstream paints the glyph for TUI: `TuiBackend::draw_tab_bar` /
-    /// `tab_bar_layout` hardcode `scroll_arrow_width: 0.0` ("no scroll
-    /// arrows in TUI") and simply honour whatever `scroll_offset` the
+    /// downstream paints the glyph for TUI: quadraui's cell `TabBar` layout
+    /// hardcodes `scroll_arrow_width: 0.0` ("no scroll arrows in TUI") and simply honour whatever `scroll_offset` the
     /// caller supplies. So this bakes `‹`/`›` into the boundary visible
     /// tab's label.
     ///
@@ -2378,7 +2375,7 @@ impl CoordApp {
     /// to ride along in `TabItem::label` for a related-but-different reason
     /// (quadraui could not put `]` to the right of `×`; quadraui#631 fixed
     /// that). These two markers are **not** fixable the same way: there is no
-    /// `TabFrame` for them, `TabBarHits` reports no arrow geometry, and every
+    /// `TabFrame` for them, the resolved layout carries no arrow geometry, and every
     /// backend's own `scroll_left`/`scroll_right` rects stay `None` while
     /// `scroll_arrow_width` is zero — which it is, hardcoded, in TUI. Baked
     /// label text is still the only way to paint them.
@@ -2506,7 +2503,7 @@ impl CoordApp {
     /// a character) and meaningless for GTK, where `width` is a pixel count:
     /// a 418 px strip is read as 418 columns, so the layout concludes that
     /// every tab fits, leaves `scroll_offset` at 0, and bakes no marker —
-    /// while GTK's own Pango-measured `draw_tab_bar` clips the tabs that
+    /// while GTK's own Pango-measured `TabBar` paint clips the tabs that
     /// really do overflow. Observed on #24's parity walk: with two documents
     /// open at 140×40, the GTK strip painted tab 0 and silently dropped tab
     /// 1, *which was the active document*, with no `›` to hint at it. The
@@ -2516,7 +2513,7 @@ impl CoordApp {
     ///
     /// Not fixed in #24 because doing it properly needs the labels measured
     /// in the backend's unit here, and the only handle quadraui exposes
-    /// (`Backend::tab_bar_layout`'s `correct_scroll_offset`) resolves the
+    /// (`TabBarPrimitiveLayout::corrected_scroll_offset`) resolves the
     /// offset with **no scroll-arrow reservation**, unlike the
     /// `scroll_arrow_width: 1.0` this call relies on to keep the baked
     /// marker from crowding its own tab out. Adopting it would therefore
@@ -4911,4 +4908,36 @@ pub(crate) fn log_source_label(a: &Assignment) -> String {
         },
         other => other.to_string(),
     }
+}
+
+/// The scroll offset that keeps `bar`'s active tab fully on screen when it
+/// is painted into `rect` — the smallest offset whose resolved layout places
+/// the active tab, so a bar that fits whole stays at offset 0.
+///
+/// The pixel layout's `corrected_scroll_offset` already fits the active
+/// tab; the cell layout's only clamps the bar's own `scroll_offset` and
+/// paints from it verbatim, so the fit is resolved here against the
+/// backend's own layout — the same geometry the painter and the click path
+/// both use. `None` active tab keeps the backend's answer.
+pub(crate) fn active_tab_scroll_offset(backend: &dyn Backend, rect: Rect, bar: &TabBar) -> usize {
+    let corrected = backend.layout_primitive(rect, bar).corrected_scroll_offset;
+    let Some(active) = bar.tabs.iter().position(|t| t.is_active) else {
+        return corrected;
+    };
+    let shows_active = |offset: usize| {
+        let probe = TabBar {
+            scroll_offset: offset,
+            ..bar.clone()
+        };
+        backend
+            .layout_primitive(rect, &probe)
+            .layout
+            .visible_tabs
+            .iter()
+            .any(|vt| vt.tab_idx == active)
+    };
+    if shows_active(corrected) {
+        return corrected;
+    }
+    (0..=active).find(|&o| shows_active(o)).unwrap_or(corrected)
 }

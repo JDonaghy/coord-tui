@@ -146,9 +146,9 @@ impl CoordApp {
     /// shape as `hit_test_panel_toolbar`.
     ///
     /// `backend` is the *live* backend, taken read-only: the layout comes
-    /// from [`Backend::sidebar_panel_layout`], the paint-free twin of the
-    /// `draw_sidebar_panel` the render path calls on the same rect and the
-    /// same `SidebarPanel` (#6).  It must not be re-derived here — a
+    /// from `DrawsPrimitives::layout_primitive`, the paint-free twin of the
+    /// `draw_dyn` the render path calls on the same rect and the same
+    /// `SidebarPanel` (#6).  It must not be re-derived here — a
     /// hand-rolled measurer is TUI cells, and GTK paints Pango pixels.
     pub(crate) fn hit_test_sidebar_action_bar(
         &mut self,
@@ -199,7 +199,7 @@ impl CoordApp {
     ///
     /// #6: stays a hardcoded multiple of `lh` deliberately — the backend
     /// seam has no height to prefer over it.  `SidebarPanel.toolbar_height`
-    /// is an *input* to `Backend::{draw,}sidebar_panel_layout`, and the
+    /// is an *input* to the `SidebarPanel` layout, and the
     /// `toolbar_bounds` those hand back is just this value clamped to the
     /// panel.  Both backends express it in their own native unit because
     /// `lh` is `Backend::line_height()` (1.0 cell TUI, N px GTK), so the
@@ -417,8 +417,8 @@ impl CoordApp {
     /// reason as [`Self::hit_test_sidebar_action_bar`] (#6): button widths
     /// are measured in the backend's own native unit — ratatui cells under
     /// TUI, Pango-measured pixels under GTK — so the only correct source
-    /// for them is [`Backend::sidebar_panel_layout`], the paint-free twin
-    /// of the `draw_sidebar_panel` `render.rs` calls on the same
+    /// for them is `DrawsPrimitives::layout_primitive`, the paint-free twin
+    /// of the `draw_dyn` `render.rs` calls on the same
     /// `main_content_bounds` with the same `SidebarPanel`.
     pub(crate) fn hit_test_panel_toolbar(
         &mut self,
@@ -647,8 +647,8 @@ impl CoordApp {
 // quadraui's `pub(crate) tui::toolbar::tui_item_width`, used unconditionally
 // by every toolbar hit-test.  Under GTK it measured Pango-painted buttons in
 // ratatui cells, so clicks landed on the wrong button or on nothing at all.
-// Deleted: hit-tests now go through `Backend::sidebar_panel_layout`, the
-// backend's own paint-free measurer.  Do not reintroduce a local one — see
+// Deleted: hit-tests now go through `layout_primitive` on the
+// `SidebarPanel`, the backend's own paint-free measurer.  Do not reintroduce a local one — see
 // quadraui's `docs/CONSUMER_PATTERNS.md` and quadraui#478.
 
 /// Helper that builds one `ToolbarButton::Action` for the panel toolbar.

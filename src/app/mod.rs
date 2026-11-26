@@ -577,7 +577,9 @@ impl SidebarFilter {
             label_position: Default::default(),
             label_align: Default::default(),
             label_width: None,
-            control_width: quadraui::ControlWidth::Content,
+            // The label-less filter input spans the sidebar, so a long
+            // placeholder truncates at the field's right bracket.
+            control_width: quadraui::ControlWidth::Fill,
             min_control_width: None,
             spacing: Default::default(),
             id: WidgetId::new(format!("{id_prefix}-form")),
@@ -4938,6 +4940,11 @@ impl CoordApp {
         config.default_sidebar_width = 35.0;
         config.min_sidebar_width = 20.0;
         config.max_sidebar_width = 55.0;
+        // Three columns (accent, icon, separator): every coord-tui panel
+        // icon is a single cell wide, so the shell's four-column default —
+        // sized for a double-width Nerd Font glyph — would only take a
+        // column from the sidebar and main panel.
+        config.activity_bar_width = 3.0;
         config
     }
 

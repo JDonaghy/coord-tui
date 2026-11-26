@@ -95,7 +95,7 @@ use quadraui::{
     // collapsible per-report section stack) plus the `Form` layout/hit types
     // its bodies route through. `ScrollMode`/`SectionSize` are already
     // imported above (they come from the same primitive).
-    FormHit, FormLayout, HeaderHit, MultiSectionView, MultiSectionViewHit,
+    ControlWidth, FormHit, FormLayout, HeaderHit, MultiSectionView, MultiSectionViewHit,
     MultiSectionViewLayout, MsvAxis, Section, SectionBody, SectionHeader,
     // #1765: the per-section Export action and the save dialog it opens.
     // `HeaderAction` + `SectionHeader.actions` and
@@ -574,23 +574,8 @@ impl SidebarFilter {
     /// greyed hint shown when the query is empty.
     fn form(&self, id_prefix: &str, placeholder: &str) -> Form {
         Form {
-            label_position: Default::default(),
-            label_align: Default::default(),
-            label_width: None,
-            // The label-less filter input spans the sidebar, so a long
-            // placeholder truncates at the field's right bracket.
-            control_width: quadraui::ControlWidth::Fill,
-            min_control_width: None,
-            spacing: Default::default(),
             id: WidgetId::new(format!("{id_prefix}-form")),
             fields: vec![FormField {
-                label_position: None,
-                label_align: None,
-                label_width: None,
-                tab_index: None,
-                control_width: None,
-                min_control_width: None,
-                row_align: None,
                 id: WidgetId::new(format!("{id_prefix}-input")),
                 label: StyledText::plain(""),
                 kind: FieldKind::TextInput {
@@ -602,6 +587,7 @@ impl SidebarFilter {
                 hint: StyledText::plain(""),
                 disabled: false,
                 validation: None,
+                ..form_field_defaults()
             }],
             focused_field: if self.focused {
                 Some(WidgetId::new(format!("{id_prefix}-input")))
@@ -610,6 +596,9 @@ impl SidebarFilter {
             },
             scroll_offset: 0,
             has_focus: self.focused,
+            // The label-less filter input spans the sidebar, so a long
+            // placeholder truncates at the field's right bracket.
+            ..form_base(ControlWidth::Fill)
         }
     }
 }
@@ -1576,6 +1565,51 @@ fn plain_list(id: &str, msg: &str, scroll_offset: usize) -> ListView {
         h_scroll: 0,
         max_content_width: None,
         show_v_scrollbar: false,
+    }
+}
+
+/// A `FormField` base for struct-update syntax: every field that has a
+/// neutral value carries it — no hint, enabled, unvalidated — and every
+/// per-field presentation override is unset, so the field inherits its
+/// `Form`'s label and control-column settings. Call sites name `id`,
+/// `label` and `kind` (and whatever else differs) and finish with
+/// `..form_field_defaults()`.
+pub(crate) fn form_field_defaults() -> FormField {
+    FormField {
+        id: WidgetId::new(""),
+        label: StyledText::default(),
+        kind: FieldKind::Label,
+        hint: StyledText::default(),
+        disabled: false,
+        validation: None,
+        label_position: None,
+        label_align: None,
+        label_width: None,
+        tab_index: None,
+        control_width: None,
+        min_control_width: None,
+        row_align: None,
+    }
+}
+
+/// An empty, unfocused `Form` base for struct-update syntax, laid out the
+/// way every coord-tui form is: labels left of their control in a
+/// left-aligned column sized to the widest label, default spacing, and
+/// each control sized by `control_width`. Call sites name `id`, `fields`
+/// and the focus/scroll state and finish with `..form_base(..)`.
+pub(crate) fn form_base(control_width: ControlWidth) -> Form {
+    Form {
+        id: WidgetId::new(""),
+        fields: Vec::new(),
+        focused_field: None,
+        scroll_offset: 0,
+        has_focus: false,
+        label_position: Default::default(),
+        label_align: Default::default(),
+        label_width: None,
+        control_width,
+        min_control_width: None,
+        spacing: Default::default(),
     }
 }
 

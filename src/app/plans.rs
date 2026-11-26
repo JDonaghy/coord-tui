@@ -1015,8 +1015,7 @@ impl CoordApp {
         vec![
             Column {
                 title: "#".to_string(),
-                // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-                width: ColumnWidth::Fixed(8.0),
+                width: ColumnWidth::FixedCells(8.0),
                 align: ColumnAlign::Left,
             },
             Column {
@@ -1026,14 +1025,12 @@ impl CoordApp {
             },
             Column {
                 title: "Status".to_string(),
-                // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-                width: ColumnWidth::Fixed(13.0),
+                width: ColumnWidth::FixedCells(13.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Order".to_string(),
-                // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
-                width: ColumnWidth::Fixed(16.0),
+                width: ColumnWidth::FixedCells(16.0),
                 align: ColumnAlign::Left,
             },
         ]

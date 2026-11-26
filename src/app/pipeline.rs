@@ -2392,13 +2392,6 @@ impl CoordApp {
         };
         let fields = vec![
             FormField {
-                label_position: None,
-                label_align: None,
-                label_width: None,
-                tab_index: None,
-                control_width: None,
-                min_control_width: None,
-                row_align: None,
                 id: Self::completed_field_id("since"),
                 label: StyledText::plain("Time range"),
                 kind: FieldKind::SegmentedControl {
@@ -2408,15 +2401,9 @@ impl CoordApp {
                 hint: StyledText::plain(""),
                 disabled: false,
                 validation: None,
+                ..form_field_defaults()
             },
             FormField {
-                label_position: None,
-                label_align: None,
-                label_width: None,
-                tab_index: None,
-                control_width: None,
-                min_control_width: None,
-                row_align: None,
                 id: Self::completed_field_id("until"),
                 label: StyledText::plain("Window end"),
                 kind: FieldKind::TextInput {
@@ -2428,38 +2415,28 @@ impl CoordApp {
                 hint: StyledText::plain(""),
                 disabled: false,
                 validation: None,
+                ..form_field_defaults()
             },
             FormField {
-                label_position: None,
-                label_align: None,
-                label_width: None,
-                tab_index: None,
-                control_width: None,
-                min_control_width: None,
-                row_align: None,
                 id: Self::completed_field_id("repo"),
                 label: StyledText::plain("Repo"),
                 kind: repo_kind,
                 hint: StyledText::plain(""),
                 disabled: false,
                 validation: None,
+                ..form_field_defaults()
             },
         ];
         let focused_field = fields
             .get(self.completed_grid.field_sel)
             .map(|f| f.id.clone());
         Form {
-            label_position: Default::default(),
-            label_align: Default::default(),
-            label_width: None,
-            control_width: quadraui::ControlWidth::Content,
-            min_control_width: None,
-            spacing: Default::default(),
             id: WidgetId::new("pipeline-completed-form"),
             fields,
             focused_field,
             scroll_offset: 0,
             has_focus: true,
+            ..form_base(ControlWidth::Content)
         }
     }
 
@@ -2758,10 +2735,15 @@ impl CoordApp {
         // Paint and hit-test from ONE layout, derived by the backend itself —
         // the `msv.rs` contract. Re-deriving geometry at click time is the
         // cached-layout-vs-paint drift #1094 had to fix for the Audit table.
+        // `draw_dyn` hands back the very layout it painted, so the click
+        // path hit-tests exactly what is on screen. The explicit empty
+        // `InteractionState` keeps the controls free of pointer hover, as
+        // they have always been — focus is the only highlight.
         let form = self.completed_form();
-        let form_layout = backend.layout_primitive(controls_rect, &form).layout;
-        backend.draw_dyn(controls_rect, &form, &InteractionState::new());
-        *self.completed_form_layout.borrow_mut() = Some((controls_rect, form_layout));
+        let painted = backend.draw_dyn(controls_rect, &form, &InteractionState::new());
+        *self.completed_form_layout.borrow_mut() = painted
+            .downcast_ref::<quadraui::primitives::form::FormPrimitiveLayout>()
+            .map(|p| (controls_rect, p.layout.clone()));
 
         let body_rect = Rect::new(
             rect.x,

@@ -64730,6 +64730,46 @@ Milestone tracking issue.
         );
     }
 
+    /// The Board Chat tab's empty state paints its CTA bar and, under it,
+    /// the explanatory text list through `DrawsPrimitives::draw_primitive`.
+    /// Every row of that list must reach the screen, below the CTA bar.
+    #[test]
+    fn board_chat_empty_state_paints_cta_bar_and_explanation() {
+        use quadraui::tui::testing::driver_with_shell;
+
+        let mut app = doc_tab_app(DOC_TAB_BOARD_JSON);
+        app.open_board_doc_tab(("claude-coordinator".to_string(), 101), true);
+        app.board_detail_tab = BoardDetailTab::Chat;
+
+        let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
+        driver.set_double_click_folding(false);
+        driver.render();
+        let screen = driver.screen();
+
+        let (_, cta_y) = driver
+            .find("New Issue")
+            .unwrap_or_else(|| panic!("the CTA bar is painted:\n{screen}"));
+        for row in [
+            "Refine — explore ideas or discuss the codebase without",
+            "being tied to a specific issue.",
+            "New Issue — chat with an AI to draft a well-structured",
+            "issue body.  Press f when done to file it on GitHub.",
+        ] {
+            let (_, y) = driver
+                .find(row)
+                .unwrap_or_else(|| panic!("explanation row {row:?} is painted:\n{screen}"));
+            assert!(
+                y > cta_y,
+                "explanation row {row:?} sits below the CTA bar (row {cta_y}), \
+                 found at row {y}:\n{screen}"
+            );
+        }
+        assert!(
+            screen.contains("Repo: ") || screen.contains("Select a repo in the sidebar first."),
+            "the repo line is painted:\n{screen}"
+        );
+    }
+
     // ── #2900: the generated WRITE client (`types::generated_requests`) ──────
 
     /// The `PATCH /issue/{repo}/{n}` body distinguishes three states per

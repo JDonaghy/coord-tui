@@ -4906,7 +4906,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: false,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` — a bordered list stays here because the contract `ListView` paint strokes no `bordered` frame on pixel backends (GTK); move to `draw_primitive` once it does.
         backend.draw_list(modal_rect, &list);
     }
 
@@ -6057,7 +6057,7 @@ impl CoordApp {
 
         // Modal background (reuse the refinement-notes-modal pattern).
         let modal_rect = shrink_rect(content_rect, lh * 2.0);
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` — a bordered list stays here because the contract `ListView` paint strokes no `bordered` frame on pixel backends (GTK); move to `draw_primitive` once it does.
         backend.draw_list(
             modal_rect,
             &ListView {
@@ -6111,8 +6111,7 @@ impl CoordApp {
             ));
         }
 
-        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-        backend.draw_list(
+        backend.draw_primitive(
             inner,
             &ListView {
                 id: WidgetId::new("file-issue-modal"),
@@ -6445,7 +6444,7 @@ impl CoordApp {
         let lh = backend.line_height();
         if self.chat_is_board_chat() {
             // Draw an opaque backing so the empty transcript area doesn't bleed through.
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
+            // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` — a bordered list stays here because the contract `ListView` paint strokes no `bordered` frame on pixel backends (GTK); move to `draw_primitive` once it does.
             backend.draw_list(
                 content_rect,
                 &ListView {
@@ -6547,8 +6546,7 @@ impl CoordApp {
                 "  issue body.  Press f when done to file it on GitHub.",
                 Some(Color::rgb(140, 140, 160)),
             ));
-            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
-            backend.draw_list(
+            backend.draw_primitive(
                 text_rect,
                 &ListView {
                     id: WidgetId::new("board-chat-empty"),

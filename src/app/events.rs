@@ -5053,6 +5053,13 @@ impl CoordApp {
         match self.active_view {
             SidebarView::Board => {
                 let result = self.board_sidebar.handle(event, backend, sidebar_b);
+                let result = super::sidebar::tui_chevron_click_guard(
+                    result,
+                    event,
+                    sidebar_b,
+                    &*backend,
+                    &self.board_branch_indents,
+                );
                 match result {
                     SidebarEvent::RowSelected { section, ref path } => {
                         // #646 focus-follows-click: row click blurs the search filter.
@@ -5302,6 +5309,13 @@ impl CoordApp {
             SidebarView::Pipeline => {
                 let prev = self.pipeline_sel;
                 let result = self.pipeline_sidebar.handle(event, backend, sidebar_b);
+                let result = super::sidebar::tui_chevron_click_guard(
+                    result,
+                    event,
+                    sidebar_b,
+                    &*backend,
+                    &self.pipeline_branch_indents,
+                );
                 self.pipeline_sel = self.selected_pipeline_index();
                 if self.pipeline_sel != prev {
                     self.pipeline_focused_stage = self.default_focused_stage_for_selected_issue();

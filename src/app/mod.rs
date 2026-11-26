@@ -2555,6 +2555,10 @@ pub struct CoordApp {
     /// Sections whose body is a `Form` (the FILTER box) hold an empty vec —
     /// their height comes from the form's field count instead.
     board_section_rows: Vec<Vec<(TreePath, bool)>>,
+    /// Indent of each branch row (`is_expanded.is_some()`) of the last
+    /// `rebuild_board_sidebar` pass, keyed by `(section, path)` — what
+    /// `tui_chevron_click_guard` sizes a cell-backend chevron hit region from.
+    board_branch_indents: std::collections::HashMap<(usize, TreePath), u16>,
     /// #2282 (ms-65 §2f): per-repo tree windowing for reveal-on-activate.
     ///
     /// Contract §2f pins that the `⌕ Filter issues…` box "stays fixed at the
@@ -2637,6 +2641,9 @@ pub struct CoordApp {
     /// `rows()` getter, so `reveal_pipeline_active_doc`'s scroll-into-view has
     /// no other way to work out how far down the panel a given row sits).
     pipeline_section_rows: Vec<Vec<(TreePath, bool)>>,
+    /// Branch rows of the last `rebuild_pipeline_sidebar` pass — the
+    /// Pipeline counterpart of `board_branch_indents`.
+    pipeline_branch_indents: std::collections::HashMap<(usize, TreePath), u16>,
     /// #2452: the Pipeline sidebar tree's last-painted geometry —
     /// `(rect, line_height, msv_header_size)`. Mirrors `last_sidebar_geom`
     /// (Board's own copy); kept separate because the two panels paint on
@@ -4492,6 +4499,7 @@ impl CoordApp {
             board_split_layout: std::cell::RefCell::new(None),
             board_pane_chord: None,
             board_section_rows: Vec::new(),
+            board_branch_indents: std::collections::HashMap::new(),
             board_tree_hidden_above: std::collections::HashMap::new(),
             last_sidebar_geom: std::cell::Cell::new(None),
             pipeline_sidebar,
@@ -4503,6 +4511,7 @@ impl CoordApp {
             pipeline_epic_expanded: std::collections::HashMap::new(),
             pipeline_epic_row_keys: std::collections::HashMap::new(),
             pipeline_section_rows: Vec::new(),
+            pipeline_branch_indents: std::collections::HashMap::new(),
             last_pipeline_sidebar_geom: std::cell::Cell::new(None),
             pipeline_issues: Vec::new(),
             pipeline_sel: None,
@@ -6937,6 +6946,7 @@ impl CoordApp {
         // offset arithmetic. Grown to `defs.len()` up front so a Form section
         // (the FILTER box, section 0) still occupies its slot.
         let mut section_rows: Vec<Vec<(TreePath, bool)>> = vec![Vec::new(); defs_len];
+        let mut branch_indents = std::collections::HashMap::new();
 
         // #410: Build per-repo milestone > issue rows (status sub-group removed).
         //
@@ -7156,10 +7166,16 @@ impl CoordApp {
                     .map(|r| (r.path.clone(), matches!(r.decoration, Decoration::Header)))
                     .collect();
             }
+            branch_indents.extend(
+                rows.iter()
+                    .filter(|r| r.is_expanded.is_some())
+                    .map(|r| ((section_idx, r.path.clone()), r.indent)),
+            );
             self.board_sidebar.set_rows(section_idx, rows);
         }
         self.board_epic_row_keys = epic_row_keys;
         self.board_section_rows = section_rows;
+        self.board_branch_indents = branch_indents;
 
         // Activate first non-empty repo section.
         if self.board_sidebar.active_section().is_none() {

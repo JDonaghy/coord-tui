@@ -5621,6 +5621,7 @@ impl CoordApp {
         // comes from its field count instead, same as Board's).
         let defs_len = defs.len();
         let mut section_rows: Vec<Vec<(TreePath, bool)>> = vec![Vec::new(); defs_len];
+        let mut branch_indents = std::collections::HashMap::new();
 
         let mut sidebar = SidebarSystem::new(defs);
         sidebar.set_navigation_mode(NavigationMode::Selection);
@@ -6246,6 +6247,11 @@ impl CoordApp {
                     .map(|r| (r.path.clone(), matches!(r.decoration, Decoration::Header)))
                     .collect();
             }
+            branch_indents.extend(
+                rows.iter()
+                    .filter(|r| r.is_expanded.is_some())
+                    .map(|r| ((section_idx, r.path.clone()), r.indent)),
+            );
             sidebar.set_rows(section_idx, rows);
         }
         // #1197: publish this pass's epic-row identity map (stale entries
@@ -6253,6 +6259,7 @@ impl CoordApp {
         // issues move between sections).
         self.pipeline_epic_row_keys = epic_row_keys;
         self.pipeline_section_rows = section_rows;
+        self.pipeline_branch_indents = branch_indents;
 
         // Default-select the first issue in the first non-empty state section.
         if sidebar.active_section().is_none() && !state_sections.is_empty() {

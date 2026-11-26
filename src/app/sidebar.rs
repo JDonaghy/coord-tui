@@ -749,3 +749,55 @@ pub(crate) fn icon_for_action(action_id: &str) -> Option<Icon> {
     };
     Some(Icon::new(glyph, fallback))
 }
+
+/// Re-resolve a `SidebarSystem` chevron click on a cell backend to the
+/// chevron hit region coord-tui's sidebars have always had.
+///
+/// TODO(quadraui SidebarSystem / list-tree-table group #2609): on a cell
+/// backend `SidebarSystem::handle` sizes a branch row's chevron hit region
+/// with the pixel formula `row_padding_x + indent * indent_px + glyph_w + 4`,
+/// and `row_padding_x` is now `Style::default().row_padding_x` (8) where it
+/// used to be 2. With `line_height` 1 that widens the region from
+/// `[0, 6.65 + indent)` to `[0, 12.65 + indent)` cells, so a click well into a
+/// branch row's title toggles it instead of selecting it. On a cell backend
+/// (`line_height() <= 1`) this turns a `RowToggleExpand` whose click lands
+/// past the original region back into the `RowSelected` the same click
+/// produced before. `SidebarSystem` has already selected the row for both
+/// outcomes, so only the event changes. Pixel backends and every other event
+/// pass through untouched.
+pub(crate) fn tui_chevron_click_guard(
+    result: SidebarEvent,
+    event: &UiEvent,
+    rect: Rect,
+    backend: &dyn Backend,
+    branch_indents: &std::collections::HashMap<(usize, TreePath), u16>,
+) -> SidebarEvent {
+    let lh = backend.line_height();
+    if lh > 1.0 {
+        return result;
+    }
+    let UiEvent::MouseDown {
+        button: quadraui::MouseButton::Left,
+        position,
+        ..
+    } = event
+    else {
+        return result;
+    };
+    let SidebarEvent::RowToggleExpand { section, ref path } = result else {
+        return result;
+    };
+    let Some(&indent) = branch_indents.get(&(section, path.clone())) else {
+        return result;
+    };
+    let indent_px = (lh * 0.9).round();
+    let chevron_end_x = 2.0 + indent as f32 * indent_px + lh * 0.65 + 4.0;
+    if position.x - rect.x < chevron_end_x {
+        result
+    } else {
+        SidebarEvent::RowSelected {
+            section,
+            path: path.clone(),
+        }
+    }
+}

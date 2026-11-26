@@ -147,6 +147,7 @@ mod tests {
     /// strip, exercising the axis-priority corner case.
     fn test_layout(wide: bool) -> (Rect, DataTableLayout) {
         let table = DataTable {
+            bordered: false,
             id: WidgetId::new("table-nav-test"),
             columns: vec![Column {
                 title: "A".to_string(),

@@ -280,6 +280,7 @@ impl CoordApp {
 
         let rect = Self::fleet_health_overlay_rect(main);
         let total = items.len();
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             rect,
             &ListView {

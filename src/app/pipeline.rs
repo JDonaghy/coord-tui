@@ -2392,6 +2392,13 @@ impl CoordApp {
         };
         let fields = vec![
             FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id: Self::completed_field_id("since"),
                 label: StyledText::plain("Time range"),
                 kind: FieldKind::SegmentedControl {
@@ -2403,6 +2410,13 @@ impl CoordApp {
                 validation: None,
             },
             FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id: Self::completed_field_id("until"),
                 label: StyledText::plain("Window end"),
                 kind: FieldKind::TextInput {
@@ -2416,6 +2430,13 @@ impl CoordApp {
                 validation: None,
             },
             FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id: Self::completed_field_id("repo"),
                 label: StyledText::plain("Repo"),
                 kind: repo_kind,
@@ -2428,6 +2449,12 @@ impl CoordApp {
             .get(self.completed_grid.field_sel)
             .map(|f| f.id.clone());
         Form {
+            label_position: Default::default(),
+            label_align: Default::default(),
+            label_width: None,
+            control_width: quadraui::ControlWidth::Content,
+            min_control_width: None,
+            spacing: Default::default(),
             id: WidgetId::new("pipeline-completed-form"),
             fields,
             focused_field,
@@ -2732,8 +2759,8 @@ impl CoordApp {
         // the `msv.rs` contract. Re-deriving geometry at click time is the
         // cached-layout-vs-paint drift #1094 had to fix for the Audit table.
         let form = self.completed_form();
-        let form_layout = backend.form_layout(controls_rect, &form);
-        backend.draw_form(controls_rect, &form);
+        let form_layout = backend.layout_primitive(controls_rect, &form).layout;
+        backend.draw_dyn(controls_rect, &form, &InteractionState::new());
         *self.completed_form_layout.borrow_mut() = Some((controls_rect, form_layout));
 
         let body_rect = Rect::new(
@@ -2752,6 +2779,7 @@ impl CoordApp {
                 // A bad control value is stated, not swallowed: rendering an
                 // empty grid for an unparseable `until` reads identically to
                 // "nothing completed", which is the wrong answer.
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(
                     body_rect,
                     &plain_list("completed-error", &format!("  {reason}"), 0),
@@ -2760,6 +2788,7 @@ impl CoordApp {
             }
         };
         if rows.is_empty() {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 body_rect,
                 &plain_list(
@@ -2780,6 +2809,7 @@ impl CoordApp {
         }
 
         let table = DataTable {
+            bordered: false,
             id: WidgetId::new("pipeline-completed"),
             columns: Self::completed_columns(),
             rows: Self::completed_data_rows(&rows),
@@ -2804,6 +2834,7 @@ impl CoordApp {
             column_overrides: self.completed_grid.table.column_overrides.clone(),
             footer: None,
         };
+        // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
         let layout = backend.draw_data_table(body_rect, &table, None);
         *self.completed_grid.table.layout.borrow_mut() = Some((body_rect, layout));
     }
@@ -2839,6 +2870,7 @@ impl CoordApp {
             }
             None => Self::COMPLETED_DETAIL_BACK_HINT.to_string(),
         };
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             Rect::new(rect.x, rect.y, rect.width, back_h),
             &Self::completed_caption_list("completed-detail-back", &caption),
@@ -2859,8 +2891,10 @@ impl CoordApp {
                 // see `render.rs`'s matching comment on the Overview arm's stash.
                 self.last_stage_content_cols
                     .set((body_rect.width / backend.char_width().max(1.0)) as usize);
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(body_rect, &self.pipeline_tab_body_list_for(Some(idx)))
             }
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             None => backend.draw_list(
                 body_rect,
                 &plain_list(
@@ -3828,6 +3862,7 @@ impl CoordApp {
 
         // Empty-state: no staging AND no queue entries.
         if n == 0 && staging.is_empty() {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(rect, &plain_list(
                 "mergequeue-empty",
                 "  No merge-queue entries — run `coord merge` to populate the queue.",
@@ -3961,6 +3996,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: total > 10,
         };
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(rect, &list);
         // #79: PR numbers, branch names, and block reasons in this list all
         // need to be copyable without retyping.
@@ -4138,6 +4174,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: total > 10,
         };
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(rect, &list);
         // #79: PR numbers, branch names, and block reasons in this list all
         // need to be copyable without retyping.
@@ -7850,6 +7887,7 @@ impl CoordApp {
         let (label, _stage_idx) = self.pipeline_action_button()?;
         Some(Toolbar::new(WidgetId::new("pipeline-action-bar")).with_buttons(vec![
             ToolbarButton::Action {
+                spec: None,
                 id: WidgetId::new("pipeline-action:dispatch"),
                 label: label.clone(),
                 // #80: no icon today (`None`, not a fallback character), so

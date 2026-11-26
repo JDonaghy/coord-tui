@@ -1323,6 +1323,7 @@ impl CoordApp {
                 ),
             ],
             buttons: vec![DialogButton {
+                spec: None,
                 id: WidgetId::new("close"),
                 label: "Esc  Dismiss".into(),
                 is_default: true,
@@ -3014,12 +3015,14 @@ impl CoordApp {
                     rect.width,
                     rect.height - term_rect.height,
                 );
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(hint_rect, &app.terminal_copy_hint_list());
             }
         };
 
         let Some(issue_key) = self.selected_issue_key() else {
             // No issue selected — show a neutral placeholder.
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 term_rect,
                 &ListView {
@@ -3053,7 +3056,7 @@ impl CoordApp {
                 WidgetId::new(format!("detail-terminal:{}:{}", issue_key.0, issue_key.1)),
                 sb,
             );
-            backend.draw_terminal(term_rect, &snapshot);
+            backend.draw_dyn(term_rect, &snapshot, &InteractionState::new());
         } else {
             // Session pending or spawn error.
             let (msg, color) = match self.detail_terminal_spawn_errors.get(&issue_key) {
@@ -3066,6 +3069,7 @@ impl CoordApp {
                     Color::rgb(180, 180, 180),
                 ),
             };
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 term_rect,
                 &ListView {

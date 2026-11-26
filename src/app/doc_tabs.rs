@@ -2129,6 +2129,9 @@ mod tests {
     /// A doc-tab strip with `show_tab_close` on, as both real builders set it.
     fn strip(tabs: Vec<TabItem>) -> TabBar {
         TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: quadraui::WidgetId::new("doc-tabs"),
             tabs,
             right_segments: Vec::new(),

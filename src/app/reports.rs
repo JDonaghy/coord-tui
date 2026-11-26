@@ -329,6 +329,13 @@ impl CoordApp {
                 param.label.clone()
             };
             fields.push(FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id,
                 label: StyledText::plain(label.as_str()),
                 kind,
@@ -341,6 +348,13 @@ impl CoordApp {
         // inside the collapsible body: collapsing a section must hide the
         // ability to fire it, not leave a dangling trigger in the header.
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: Self::reports_run_field_id(&def.id),
             label: StyledText::plain("Run"),
             kind: FieldKind::Button,
@@ -350,6 +364,12 @@ impl CoordApp {
         });
         let focused_field = focused.and_then(|i| fields.get(i)).map(|f| f.id.clone());
         Form {
+            label_position: Default::default(),
+            label_align: Default::default(),
+            label_width: None,
+            control_width: quadraui::ControlWidth::Content,
+            min_control_width: None,
+            spacing: Default::default(),
             id: WidgetId::new(format!("reports-form-{}", def.id)),
             fields,
             focused_field,
@@ -522,12 +542,15 @@ impl CoordApp {
                 "  No reports available.  (empty catalogue)"
             };
             self.reports_layout.borrow_mut().clear();
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(rect, &plain_list("reports-empty", message, 0));
             return;
         }
 
         let view = self.reports_view();
+        // TODO(quadraui widget contract): legacy `Backend::msv_layout` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
         let layout = backend.msv_layout(rect, &view);
+        // TODO(quadraui widget contract): legacy `Backend::draw_multi_section_view` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
         backend.draw_multi_section_view(rect, &view);
         let forms: Vec<Option<FormLayout>> = view
             .sections
@@ -536,7 +559,9 @@ impl CoordApp {
             .map(|(i, section)| {
                 let body = layout.sections.get(i)?.body_bounds;
                 match (&section.body, section.collapsed) {
-                    (SectionBody::Form(form), false) => Some(backend.form_layout(body, form)),
+                    (SectionBody::Form(form), false) => {
+                        Some(backend.layout_primitive(body, form).layout)
+                    }
                     _ => None,
                 }
             })
@@ -1280,6 +1305,7 @@ impl CoordApp {
                 "  No reports available.  (the daemon's catalogue is empty)".to_string()
             };
             *self.reports_table_layout.borrow_mut() = None;
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(rect, &plain_list("reports-empty-main", &message, 0));
             return;
         }
@@ -1303,6 +1329,7 @@ impl CoordApp {
         // the old table on screen under a fresh failure is the exact
         // "stale result" the acceptance criteria rule out.
         if let Some(reason) = &self.reports_error {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list("reports-error", &format!("  Report failed: {reason}"), 0),
@@ -1310,6 +1337,7 @@ impl CoordApp {
             return;
         }
         if let Some(id) = &self.reports_running {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list("reports-running", &format!("  Running {id}…"), 0),
@@ -1317,6 +1345,7 @@ impl CoordApp {
             return;
         }
         let Some(result) = self.reports_result.as_ref() else {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list(
@@ -1392,6 +1421,7 @@ impl CoordApp {
                     // the table.
                     let title_h = if title.is_empty() { 0.0 } else { lh };
                     if title_h > 0.0 {
+                        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                         backend.draw_list(
                             Rect::new(rect.x, rect.y, rect.width, title_h),
                             &Self::reports_caption_list(
@@ -1406,6 +1436,7 @@ impl CoordApp {
                     // a glance down does not already give. The returned
                     // `ChartLayout` is discarded for the same reason —
                     // nothing hit-tests it.
+                    // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
                     backend.draw_chart(
                         Rect::new(rect.x, rect.y + title_h, rect.width, chart_h - title_h),
                         chart,
@@ -1414,6 +1445,7 @@ impl CoordApp {
                     );
                 }
                 ChartPlan::Degrade(reason) if degrade_h > 0.0 => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(
                         Rect::new(rect.x, rect.y, rect.width, degrade_h),
                         &Self::reports_caption_list(
@@ -1432,6 +1464,7 @@ impl CoordApp {
             if result.rows.is_empty() {
                 // An empty table renders as a bare header row, which reads
                 // like a broken fetch. Say what actually happened instead.
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(
                     table_rect,
                     &plain_list(
@@ -1453,6 +1486,7 @@ impl CoordApp {
                     .reports_sort
                     .filter(|(col, _)| *col < result.columns.len());
                 let table = DataTable {
+                    bordered: false,
                     id: WidgetId::new("reports-result"),
                     columns: Self::reports_result_columns(result),
                     rows: Self::reports_result_rows(
@@ -1501,6 +1535,7 @@ impl CoordApp {
                 // the main panel's origin (the section stack is above it),
                 // so a bare `pos - main_b` would mis-hit-test by the stack's
                 // height.
+                // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
                 let layout = backend.draw_data_table(table_rect, &table, None);
                 *self.reports_table_layout.borrow_mut() = Some((table_rect, layout));
             }
@@ -1511,6 +1546,7 @@ impl CoordApp {
                 .iter()
                 .map(|n| activity_item(&format!(" {n}"), Color::rgb(210, 200, 160)))
                 .collect();
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 Rect::new(rect.x, rect.y + body_h, rect.width, notes_h),
                 &ListView {
@@ -1699,6 +1735,7 @@ impl CoordApp {
             // Mirrors the generic table path's empty-window message — this
             // report takes the whole body rect itself, so it needs its own
             // copy rather than falling through to the table's.
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list(
@@ -1715,6 +1752,7 @@ impl CoordApp {
 
         let caption_h = lh;
         if rect.height < Self::TREND_CHART_MIN_PANEL_ROWS * lh {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list(
@@ -1755,6 +1793,7 @@ impl CoordApp {
             None => "per bucket".to_string(),
         };
 
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             top_caption,
             &Self::reports_caption_list(
@@ -1780,8 +1819,10 @@ impl CoordApp {
         // No hover point/crosshair: same reasoning as the #2271 single
         // chart — this is a scan aid, nothing hit-tests the returned
         // layout.
+        // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
         backend.draw_chart(top_chart, &merged_chart, None, None);
 
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             bottom_caption,
             &Self::reports_caption_list(
@@ -1814,9 +1855,11 @@ impl CoordApp {
                     x_ticks: None,
                     show_grid: true,
                 };
+                // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
                 backend.draw_chart(bottom_chart, &cost_chart, None, None);
             }
             None => {
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(
                     bottom_chart,
                     &plain_list(

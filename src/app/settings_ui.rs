@@ -1689,6 +1689,13 @@ impl CoordApp {
         // ── Display ────────────────────────────────────────────────────
         fields.push(settings_label("Display"));
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: WidgetId::new("settings:theme"),
             label: StyledText::plain("Theme"),
             kind: FieldKind::SegmentedControl {
@@ -1704,6 +1711,13 @@ impl CoordApp {
         // default — a terminal without a patched Nerd Font paints every
         // Private-Use-Area codepoint as a tofu box.
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: WidgetId::new("settings:nerd-fonts"),
             label: StyledText::plain("Nerd Font icons"),
             kind: FieldKind::Toggle {
@@ -1719,6 +1733,13 @@ impl CoordApp {
         // ── Refresh ────────────────────────────────────────────────────
         fields.push(settings_label("Auto-Refresh"));
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: WidgetId::new("settings:cadence"),
             label: StyledText::plain("Cadence"),
             kind: FieldKind::SegmentedControl {
@@ -1736,6 +1757,13 @@ impl CoordApp {
         // ── Notifications ──────────────────────────────────────────────
         fields.push(settings_label("Notifications"));
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: WidgetId::new("settings:audio"),
             label: StyledText::plain("Audio on completion"),
             kind: FieldKind::Toggle {
@@ -1749,6 +1777,13 @@ impl CoordApp {
         // ── Watch Overlay ──────────────────────────────────────────────
         fields.push(settings_label("Watch Overlay"));
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: WidgetId::new("settings:log-ttl"),
             label: StyledText::plain("Log cache TTL"),
             kind: FieldKind::SegmentedControl {
@@ -1769,6 +1804,13 @@ impl CoordApp {
             .map(|s| s.as_str())
             .unwrap_or("Ctrl+R");
         fields.push(FormField {
+            label_position: None,
+            label_align: None,
+            label_width: None,
+            tab_index: None,
+            control_width: None,
+            min_control_width: None,
+            row_align: None,
             id: WidgetId::new("settings:keybind:pipeline_refresh"),
             label: StyledText::plain("Pipeline refresh"),
             kind: FieldKind::TextInput {
@@ -1786,6 +1828,13 @@ impl CoordApp {
         fields.push(settings_label("Per-Machine Model Overrides"));
         if self.data.machines.is_empty() {
             fields.push(FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id: WidgetId::new("settings:no-machines"),
                 label: StyledText::plain("No machines available"),
                 kind: FieldKind::ReadOnly {
@@ -1804,6 +1853,13 @@ impl CoordApp {
                 .copied()
                 .unwrap_or_default();
             fields.push(FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id: WidgetId::new(format!("settings:model:{}", machine.name)),
                 label: StyledText::plain(machine.name.clone()),
                 kind: FieldKind::SegmentedControl {
@@ -1827,6 +1883,12 @@ impl CoordApp {
         let focused_field = interactive.get(self.settings_field_sel).cloned();
 
         Form {
+            label_position: Default::default(),
+            label_align: Default::default(),
+            label_width: None,
+            control_width: quadraui::ControlWidth::Content,
+            min_control_width: None,
+            spacing: Default::default(),
             id: WidgetId::new("settings-form"),
             fields,
             focused_field,
@@ -1991,6 +2053,13 @@ impl CoordApp {
 /// Build a non-interactive category label `FormField` for the settings form.
 pub(crate) fn settings_label(text: &str) -> FormField {
     FormField {
+        label_position: None,
+        label_align: None,
+        label_width: None,
+        tab_index: None,
+        control_width: None,
+        min_control_width: None,
+        row_align: None,
         id: WidgetId::new(format!(
             "settings-label:{}",
             text.to_lowercase().replace(' ', "-")

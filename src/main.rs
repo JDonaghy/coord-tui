@@ -39,8 +39,16 @@ fn main() {
         // row's icon) before the first frame paints.
         let app = CoordApp::new();
         let shell_config = app.shell_config_current();
-        quadraui::tui::shell_runner::run_with_shell(app, shell_config);
+        quadraui::tui::shell_runner::run_with_shell(app, shell_config)
     }));
+
+    // The run loop reports a setup/teardown failure (raw mode, alternate
+    // screen, mouse capture) as an error rather than panicking; surface it
+    // instead of exiting 0 as if the session ended normally.
+    if let Ok(Err(err)) = &run_result {
+        eprintln!("\ncoord-tui: {err}\n");
+        std::process::exit(1);
+    }
 
     if run_result.is_err() {
         // At this point the terminal has been restored by quadraui's Drop

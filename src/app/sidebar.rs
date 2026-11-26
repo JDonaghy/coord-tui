@@ -27,6 +27,7 @@ impl CoordApp {
         // from GitHub on demand without needing a terminal ('S' does the same).
         if self.active_view == SidebarView::Board {
             buttons.push(ToolbarButton::Action {
+                spec: None,
                 id: WidgetId::new("sidebar-action:sync-issues"),
                 label: "Sync".to_string(),
                 // #80: stays a bare literal rather than routing through
@@ -50,6 +51,7 @@ impl CoordApp {
         // wired to the same `open_new_terminal_picker` entry point as `n`.
         if self.active_view == SidebarView::Terminal {
             buttons.push(ToolbarButton::Action {
+                spec: None,
                 id: WidgetId::new("sidebar-action:new-terminal"),
                 label: "New terminal".to_string(),
                 // #80: same reasoning as "sync-issues" above — no reviewed
@@ -160,7 +162,7 @@ impl CoordApp {
         // means the click landed below the toolbar slot (tree
         // territory) and the caller should forward to the tree.
         let panel = self.build_sidebar_action_panel(lh);
-        let layout = backend.sidebar_panel_layout(sidebar_b, &panel);
+        let layout = backend.layout_primitive(sidebar_b, &panel);
         let content_rect = layout.content_bounds;
         match layout.hit_test(pos.x, pos.y) {
             SidebarPanelHit::ToolbarButton(id) => {
@@ -435,7 +437,7 @@ impl CoordApp {
             toolbar: Some(toolbar),
             toolbar_height: Some(self.toolbar_height(lh)),
         };
-        let layout = backend.sidebar_panel_layout(main_b, &panel);
+        let layout = backend.layout_primitive(main_b, &panel);
         let content_rect = layout.content_bounds;
         match layout.hit_test(pos.x, pos.y) {
             SidebarPanelHit::ToolbarButton(id) => {
@@ -661,6 +663,7 @@ impl CoordApp {
 /// only ever reaches the button via that seam.
 pub(crate) fn toolbar_button(verb: &str, label: &str, enabled: bool) -> ToolbarButton {
     ToolbarButton::Action {
+        spec: None,
         id: WidgetId::new(format!("toolbar:{}", verb)),
         // Strip the surrounding spaces — the primitive adds its own
         // padding via `[ ... ]` framing in the TUI rasteriser.

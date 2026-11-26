@@ -6548,6 +6548,9 @@
     /// segments) over `labels`, with `active` marked active.
     fn tab_bar_from_labels(labels: &[&str], active: usize, scroll_offset: usize) -> TabBar {
         TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: WidgetId::new("test-tabs"),
             tabs: labels
                 .iter()
@@ -6648,6 +6651,9 @@
     fn resolve_tab_bar_click_splits_close_glyph_from_body() {
         let label = "#101 Fix… ";
         let bar = TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: WidgetId::new("test-doc-tabs"),
             tabs: vec![TabItem {
                 label: label.to_string(),
@@ -6665,15 +6671,20 @@
         let backend = quadraui::tui::TuiBackend::new();
         let bar_rect = Rect::new(20.0, 0.0, 40.0, 1.0);
         let close_x = {
-            #[allow(deprecated)]
-            let hits = backend.tab_bar_layout_with_chrome(
-                Rect::new(0.0, 0.0, bar_rect.width, bar_rect.height),
-                &bar,
-                &doc_tab_chrome(),
-            );
-            #[allow(deprecated)]
-            let (start, _) = hits.close_bounds[0].expect("a closable tab reports a close box");
-            start as f32
+            let chromed = TabBar {
+                chrome: doc_tab_chrome(),
+                ..bar.clone()
+            };
+            let layout = backend
+                .layout_primitive(
+                    Rect::new(0.0, 0.0, bar_rect.width, bar_rect.height),
+                    &chromed,
+                )
+                .layout;
+            layout.visible_tabs[0]
+                .close_bounds
+                .expect("a closable tab reports a close box")
+                .x
         };
         assert_eq!(
             resolve_tab_bar_click(
@@ -6770,6 +6781,7 @@
         // (#1377) rather than a hand-rolled re-derivation.
         let backend = quadraui::tui::TuiBackend::new();
         let view = app.build_pipeline_widget().expect("widget");
+        // TODO(quadraui widget contract): legacy `Backend::pipeline_view_layout` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
         let layout = backend.pipeline_view_layout(pv_rect, &pipeline_view_for_render(&view));
 
         let work_stage = &layout.stages[0];
@@ -20010,7 +20022,9 @@
         // #6: geometry comes from `Backend::toolbar_layout` — the backend's
         // own paint-free measurer — not a hand-rolled cell-width copy.
         let backend = quadraui::tui::TuiBackend::new();
-        let layout = backend.toolbar_layout(Rect::new(0.0, 0.0, 200.0, 1.0), &bar);
+        let layout = backend
+            .layout_primitive(Rect::new(0.0, 0.0, 200.0, 1.0), &bar)
+            .layout;
         let visible = layout
             .visible_items
             .iter()
@@ -51241,6 +51255,7 @@ Milestone tracking issue.
     // through a black-box driver.
     fn audit_table_layout_for_test(overrides: Vec<Option<f32>>) -> (Rect, DataTableLayout) {
         let table = DataTable {
+            bordered: false,
             id: WidgetId::new("audit-list-test"),
             columns: CoordApp::audit_columns(),
             rows: Vec::new(),
@@ -58261,6 +58276,7 @@ Milestone tracking issue.
             .nth(1)
             .expect("the Queue grid's DataTable literal must exist");
         let window = after_grid
+            // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
             .split("backend.draw_data_table(list_rect, &table, None)")
             .next()
             .unwrap_or(after_grid);

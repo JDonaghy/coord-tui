@@ -34,5 +34,10 @@ fn main() {
     // loaded settings rather than `TuiSettings::default()`.
     let app = CoordApp::new();
     let shell_config = app.shell_config_current();
-    quadraui::gtk::shell_runner::run_with_shell(app, shell_config);
+    // A backend failure while the run loop is live is reported as an
+    // error; surface it rather than exiting 0.
+    if let Err(err) = quadraui::gtk::shell_runner::run_with_shell(app, shell_config) {
+        eprintln!("coord-tui-gtk: {err}");
+        std::process::exit(1);
+    }
 }

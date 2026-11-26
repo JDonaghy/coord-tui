@@ -77,11 +77,7 @@ impl ShellApp for CoordApp {
 
         // ── Status bar ────────────────────────────────────────────────
         if let Some(sb_bounds) = layout.status_bar_bounds {
-            backend.draw_status_bar_interactive(
-                sb_bounds,
-                &self.status_bar(),
-                &InteractionState::new(),
-            );
+            backend.draw_dyn(sb_bounds, &self.status_bar(), &InteractionState::new());
         }
 
         // ── Sidebar: list content (sidebar system / machines) ────────
@@ -94,14 +90,14 @@ impl ShellApp for CoordApp {
             // dispatch routes through `SidebarPanelLayout::hit_test` so the
             // off-by-one math we had to maintain by hand is gone.
             let panel = self.build_sidebar_action_panel(lh);
-            let panel_layout = backend.draw_sidebar_panel_interactive(
-                full_sidebar_rect,
-                &panel,
-                &InteractionState::from_parts(
-                    self.sidebar_action_bar_hover.hovered_id().cloned(),
-                    None,
-                ),
-            );
+            let panel_layout = backend.layout_primitive(full_sidebar_rect, &panel);
+            let hover = match &panel.toolbar {
+                Some(bar) => {
+                    toolbar_hover(&panel.id, bar, self.sidebar_action_bar_hover.hovered_id())
+                }
+                None => InteractionState::new(),
+            };
+            backend.draw_dyn(full_sidebar_rect, &panel, &hover);
             let sidebar_rect = panel_layout.content_bounds;
             match self.active_view {
                 SidebarView::Board => {
@@ -111,10 +107,12 @@ impl ShellApp for CoordApp {
                     // — can compute a row's panel offset. Same render-then-act
                     // discipline as `last_main_visible_rows` above.
                     self.last_sidebar_geom
+                        // TODO(quadraui widget contract): legacy `Backend::msv_metrics` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
                         .set(Some((sidebar_rect, lh, backend.msv_metrics().header_size)));
                     self.board_sidebar.render(backend, sidebar_rect);
                 }
                 SidebarView::Machines => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.machines_list(true));
                 }
                 SidebarView::Pipeline => {
@@ -124,6 +122,7 @@ impl ShellApp for CoordApp {
                     // handle), so this render-then-act stash is its only
                     // source for the metrics its scroll-offset math needs.
                     self.last_pipeline_sidebar_geom
+                        // TODO(quadraui widget contract): legacy `Backend::msv_metrics` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
                         .set(Some((sidebar_rect, lh, backend.msv_metrics().header_size)));
                     self.pipeline_sidebar.render(backend, sidebar_rect);
                 }
@@ -132,6 +131,7 @@ impl ShellApp for CoordApp {
                     // nav.  Render an empty placeholder list so the sidebar
                     // slot keeps a header (consistent with other views)
                     // without offering a misleading affordance.
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.settings_sidebar_placeholder());
                 }
                 SidebarView::Terminal => {
@@ -141,18 +141,22 @@ impl ShellApp for CoordApp {
                     // above this tree, see `build_sidebar_action_panel`) —
                     // kill is still a follow-up. The main area remains a
                     // single PTY surface.
+                    // TODO(quadraui widget contract): legacy `Backend::draw_tree` — move to `DrawsPrimitives` when quadraui ports TreeView (list/tree/table group, quadraui #2609).
                     backend.draw_tree(sidebar_rect, &self.terminal_tree_view());
                 }
                 // #638: Kanban sidebar is a placeholder — all content is in the main panel.
                 SidebarView::Kanban => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.kanban_sidebar_placeholder());
                 }
                 // #737: Merge Queue sidebar — entry count + attention indicator.
                 SidebarView::MergeQueue => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.merge_queue_sidebar());
                 }
                 // #771: Milestone DAG sidebar — milestone-with-work-order list.
                 SidebarView::MilestoneDag => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.milestone_dag_sidebar());
                 }
                 // #1121: Plans sidebar — repo->plan tree (All repos + one
@@ -161,15 +165,18 @@ impl ShellApp for CoordApp {
                 // Sessions trees. Was a static plan-count `ListView`
                 // placeholder (#975) before this.
                 SidebarView::Plans => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_tree` — move to `DrawsPrimitives` when quadraui ports TreeView (list/tree/table group, quadraui #2609).
                     backend.draw_tree(sidebar_rect, &self.plans_tree_view());
                 }
                 // #1032: Sessions sidebar — machine → repo → session tree,
                 // same raw-`TreeView` pattern as the #953 Terminal tree.
                 SidebarView::Sessions => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_tree` — move to `DrawsPrimitives` when quadraui ports TreeView (list/tree/table group, quadraui #2609).
                     backend.draw_tree(sidebar_rect, &self.sessions_tree_view());
                 }
                 // #1039: Audit sidebar — entry count + "N recent" badge.
                 SidebarView::Audit => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.audit_sidebar());
                 }
                 // #1911: Reports sidebar — one collapsible section per
@@ -182,12 +189,14 @@ impl ShellApp for CoordApp {
                 // (running / waiting / blocked / held). The grid itself
                 // lives in the main panel.
                 SidebarView::Queue => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.queue_sidebar());
                 }
                 // #2532: Approved work items sidebar — the aggregate
                 // reading ("N ready to pull" + the conditional "missing a
                 // repo mapping" warning line, contract §3b).
                 SidebarView::Approved => {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(sidebar_rect, &self.approved_sidebar());
                 }
             }
@@ -204,19 +213,18 @@ impl ShellApp for CoordApp {
             // #272: same SidebarPanel composition for the main-panel
             // toolbar so the tab bar below doesn't have to coordinate
             // its own slot carving.
+            let hover = toolbar_hover(
+                &WidgetId::new("panel-toolbar"),
+                &toolbar,
+                self.panel_toolbar_hover.hovered_id(),
+            );
             let panel = SidebarPanel {
                 id: WidgetId::new("panel-toolbar"),
                 toolbar: Some(toolbar),
                 toolbar_height: Some(self.toolbar_height(lh)),
             };
-            let panel_layout = backend.draw_sidebar_panel_interactive(
-                full_m,
-                &panel,
-                &InteractionState::from_parts(
-                    self.panel_toolbar_hover.hovered_id().cloned(),
-                    None,
-                ),
-            );
+            let panel_layout = backend.layout_primitive(full_m, &panel);
+            backend.draw_dyn(full_m, &panel, &hover);
             panel_layout.content_bounds
         } else {
             full_m
@@ -239,14 +247,14 @@ impl ShellApp for CoordApp {
                 // non-split case".
                 let panes = self.board_panes();
                 let tree = panes.split_tree(PanelScope::Board);
+                // TODO(quadraui widget contract): legacy `Backend::split_tree_layout` — move to `DrawsPrimitives` when quadraui ports SplitTree (split group).
                 let split_layout = backend.split_tree_layout(m, &tree);
-                self.paint_board_pane_dividers(backend, &split_layout);
                 let leaves: Vec<Rect> = split_layout
                     .leaves
                     .iter()
                     .map(|(_, rect)| *rect)
                     .collect();
-                *self.board_split_layout.borrow_mut() = Some(split_layout);
+                *self.board_split_layout.borrow_mut() = Some(split_layout.clone());
                 // #2288: a pane that no longer exists must not leave its
                 // Issue wrap width behind for whatever pane later recycles
                 // its index.
@@ -255,6 +263,11 @@ impl ShellApp for CoordApp {
                     self.render_pane.set(Some(pane_idx));
                     self.render_board_pane(backend, pane_rect, lh);
                 }
+                // Dividers paint after the panes: a leaf rect ending on a
+                // half cell (`x + width` = 79.5) rounds out to cover the
+                // divider's own column, and the pane's tab bar fills its
+                // whole rect, so a divider painted first is painted over.
+                self.paint_board_pane_dividers(backend, &split_layout);
                 // Back to "the focused pane" the moment the paint is over —
                 // every event handler must see the focused pane, never
                 // whichever one happened to be painted last.
@@ -272,6 +285,7 @@ impl ShellApp for CoordApp {
                 let detail_h = (m.height - chart_h).max(0.0);
                 let detail_rect = Rect::new(m.x, m.y, m.width, detail_h);
                 let chart_rect = Rect::new(m.x, m.y + detail_h, m.width, chart_h);
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(detail_rect, &self.machine_detail_list());
                 self.render_machine_sparklines(backend, chart_rect, lh);
             }
@@ -287,6 +301,7 @@ impl ShellApp for CoordApp {
                 // Watch overlay takes over the entire main panel when active —
                 // tabs, pipeline view, meta line all hidden while watching.
                 if self.pipeline_sel.is_none() && self.pipeline_issues.is_empty() {
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(m, &self.pipeline_placeholder_list());
                 } else {
                     // #2284 (ms-65 §3a): Pipeline's `panel_toolbar()` returns
@@ -300,18 +315,14 @@ impl ShellApp for CoordApp {
                     // zero-tab baseline.
                     let tab_h = detail_tab_bar_height(lh);
                     let m = match self.pipeline_doc_tab_strip(m.width) {
-                        Some(strip) => {
+                        Some(mut strip) => {
                             let strip_rect = Rect::new(m.x, m.y, m.width, tab_h);
                             // #7: `_with_chrome` so §2c's `[`/`]` encloses the
                             // rasteriser's own `×` (quadraui#631). The click
                             // path asks for the SAME chrome via
                             // `doc_tab_chrome` — see `resolve_tab_bar_click`.
-                            backend.draw_tab_bar_with_chrome(
-                                strip_rect,
-                                &strip,
-                                None,
-                                &doc_tab_chrome(),
-                            );
+                            strip.chrome = doc_tab_chrome();
+                            backend.draw_dyn(strip_rect, &strip, &InteractionState::new());
                             Rect::new(m.x, m.y + tab_h, m.width, (m.height - tab_h).max(0.0))
                         }
                         None => m,
@@ -328,17 +339,10 @@ impl ShellApp for CoordApp {
                     // painter renders from `scroll_offset` verbatim, so resolve
                     // the offset that keeps the active tab on-screen before
                     // drawing. The click hit-test below derives the same offset.
-                    // `Backend::tab_bar_layout` only returns the deprecated
-                    // `TabBarHits`; no `Backend` method returns the
-                    // replacement `TabBarLayout` yet, so this can't migrate
-                    // from here. See quadraui#823 and
-                    // `quadraui/src/backend.rs:1456`.
-                    #[allow(deprecated)]
-                    {
-                        tab_bar.scroll_offset =
-                            backend.tab_bar_layout(tab_rect, &tab_bar).correct_scroll_offset;
-                    }
-                    backend.draw_tab_bar(tab_rect, &tab_bar, None);
+                    tab_bar.scroll_offset = backend
+                        .layout_primitive(tab_rect, &tab_bar)
+                        .corrected_scroll_offset;
+                    backend.draw_dyn(tab_rect, &tab_bar, &InteractionState::new());
 
                     // #818: helper — draw the compact read-only stage strip
                     // pinned at the top of every non-Overview tab.  Returns
@@ -352,6 +356,7 @@ impl ShellApp for CoordApp {
                         };
                         let strip_rect = pipeline_detail_pv_rect_strip(cr, lh);
                         let render_view = pipeline_view_for_render(&pv);
+                        // TODO(quadraui widget contract): legacy `Backend::draw_pipeline_view` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
                         backend.draw_pipeline_view(strip_rect, &render_view);
                         Rect::new(
                             cr.x,
@@ -393,19 +398,19 @@ impl ShellApp for CoordApp {
                                 (content_rect.height - bar_h - pv_rect.height).max(0.0),
                             );
                             if let Some(toolbar) = action_toolbar {
-                                backend.draw_toolbar_interactive(
-                                    bar_rect,
+                                let hover = toolbar_hover(
+                                    &toolbar.id,
                                     &toolbar,
-                                    &InteractionState::from_parts(
-                                        self.pipeline_action_bar_hover.hovered_id().cloned(),
-                                        None,
-                                    ),
+                                    self.pipeline_action_bar_hover.hovered_id(),
                                 );
+                                backend.draw_dyn(bar_rect, &toolbar, &hover);
                             }
                             if let Some(view) = self.build_pipeline_widget() {
                                 backend
+                                    // TODO(quadraui widget contract): legacy `Backend::draw_pipeline_view` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
                                     .draw_pipeline_view(pv_rect, &pipeline_view_for_render(&view));
                             } else {
+                                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                                 backend.draw_list(pv_rect, &self.pipeline_placeholder_list());
                             }
                             // #55: stash content width so stage_content_review /
@@ -425,6 +430,7 @@ impl ShellApp for CoordApp {
                             // merge-block reason all land here, and until now
                             // nothing on this pane was selectable.
                             let tab_body_list = self.pipeline_tab_body_list();
+                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                             backend.draw_list(meta_rect, &tab_body_list);
                             register_list_text(backend, "pipeline-tab-body", meta_rect, &tab_body_list);
                         }
@@ -438,6 +444,7 @@ impl ShellApp for CoordApp {
                             self.last_issue_panel_cols
                                 .set((body_rect.width / backend.char_width().max(1.0)) as usize);
                             let issue_body_list = self.pipeline_issue_body_list();
+                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                             backend.draw_list(body_rect, &issue_body_list);
                             // #79: issue body carries the raw GitHub issue
                             // text — ids, URLs, commands the operator needs
@@ -508,12 +515,14 @@ impl ShellApp for CoordApp {
                                     visible as f32,
                                     1.0,
                                 );
+                                // TODO(quadraui widget contract): legacy `Backend::draw_scrollbar` — move to `DrawsPrimitives` when quadraui ports Scrollbar (scrollbar group).
                                 backend.draw_scrollbar(sb_track, &vsb);
                                 Some(vsb)
                             } else {
                                 None
                             };
 
+                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                             backend.draw_list(list_rect, &log_list);
                             // #312/#79: register as a selectable TextRegion so
                             // the quadraui runtime handles click-drag line
@@ -530,6 +539,7 @@ impl ShellApp for CoordApp {
                             // #558/#876: session-history summary sourced from
                             // the in-memory board.
                             let summary_list = self.pipeline_summary_list();
+                            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                             backend.draw_list(summary_body, &summary_list);
                             // #79: session-history rows carry assignment ids
                             // and machine hostnames the operator needs to copy.
@@ -599,7 +609,7 @@ impl ShellApp for CoordApp {
                         None
                     };
                     let snapshot = sess.to_terminal(WidgetId::new("coord-terminal:0"), sb);
-                    backend.draw_terminal(term_rect, &snapshot);
+                    backend.draw_dyn(term_rect, &snapshot, &InteractionState::new());
                 } else {
                     // No session yet — show a one-line placeholder.  The
                     // first `tick` after this render will spawn/attach it.
@@ -639,6 +649,7 @@ impl ShellApp for CoordApp {
                             Color::rgb(180, 180, 180)
                         },
                     );
+                    // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                     backend.draw_list(
                         term_rect,
                         &ListView {
@@ -657,10 +668,12 @@ impl ShellApp for CoordApp {
                 }
                 // #790: paint the hint strip last so it sits below the
                 // terminal content.
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(hint_rect, &self.terminal_copy_hint_list());
             }
             // #638: Kanban view — render the Board widget into the full main rect.
             SidebarView::Kanban => {
+                // TODO(quadraui widget contract): legacy `Backend::draw_board` — move to `DrawsPrimitives` when quadraui ports Board (board group).
                 let layout = backend.draw_board(m, &self.kanban_model);
                 *self.kanban_layout.borrow_mut() = Some(layout);
             }
@@ -681,6 +694,7 @@ impl ShellApp for CoordApp {
             // leaf (assignment id, issue/repo, machine, type, status).
             SidebarView::Sessions => {
                 let sessions_detail = self.sessions_detail_list();
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(m, &sessions_detail);
                 // #79: assignment ids and machine hostnames here need to be
                 // copyable without retyping.
@@ -716,6 +730,7 @@ impl ShellApp for CoordApp {
         let chat_is_board = self.chat_is_board_chat();
         if let Some(ref chat) = self.inject_chat {
             if !chat_is_refinement && !chat_is_board {
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(
                     m,
                     &ListView {
@@ -750,7 +765,7 @@ impl ShellApp for CoordApp {
 
         // ── Toast overlay (bottom-right of main content) ────────────────
         if let Some(stack) = self.toast_stack() {
-            backend.draw_toast_overlay(layout.main_content_bounds, &stack);
+            backend.draw_dyn(layout.main_content_bounds, &stack, &InteractionState::new());
         }
 
         // ── #259: open context menu (above everything except dialogs) ───
@@ -1884,6 +1899,7 @@ impl CoordApp {
         // `terminal_return_view` clear above), so close them rather than
         // let them silently bleed into the newly-active view's screen.
         if self.help_overlay.is_open() {
+            // TODO(quadraui widget contract): deprecated `HelpOverlayController::close` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy HelpOverlay event enum.
             self.help_overlay.close();
         }
         self.command_palette = None;
@@ -2103,7 +2119,7 @@ impl CoordApp {
                 title: None,
                 show_scrollbar: false,
             };
-            backend.draw_text_display(
+            backend.draw_dyn(
                 Rect::new(
                     div.cell_position() as f32,
                     div.cross_start,
@@ -2111,6 +2127,7 @@ impl CoordApp {
                     div.cross_size,
                 ),
                 &display,
+                &InteractionState::new(),
             );
         }
     }
@@ -2145,13 +2162,14 @@ impl CoordApp {
         // `TabBar` from the exact same call so a click column can
         // never disagree with what got painted here.
         let m = match self.board_doc_tab_strip(rect.width) {
-            Some(strip) => {
+            Some(mut strip) => {
                 let strip_rect = Rect::new(rect.x, rect.y, rect.width, tab_h);
                 // #7: `_with_chrome` so §2c's `[`/`]` encloses the rasteriser's
                 // own §2d `×` (quadraui#631) instead of the app baking both
                 // into `TabItem::label`. The click path resolves against the
                 // SAME chrome — `events.rs::resolve_tab_bar_click`.
-                backend.draw_tab_bar_with_chrome(strip_rect, &strip, None, &doc_tab_chrome());
+                strip.chrome = doc_tab_chrome();
+                backend.draw_dyn(strip_rect, &strip, &InteractionState::new());
                 Rect::new(
                     rect.x,
                     rect.y + tab_h,
@@ -2166,9 +2184,10 @@ impl CoordApp {
         let tab_bar = self.board_detail_tab_bar();
         let tab_rect = Rect::new(m.x, m.y, m.width, tab_h);
         let content_rect = Rect::new(m.x, m.y + tab_h, m.width, (m.height - tab_h).max(0.0));
-        backend.draw_tab_bar(tab_rect, &tab_bar, None);
+        backend.draw_dyn(tab_rect, &tab_bar, &InteractionState::new());
         match self.board_pane_detail_tab() {
             BoardDetailTab::Board => {
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(content_rect, &self.detail_list());
             }
             BoardDetailTab::Issue => {
@@ -2189,6 +2208,7 @@ impl CoordApp {
                 self.stash_board_pane_issue_cols(
                     (content_rect.width / backend.char_width().max(1.0)) as usize,
                 );
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(content_rect, &self.board_issue_body_list());
             }
             // #316: Chat tab — empty state CTA or live board chat.
@@ -2299,6 +2319,9 @@ impl CoordApp {
             })
             .collect();
         Some(TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: WidgetId::new("board-doc-tabs"),
             tabs,
             right_segments: Vec::new(),
@@ -2441,6 +2464,9 @@ impl CoordApp {
             })
             .collect();
         Some(TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: WidgetId::new("pipeline-doc-tabs"),
             tabs,
             right_segments: Vec::new(),
@@ -2605,6 +2631,9 @@ impl CoordApp {
             self.detail_terminal_sessions.contains_key(&(slug, num))
         });
         TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: WidgetId::new("board-detail-tabs"),
             tabs: vec![
                 TabItem {
@@ -2813,6 +2842,9 @@ impl CoordApp {
         // Refinement removed.  Order: Overview / Issue / Log / Summary /
         // Terminal, plus #2405's Completed grid pinned last.
         TabBar {
+            chrome: Default::default(),
+            glyphs: Default::default(),
+            icons: Vec::new(),
             id: WidgetId::new("pipeline-detail-tabs"),
             tabs: vec![
                 TabItem {

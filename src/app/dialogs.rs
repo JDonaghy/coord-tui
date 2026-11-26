@@ -1575,7 +1575,7 @@ impl CoordApp {
         let stack = build_context_menu_stack(state, lh, char_w, viewport);
         let mut cache: Vec<(ContextMenu, ContextMenuLayout)> = Vec::with_capacity(stack.len());
         for (menu, layout) in &stack {
-            backend.draw_context_menu(menu, layout);
+            draw_placed_context_menu(backend, menu, layout);
             cache.push((menu.clone(), layout.clone()));
         }
         *self.context_menu_layout.borrow_mut() = cache;
@@ -1744,6 +1744,7 @@ impl CoordApp {
         // (skips separators + disabled items, wraps around).
         let qui_items: Vec<QuiContextMenuItem> = level_items.iter().map(coord_item_to_qui).collect();
         let temp = ContextMenu {
+            glyphs: Default::default(),
             id: WidgetId::new("_move"),
             items: qui_items,
             selected_idx: current_sel,
@@ -1879,6 +1880,7 @@ impl CoordApp {
                 )],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Cancel — stay".into(),
                         is_default: true,
@@ -1886,6 +1888,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("force-quit"),
                         label: "Q  Force quit (session stays in tmux)".into(),
                         is_default: false,
@@ -1910,6 +1913,7 @@ impl CoordApp {
                     let where_tag = if m.is_local { "local" } else { "remote" };
                     let reach = if m.reachable { "●" } else { "○ offline?" };
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new(format!("machine:{i}")),
                         label: format!(
                             "{}  {} ({}) {}  {}",
@@ -1926,6 +1930,7 @@ impl CoordApp {
                 })
                 .collect();
             buttons.push(DialogButton {
+                spec: None,
                 id: WidgetId::new("cancel"),
                 label: "Esc  Cancel".into(),
                 is_default: false,
@@ -1955,6 +1960,7 @@ impl CoordApp {
                     let where_tag = if m.is_local { "local" } else { "remote" };
                     let reach = if m.reachable { "●" } else { "○ offline?" };
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new(format!("new-terminal-machine:{i}")),
                         label: format!(
                             "{}  {} ({}) {}  {}",
@@ -1971,6 +1977,7 @@ impl CoordApp {
                 })
                 .collect();
             buttons.push(DialogButton {
+                spec: None,
                 id: WidgetId::new("cancel"),
                 label: "Esc  Cancel".into(),
                 is_default: false,
@@ -2000,6 +2007,7 @@ impl CoordApp {
                 body: vec![StyledText::plain("Optional name (Enter to auto-name):")],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2007,6 +2015,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2043,6 +2052,7 @@ impl CoordApp {
                 )],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2050,6 +2060,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("clear"),
                         label: "Clear".into(),
                         is_default: false,
@@ -2057,6 +2068,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2081,6 +2093,7 @@ impl CoordApp {
                 .iter()
                 .enumerate()
                 .map(|(i, repo)| DialogButton {
+                    spec: None,
                     id: WidgetId::new(format!("repo:{i}")),
                     label: format!("{}  {}", i + 1, repo),
                     is_default: i == 0,
@@ -2089,6 +2102,7 @@ impl CoordApp {
                 })
                 .collect();
             buttons.push(DialogButton {
+                spec: None,
                 id: WidgetId::new("cancel"),
                 label: "Cancel".into(),
                 is_default: false,
@@ -2149,6 +2163,7 @@ impl CoordApp {
             // "Recover" — run the full (non-dry-run) diagnose.
             // Always offered; it's safe to retry if already healthy.
             buttons.push(DialogButton {
+                spec: None,
                 id: WidgetId::new("diagnose-stage"),
                 label: "R  Recover (diagnose & fix)".into(),
                 is_default: !needs_reset,
@@ -2158,6 +2173,7 @@ impl CoordApp {
             // "Reset stage" — diagnose --reset; always available as a
             // non-destructive escape hatch (keeps the branch).
             buttons.push(DialogButton {
+                spec: None,
                 id: WidgetId::new("diagnose-reset"),
                 label: "X  Reset stage (keeps branch + commits)".into(),
                 is_default: needs_reset,
@@ -2168,6 +2184,7 @@ impl CoordApp {
             // actually a pending- entry for this issue.
             if has_phantom {
                 buttons.push(DialogButton {
+                    spec: None,
                     id: WidgetId::new("diagnose-clear-phantom"),
                     label: "C  Clear phantom live session".into(),
                     is_default: false,
@@ -2176,6 +2193,7 @@ impl CoordApp {
                 });
             }
             buttons.push(DialogButton {
+                spec: None,
                 id: WidgetId::new("cancel"),
                 label: "Esc  Dismiss".into(),
                 is_default: false,
@@ -2209,6 +2227,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Cancel — discard, issue unchanged".into(),
                         is_default: false,
@@ -2216,6 +2235,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("save"),
                         label: "S  Save — draft notes + mark ready".into(),
                         is_default: true,
@@ -2223,6 +2243,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("send"),
                         label: "D  Send — save + dispatch to pipeline".into(),
                         is_default: false,
@@ -2247,6 +2268,7 @@ impl CoordApp {
                 )],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2254,6 +2276,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2288,6 +2311,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2295,6 +2319,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2330,6 +2355,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2337,6 +2363,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2411,6 +2438,7 @@ impl CoordApp {
                 body: vec![StyledText::plain(body)],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2418,6 +2446,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2451,6 +2480,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2458,6 +2488,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2492,6 +2523,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2499,6 +2531,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2528,6 +2561,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Confirm close".into(),
                         is_default: true,
@@ -2535,6 +2569,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2557,6 +2592,7 @@ impl CoordApp {
                 body: vec![StyledText::plain("Enter a reason (optional):")],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("submit"),
                         label: "Submit".into(),
                         is_default: true,
@@ -2564,6 +2600,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2604,6 +2641,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("review"),
                         label: "⏎  Start review".into(),
                         is_default: true,
@@ -2611,6 +2649,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Not now".into(),
                         is_default: false,
@@ -2665,6 +2704,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("stage-go"),
                         label: button.into(),
                         is_default: true,
@@ -2672,6 +2712,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Not now".into(),
                         is_default: false,
@@ -2727,6 +2768,7 @@ impl CoordApp {
                 body: rework_body,
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("fix"),
                         label: "⏎  Save & start fix".into(),
                         is_default: true,
@@ -2734,6 +2776,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Not now".into(),
                         is_default: false,
@@ -2784,6 +2827,7 @@ impl CoordApp {
                 body,
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("fix"),
                         label: "⏎  Start fix".into(),
                         is_default: true,
@@ -2791,6 +2835,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Not now".into(),
                         is_default: false,
@@ -2830,6 +2875,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("force-fix"),
                         label: "⏎  Force fix".into(),
                         is_default: true,
@@ -2837,6 +2883,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Not now".into(),
                         is_default: false,
@@ -2873,6 +2920,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("merge"),
                         label: "⏎  Start merge".into(),
                         is_default: true,
@@ -2880,6 +2928,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Not now".into(),
                         is_default: false,
@@ -2910,6 +2959,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Force merge".into(),
                         is_default: true,
@@ -2917,6 +2967,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(200, 80, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -2970,6 +3021,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: format!("y  Merge {} entr{}", n, if n == 1 { "y" } else { "ies" }),
                         is_default: true,
@@ -2977,6 +3029,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(60, 160, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3016,6 +3069,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Revalidate".into(),
                         is_default: true,
@@ -3023,6 +3077,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3048,6 +3103,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Confirm kill".into(),
                         is_default: true,
@@ -3055,6 +3111,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(200, 80, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3082,6 +3139,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Confirm stop".into(),
                         is_default: true,
@@ -3089,6 +3147,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(200, 80, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3114,6 +3173,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Confirm kill".into(),
                         is_default: true,
@@ -3121,6 +3181,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(200, 80, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3155,6 +3216,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Confirm restart".into(),
                         is_default: true,
@@ -3162,6 +3224,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3191,6 +3254,7 @@ impl CoordApp {
                 ))],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("yes"),
                         label: "y  Confirm purge".into(),
                         is_default: true,
@@ -3198,6 +3262,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(200, 80, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Cancel".into(),
                         is_default: false,
@@ -3247,6 +3312,7 @@ impl CoordApp {
                 ],
                 buttons: vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("mode:smoke"),
                         label: smoke_label,
                         is_default: is_smoke_default,
@@ -3254,6 +3320,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("mode:auto"),
                         label: auto_label,
                         is_default: !is_smoke_default,
@@ -3261,6 +3328,7 @@ impl CoordApp {
                         tint: None,
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("cancel"),
                         label: "Esc  Cancel".into(),
                         is_default: false,
@@ -3290,6 +3358,7 @@ impl CoordApp {
                 title: StyledText::plain("Renderer fault — session evicted"),
                 body: vec![StyledText::plain(body)],
                 buttons: vec![DialogButton {
+                    spec: None,
                     id: WidgetId::new("close"),
                     label: "Esc / Enter  Dismiss".into(),
                     is_default: true,
@@ -3323,6 +3392,7 @@ impl CoordApp {
                 title: StyledText::plain("Gate A dispatch failed"),
                 body: vec![StyledText::plain(body)],
                 buttons: vec![DialogButton {
+                    spec: None,
                     id: WidgetId::new("close"),
                     label: "Esc / Enter  Dismiss".into(),
                     is_default: true,
@@ -3360,6 +3430,7 @@ impl CoordApp {
                 title: StyledText::plain("Decomposition session dispatch failed"),
                 body: vec![StyledText::plain(body)],
                 buttons: vec![DialogButton {
+                    spec: None,
                     id: WidgetId::new("close"),
                     label: "Esc / Enter  Dismiss".into(),
                     is_default: true,
@@ -3379,6 +3450,7 @@ impl CoordApp {
             let buttons = if dlg.path.is_some() {
                 vec![
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("copy"),
                         label: "c  Copy path".into(),
                         is_default: true,
@@ -3386,6 +3458,7 @@ impl CoordApp {
                         tint: Some(Color::rgb(60, 200, 80)),
                     },
                     DialogButton {
+                        spec: None,
                         id: WidgetId::new("close"),
                         label: "Esc  Close".into(),
                         is_default: false,
@@ -3395,6 +3468,7 @@ impl CoordApp {
                 ]
             } else {
                 vec![DialogButton {
+                    spec: None,
                     id: WidgetId::new("close"),
                     label: "Esc  Close".into(),
                     is_default: true,
@@ -3477,7 +3551,7 @@ impl CoordApp {
         let layout = dialog.layout(viewport, measure, |_| {
             quadraui::ToolbarItemMeasure::new(0.0)
         });
-        backend.draw_dialog(&dialog, &layout);
+        draw_placed_dialog(backend, viewport, &dialog, &layout);
         *self.dialog_layout.borrow_mut() = Some(layout);
     }
 
@@ -4832,6 +4906,7 @@ impl CoordApp {
             max_content_width: None,
             show_v_scrollbar: false,
         };
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(modal_rect, &list);
     }
 
@@ -5982,6 +6057,7 @@ impl CoordApp {
 
         // Modal background (reuse the refinement-notes-modal pattern).
         let modal_rect = shrink_rect(content_rect, lh * 2.0);
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             modal_rect,
             &ListView {
@@ -6035,6 +6111,7 @@ impl CoordApp {
             ));
         }
 
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             inner,
             &ListView {
@@ -6368,6 +6445,7 @@ impl CoordApp {
         let lh = backend.line_height();
         if self.chat_is_board_chat() {
             // Draw an opaque backing so the empty transcript area doesn't bleed through.
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 content_rect,
                 &ListView {
@@ -6402,6 +6480,7 @@ impl CoordApp {
             let repo_known = repo.is_some();
             let toolbar = Toolbar::new(WidgetId::new("board-chat-cta")).with_buttons(vec![
                 ToolbarButton::Action {
+                    spec: None,
                     id: WidgetId::new("board-chat:refine"),
                     label: "Refine".to_string(),
                     // #80: `None` today (not the `icon_for_action`
@@ -6417,6 +6496,7 @@ impl CoordApp {
                         .to_string(),
                 },
                 ToolbarButton::Action {
+                    spec: None,
                     id: WidgetId::new("board-chat:new-issue"),
                     label: "New Issue".to_string(),
                     // #80: same reasoning as "board-chat:refine" above.
@@ -6427,7 +6507,7 @@ impl CoordApp {
                     tooltip: "Draft a new issue with AI assistance".to_string(),
                 },
             ]);
-            backend.draw_toolbar_interactive(bar_rect, &toolbar, &InteractionState::new());
+            backend.draw_dyn(bar_rect, &toolbar, &InteractionState::new());
 
             // Descriptive text below the buttons.
             let mut items: Vec<ListItem> = Vec::new();
@@ -6467,6 +6547,7 @@ impl CoordApp {
                 "  issue body.  Press f when done to file it on GitHub.",
                 Some(Color::rgb(140, 140, 160)),
             ));
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 text_rect,
                 &ListView {
@@ -8478,6 +8559,7 @@ pub(crate) fn coord_item_to_qui(it: &ContextMenuItem) -> QuiContextMenuItem {
 pub(crate) fn build_quadraui_context_menu(state: &ContextMenuState) -> ContextMenu {
     let items: Vec<QuiContextMenuItem> = state.items.iter().map(coord_item_to_qui).collect();
     ContextMenu {
+        glyphs: Default::default(),
         id: WidgetId::new("coord-context-menu"),
         items,
         selected_idx: state.selected_idx,
@@ -8576,6 +8658,7 @@ pub(crate) fn build_context_menu_stack(
 
         let qui_items: Vec<QuiContextMenuItem> = sub_coord_items.iter().map(coord_item_to_qui).collect();
         let sub_menu = ContextMenu {
+            glyphs: Default::default(),
             id: WidgetId::new("coord-context-submenu"),
             items: qui_items,
             selected_idx: selected,

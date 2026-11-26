@@ -541,6 +541,7 @@ impl CoordApp {
     pub(crate) fn render_milestone_dag_panel(&self, backend: &mut dyn Backend, rect: Rect, _lh: f32) {
         let views = self.milestone_dag_views();
         if views.is_empty() {
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list(
@@ -611,6 +612,7 @@ impl CoordApp {
         }
 
         let total = items.len();
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             rect,
             &ListView {

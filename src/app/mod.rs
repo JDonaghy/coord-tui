@@ -147,6 +147,7 @@ pub(crate) const QUADRAUI_MULTI_SERIES_BARS: bool = true;
 pub(crate) mod types;
 pub(crate) mod format;
 pub(crate) mod data;
+pub(crate) mod contract;
 pub(crate) mod dialogs;
 pub(crate) mod sidebar;
 pub(crate) mod settings_ui;
@@ -192,6 +193,10 @@ use self::doc_tabs::{
     DocKey, DocTabPickerRow, DocTabs, PanelScope, TabClickKind, DOC_TAB_LABEL_COLS,
     PANE_DIVIDER_CHAR, SCROLL_LEFT_MARKER, SCROLL_RIGHT_MARKER, SPLIT_DOC_TAB_LABEL_COLS,
 };
+#[allow(unused_imports)]
+use self::contract::{draw_placed_context_menu, draw_placed_dialog, toolbar_hover};
+#[allow(unused_imports)]
+use quadraui::DrawsPrimitives;
 #[allow(unused_imports)]
 use self::types::*;
 #[allow(unused_imports)]
@@ -569,8 +574,21 @@ impl SidebarFilter {
     /// greyed hint shown when the query is empty.
     fn form(&self, id_prefix: &str, placeholder: &str) -> Form {
         Form {
+            label_position: Default::default(),
+            label_align: Default::default(),
+            label_width: None,
+            control_width: quadraui::ControlWidth::Content,
+            min_control_width: None,
+            spacing: Default::default(),
             id: WidgetId::new(format!("{id_prefix}-form")),
             fields: vec![FormField {
+                label_position: None,
+                label_align: None,
+                label_width: None,
+                tab_index: None,
+                control_width: None,
+                min_control_width: None,
+                row_align: None,
                 id: WidgetId::new(format!("{id_prefix}-input")),
                 label: StyledText::plain(""),
                 kind: FieldKind::TextInput {
@@ -4330,6 +4348,7 @@ fn key_to_binding_str(key: &Key) -> String {
             NamedKey::F(n) => format!("F{n}"),
             _ => String::new(),
         },
+        _ => String::new(),
     }
 }
 
@@ -9632,6 +9651,7 @@ impl CoordApp {
             return;
         }
         let row = Rect::new(area.x, area.y, area.width, lh);
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(row, &ListView {
             id: WidgetId::new("metrics-unavailable"),
             title: None,
@@ -9727,6 +9747,7 @@ impl CoordApp {
             x_ticks: None,
             show_grid: true,
         };
+        // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
         backend.draw_chart(area, &chart, None, None);
     }
 

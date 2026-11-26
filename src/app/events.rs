@@ -699,6 +699,7 @@ impl CoordApp {
                 } else {
                     10
                 };
+                // TODO(quadraui widget contract): deprecated `DualModePaletteController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Palette event enum.
                 match picker.handle(&event, visible_rows) {
                     DualModePaletteEvent::Cancelled => {}
                     DualModePaletteEvent::ItemConfirmed { idx } => {
@@ -777,6 +778,7 @@ impl CoordApp {
                 } else {
                     10
                 };
+                // TODO(quadraui widget contract): deprecated `DualModePaletteController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Palette event enum.
                 match picker.palette.handle(&event, visible_rows) {
                     DualModePaletteEvent::Cancelled => {}
                     DualModePaletteEvent::ItemConfirmed { idx } => {
@@ -858,6 +860,7 @@ impl CoordApp {
                     } else {
                         10
                     };
+                    // TODO(quadraui widget contract): deprecated `DualModePaletteController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Palette event enum.
                     match palette.handle(&event, visible_rows) {
                         DualModePaletteEvent::Cancelled => {}
                         DualModePaletteEvent::ItemConfirmed { idx } => {
@@ -898,6 +901,7 @@ impl CoordApp {
             // open, it's the only modal — `any_blocking_modal_active()`
             // is true only because of `help_overlay` itself).
             if self.help_overlay.is_open() || !self.any_blocking_modal_active() {
+                // TODO(quadraui widget contract): deprecated `HelpOverlayController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy HelpOverlay event enum.
                 match self.help_overlay.handle(&event) {
                     HelpOverlayEvent::Opened
                     | HelpOverlayEvent::Closed
@@ -1195,6 +1199,7 @@ impl CoordApp {
                     .inject_chat
                     .as_mut()
                     .unwrap()
+                    // TODO(quadraui widget contract): deprecated `ChatController::handle` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Chat event enum.
                     .handle(&event, backend, main_rect);
                 match result {
                     ChatControllerEvent::Submit { text } => {
@@ -4608,9 +4613,14 @@ impl CoordApp {
                         // paint produced, so ask the backend for it rather
                         // than re-deriving cell widths that are wrong under
                         // GTK (see `hit_test_sidebar_action_bar`).
-                        let layout = backend.sidebar_panel_layout(sidebar_b, &panel);
-                        if let Some(t) = layout.toolbar_layout.as_ref() {
-                            redraw |= self.sidebar_action_bar_hover.update(t, pos.x, pos.y);
+                        let layout = backend.layout_primitive(sidebar_b, &panel);
+                        if let Some(t) = layout.toolbar.as_ref() {
+                            // The header layout is bar-relative.
+                            redraw |= self.sidebar_action_bar_hover.update(
+                                &t.layout,
+                                pos.x - t.area.x,
+                                pos.y - t.area.y,
+                            );
                         } else {
                             redraw |= self.sidebar_action_bar_hover.clear();
                         }
@@ -4798,9 +4808,14 @@ impl CoordApp {
                         // and `render.rs`'s `draw_sidebar_panel` use — a
                         // local cell-width copy tints the wrong button
                         // under GTK (see `hit_test_panel_toolbar`).
-                        let layout = backend.sidebar_panel_layout(ctx.main_bounds(), &panel);
-                        if let Some(t) = layout.toolbar_layout.as_ref() {
-                            redraw |= self.panel_toolbar_hover.update(t, pos.x, pos.y);
+                        let layout = backend.layout_primitive(ctx.main_bounds(), &panel);
+                        if let Some(t) = layout.toolbar.as_ref() {
+                            // The header layout is bar-relative.
+                            redraw |= self.panel_toolbar_hover.update(
+                                &t.layout,
+                                pos.x - t.area.x,
+                                pos.y - t.area.y,
+                            );
                         } else {
                             redraw |= self.panel_toolbar_hover.clear();
                         }
@@ -4821,8 +4836,13 @@ impl CoordApp {
                             let bar_h = pipeline_action_bar_height(true, lh);
                             let bar_rect =
                                 Rect::new(main_b.x, main_b.y + tab_h, main_b.width, bar_h);
-                            let layout = backend.toolbar_layout(bar_rect, &action_toolbar);
-                            redraw |= self.pipeline_action_bar_hover.update(&layout, pos.x, pos.y);
+                            // The toolbar layout is bar-relative.
+                            let layout = backend.layout_primitive(bar_rect, &action_toolbar);
+                            redraw |= self.pipeline_action_bar_hover.update(
+                                &layout.layout,
+                                pos.x - bar_rect.x,
+                                pos.y - bar_rect.y,
+                            );
                         } else {
                             redraw |= self.pipeline_action_bar_hover.clear();
                         }
@@ -5661,6 +5681,7 @@ impl CoordApp {
             let result = self
                 .settings_form
                 .borrow_mut()
+                // TODO(quadraui widget contract): deprecated `FormController::handle_cached` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Form event enum.
                 .handle_cached(&click_event, main_b);
             match result {
                 FormControllerEvent::FormAction(ref form_event) => {
@@ -5998,6 +6019,7 @@ impl CoordApp {
                     // (e.g. the focus-caret row quadraui's rasteriser
                     // reserves above the boxes).
                     let render_view = pipeline_view_for_render(&view);
+                    // TODO(quadraui widget contract): legacy `Backend::pipeline_view_layout` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
                     let layout = backend.pipeline_view_layout(pv_rect, &render_view);
                     match layout.hit_test(pos.x, pos.y) {
                         PipelineHit::Action(stage_idx) => {
@@ -6041,6 +6063,7 @@ impl CoordApp {
                     );
                     let strip_rect = pipeline_detail_pv_rect_strip(content_rect, lh);
                     let render_view = pipeline_view_for_render(&view);
+                    // TODO(quadraui widget contract): legacy `Backend::pipeline_view_layout` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
                     let layout = backend.pipeline_view_layout(strip_rect, &render_view);
                     if let PipelineHit::Body(stage_idx) = layout.hit_test(pos.x, pos.y) {
                         self.pipeline_focused_stage = Some(stage_idx);
@@ -6842,6 +6865,7 @@ impl CoordApp {
                 };
                 self.settings_form
                     .borrow_mut()
+                    // TODO(quadraui widget contract): deprecated `FormController::handle_cached` — move to `handle_event` returning `Handled<…Action>` before quadraui deletes the legacy Form event enum.
                     .handle_cached(&scroll_event, main_b);
                 true
             }
@@ -7117,12 +7141,17 @@ pub(crate) fn resolve_tab_bar_click(
     chrome: &TabChrome,
 ) -> Option<TabClickKind> {
     let probe = Rect::new(0.0, 0.0, bar_rect.width, bar_rect.height);
-    // `Backend::tab_bar_layout_with_chrome` only returns the deprecated
-    // `TabBarHits`; the replacement `resolve_tab_bar_layout_with_chrome`
-    // exists but its default body drops the chrome, so it can't be used from
-    // here until every backend overrides it. See quadraui#823/#919.
+    let bar = &TabBar {
+        chrome: chrome.clone(),
+        ..bar.clone()
+    };
+    // `resolve_doc_tab_click` reads the per-tab `(start, end)` spans the
+    // layout's `TabBarHits` view carries.
     #[allow(deprecated)]
-    let hits = backend.tab_bar_layout_with_chrome(probe, bar, chrome);
+    let hits = quadraui::backend::tab_bar_hits_from_layout(
+        &backend.layout_primitive(probe, bar).layout,
+        bar,
+    );
     let click = (click_x - bar_rect.x) as f64;
     #[allow(deprecated)]
     resolve_doc_tab_click(bar, &hits.slot_positions, &hits.close_bounds, click)

@@ -481,6 +481,7 @@ impl CoordApp {
             // Contract §3d: the empty-state message deliberately never
             // contains the substring "Submission" (the header-only word) —
             // see the module doc comment on why that phrasing was picked.
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(
                 rect,
                 &plain_list(
@@ -519,10 +520,12 @@ impl CoordApp {
         // The header is painted into its own one-row rect so it stays pinned
         // while the rows below it scroll.
         let header_h = lh.min(list_rect.height);
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             Rect::new(list_rect.x, list_rect.y, list_rect.width, header_h),
             &Self::approved_header_view(),
         );
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             Rect::new(
                 list_rect.x,
@@ -537,6 +540,7 @@ impl CoordApp {
             if let Some(entry) = self.approved_selected() {
                 let rect_width = detail_rect.width.round().max(0.0) as usize;
                 let wrap_width = rect_width.saturating_sub(APPROVED_DETAIL_LABEL_WIDTH).max(20);
+                // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
                 backend.draw_list(
                     detail_rect,
                     &ListView {

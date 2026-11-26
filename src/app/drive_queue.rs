@@ -539,6 +539,7 @@ impl CoordApp {
                 decoration: if i == 0 { Decoration::Header } else { Decoration::Normal },
             })
             .collect();
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             rect,
             &ListView {
@@ -625,6 +626,7 @@ impl CoordApp {
                 decoration: if i == 0 { Decoration::Header } else { Decoration::Normal },
             })
             .collect();
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(
             rect,
             &ListView {
@@ -1197,6 +1199,7 @@ impl CoordApp {
         // #101: 9 chars fits the longest realistic `format_age` output
         // ("999d ago", 8) plus one to breathe — see `queue_reason_age_cell`'s
         // doc comment for why this is its own column instead of a suffix.
+        // TODO(quadraui widget contract): deprecated `ColumnWidth::Fixed` (list/tree/table group, quadraui #2609).
         ("Age", ColumnWidth::Fixed(9.0), ColumnAlign::Left),
     ];
 
@@ -1731,6 +1734,7 @@ impl CoordApp {
                     if total == 1 { "y" } else { "ies" },
                 )
             };
+            // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
             backend.draw_list(rect, &plain_list("queue-empty", &message, 0));
             return;
         }
@@ -1755,6 +1759,7 @@ impl CoordApp {
         );
 
         let mut table = DataTable {
+            bordered: false,
             id: WidgetId::new("queue-grid"),
             columns: Self::queue_columns(),
             rows: Self::queue_data_rows(&rows),
@@ -1810,18 +1815,21 @@ impl CoordApp {
         // is what lets the clamp land BEFORE this frame paints, not after —
         // clamping post-paint would still ship one fully mis-rendered frame
         // per resize, exactly the bug this fixes.
+        // TODO(quadraui widget contract): legacy `Backend::data_table_layout` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
         let probe = backend.data_table_layout(list_rect, &table);
         let visible_w = (probe.viewport_width - probe.scrollbar_width).max(1.0);
         let clamped_h_scroll =
             Self::queue_clamp_h_scroll(self.queue_h_scroll.get(), probe.content_width, visible_w);
         self.queue_h_scroll.set(clamped_h_scroll);
         table.h_scroll = clamped_h_scroll;
+        // TODO(quadraui widget contract): legacy `Backend::draw_data_table` — move to `DrawsPrimitives` when quadraui ports DataTable (list/tree/table group, quadraui #2609).
         let layout = backend.draw_data_table(list_rect, &table, None);
         // Cached WITH the rect it was painted into — the Reports pattern,
         // not Audit's. This table does not necessarily start at the main
         // panel's origin, so a bare `pos - main_b` would mis-hit-test.
         *self.queue_table_layout.borrow_mut() = Some((list_rect, layout));
 
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(sep_rect, &Self::queue_separator_list());
         self.queue_separator_rect.set(Some(sep_rect));
 
@@ -1858,7 +1866,9 @@ impl CoordApp {
         // `queue_detail_scrollbar_hit` / `queue_apply_detail_vscroll` both
         // already treat as "nothing to do".
         *self.queue_detail_scrollbar.borrow_mut() =
+            // TODO(quadraui widget contract): legacy `Backend::list_vscrollbar` — move to `DrawsPrimitives` when quadraui ports ListView scrollbar (list/tree/table group, quadraui #2609).
             backend.list_vscrollbar(detail_rect, &detail_list);
+        // TODO(quadraui widget contract): legacy `Backend::draw_list` — move to `DrawsPrimitives` when quadraui ports ListView (list/tree/table group, quadraui #2609).
         backend.draw_list(detail_rect, &detail_list);
     }
 

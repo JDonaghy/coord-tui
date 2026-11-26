@@ -65,15 +65,14 @@ test-support = []
 # (#424) can host a live shell inside the TUI. Always-on — the feature
 # pulls in `portable-pty` + `vt100`, which are small native deps.
 #
-# #121: depends on the published crates.io release (quadraui's git-rev
-# pin era ended at v0.1.0 — see #1973 in history for why that pin
-# existed). Bumping to a new breaking release is a `version =` edit
-# (`0.1` -> `0.2`); patch releases arrive via `cargo update -p
-# quadraui`. See CLAUDE.md's "coord-tui depends on quadraui" entry for
-# how to build against a local quadraui checkout during co-development
-# (a one-line, opt-in `.cargo/config.toml` `paths` override — see
-# `tui/cargo-config-local-quadraui.toml.example`).
-quadraui = { version = "0.1.2", features = ["terminal"] }
+# Pinned to a quadraui git rev on `develop` (the widget-contract
+# migration) until quadraui 0.12.0 is published to crates.io; the pin then
+# becomes `version = "0.12"`. Bumping the rev is a deliberate, separate
+# commit — see the `tui-quadraui-workflow` skill. To build against a local
+# quadraui checkout during co-development, use the opt-in `.cargo/config.toml`
+# `paths` override (`cargo-config-local-quadraui.toml.example`), never an
+# edit to `rev`.
+quadraui = { git = "https://github.com/JDonaghy/quadraui", rev = "4dc653ffc6b7", features = ["terminal"] }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

@@ -1811,14 +1811,16 @@ impl CoordApp {
         // is what lets the clamp land BEFORE this frame paints, not after —
         // clamping post-paint would still ship one fully mis-rendered frame
         // per resize, exactly the bug this fixes.
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::data_table_layout` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::data_table_layout` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        #[allow(deprecated)]
         let probe = backend.data_table_layout(list_rect, &table);
         let visible_w = (probe.viewport_width - probe.scrollbar_width).max(1.0);
         let clamped_h_scroll =
             Self::queue_clamp_h_scroll(self.queue_h_scroll.get(), probe.content_width, visible_w);
         self.queue_h_scroll.set(clamped_h_scroll);
         table.h_scroll = clamped_h_scroll;
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        #[allow(deprecated)]
         let layout = backend.draw_data_table(list_rect, &table, None);
         // Cached WITH the rect it was painted into — the Reports pattern,
         // not Audit's. This table does not necessarily start at the main

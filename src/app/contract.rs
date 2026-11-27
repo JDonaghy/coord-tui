@@ -220,7 +220,7 @@ pub(crate) fn draw_placed_dialog(
 /// legacy GTK paint strokes the rounded frame and clips inside it.
 pub(crate) fn draw_list_view(backend: &mut dyn Backend, rect: Rect, list: &ListView) {
     if list.bordered {
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_list` for bordered lists only — move to `draw_primitive` once the contract `ListView` paint strokes the `bordered` frame on pixel backends.
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_list` for bordered lists only — move to `draw_primitive` once the contract `ListView` paint strokes the `bordered` frame on pixel backends.
         #[allow(deprecated)]
         backend.draw_list(rect, list);
     } else {
@@ -232,7 +232,7 @@ pub(crate) fn draw_list_view(backend: &mut dyn Backend, rect: Rect, list: &ListV
 /// cells on a cell grid, pixels on a pixel backend — so a TUI column and its
 /// GTK twin keep the widths they have always had.
 ///
-/// TODO(quadraui widget contract, list/tree/table group, quadraui #2609): `ColumnWidth::Fixed` is deprecated, and neither non-deprecated replacement keeps the native unit (`FixedCells` widens GTK columns from N px to N glyphs; `FixedPx` narrows TUI ones); move once quadraui offers a native-unit variant or the GTK widths are deliberately changed.
+/// TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3039): `ColumnWidth::Fixed` is deprecated, and neither non-deprecated replacement keeps the native unit (`FixedCells` widens GTK columns from N px to N glyphs; `FixedPx` narrows TUI ones); move once quadraui offers a native-unit variant or the GTK widths are deliberately changed.
 #[allow(deprecated)]
 pub(crate) const fn native_column_width(width: f32) -> quadraui::ColumnWidth {
     quadraui::ColumnWidth::Fixed(width)

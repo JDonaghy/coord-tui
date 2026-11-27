@@ -6629,15 +6629,40 @@
         // bar's left edge starting at index 2. A click there resolves to the
         // absolute index 2, not 0.
         let labels = [" Pipeline ", " Issue ", " Stages ", " Log "];
-        // 10+7+8+5 = 30 cells of tabs in a 15-cell bar → the layout honours
+        // 10+7+8+5 = 30 cells of labels (plus a 1-cell `│` rule each) in a
+        // 15-cell bar → while the active tab is on screen the layout honours
         // the caller's offset (scroll arrows are disabled in both backends),
-        // painting " Stages " at 0..8 and " Log " at 8..13.
+        // painting " Stages " at 0..9 and " Log " at 9..15.
         let bar_rect = Rect::new(0.0, 0.0, 15.0, 1.0);
-        assert_eq!(hit_tab(&labels, bar_rect, 3.0, 2), Some(2));
-        assert_eq!(hit_tab(&labels, bar_rect, 9.0, 2), Some(3));
+        assert_eq!(hit_active_tab(&labels, bar_rect, 3.0, 3, 2), Some(2));
+        assert_eq!(hit_active_tab(&labels, bar_rect, 9.0, 3, 2), Some(3));
         // The scrolled-away tabs are unreachable by click — they are not
         // painted, so there is nothing under the cursor to resolve to.
-        assert_eq!(hit_tab(&labels, bar_rect, 3.0, 0), Some(0));
+        assert_eq!(hit_active_tab(&labels, bar_rect, 3.0, 0, 0), Some(0));
+    }
+
+    #[test]
+    fn resolve_tab_bar_click_scrolls_the_active_tab_into_view() {
+        // #605: an offset that would hide the active tab is corrected by the
+        // bar's own layout, so the painter and the click path both see the
+        // active last tab without the host probing offsets.
+        let labels = [" Pipeline ", " Issue ", " Stages ", " Log "];
+        let bar_rect = Rect::new(0.0, 0.0, 15.0, 1.0);
+        assert_eq!(hit_active_tab(&labels, bar_rect, 9.0, 3, 0), Some(3));
+        assert_eq!(hit_active_tab(&labels, bar_rect, 3.0, 3, 0), Some(2));
+    }
+
+    fn hit_active_tab(
+        labels: &[&str],
+        bar_rect: Rect,
+        click_x: f32,
+        active: usize,
+        scroll_offset: usize,
+    ) -> Option<usize> {
+        let bar = tab_bar_from_labels(labels, active, scroll_offset);
+        let backend = quadraui::tui::TuiBackend::new();
+        resolve_tab_bar_click(&bar, bar_rect, click_x, &backend, &TabChrome::default())
+            .map(tab_click_index)
     }
 
     /// #7: the within-tab close/body split now comes off the BACKEND's

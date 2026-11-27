@@ -48,7 +48,9 @@ use std::path::PathBuf;
 
 use quadraui::primitives::split_tree::SplitDirection;
 use quadraui::text_util::{display_width, fuzzy_score};
-use quadraui::{PaletteItem, SplitTree, StyledSpan, StyledText, TabBar, TabChrome, TabFrame};
+use quadraui::{
+    PaletteItem, SplitTree, StyledSpan, StyledText, TabBar, TabChrome, TabFrame, TabSeparator,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::app::drive_queue::repo_alias;
@@ -146,8 +148,25 @@ pub(crate) const PANE_DIVIDER_CHAR: char = '║';
 /// `doc_tab_label` used to bake the whole tab — brackets, `×` and all — into
 /// `TabItem::label`, and why the close hit-test used to scan the label string
 /// backwards for the glyph.
+///
+/// [`TabSeparator::None`]: a non-closable tab reserves no rule column after
+/// its label, which is what [`doc_tab_chrome_cols`]' `(false, false) => 0`
+/// row records.
 pub(crate) fn doc_tab_chrome() -> TabChrome {
-    TabChrome::new(TabFrame::Brackets)
+    TabChrome::new(TabFrame::Brackets).with_separator(TabSeparator::None)
+}
+
+/// The chrome every plain detail sub-tab bar (Board's Board / Issue / Chat /
+/// Terminal, Pipeline's Overview / Issue / Log / ...) is painted and
+/// hit-tested with: no active-tab frame and no `│` rule between tabs. The
+/// sub-tab labels carry their own padding (`" Board "`), so the bar reads
+/// `" Board  Issue  Board Chat  Terminal "`.
+///
+/// Like [`doc_tab_chrome`], the paint site (`TabBar::chrome` in the bar
+/// builders) and the hit-test site (`events.rs::resolve_tab_bar_click`)
+/// both go through this one function so they cannot disagree on tab widths.
+pub(crate) fn sub_tab_chrome() -> TabChrome {
+    TabChrome::default().with_separator(TabSeparator::None)
 }
 
 /// Columns the doc-tab rasteriser reserves for tab chrome *beyond* the tab's

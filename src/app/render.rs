@@ -50,6 +50,16 @@ impl ShellApp for CoordApp {
     /// glyph already occupies exactly one terminal cell there).
     fn setup(&mut self, backend: &mut dyn Backend) {
         backend.set_theme(self.active_theme.clone());
+        // The status bar's cell-grid look: no reserved gap between the left
+        // and right groups and a hard clip rather than `…`, so a left text
+        // that fits (`⚠ coordinator.yml not found`) is never cut. Pixel
+        // backends ignore both settings.
+        backend.set_style(
+            backend
+                .style()
+                .with_status_bar_cell_gap(0.0)
+                .with_status_bar_cell_overflow(quadraui::StatusBarOverflow::Clip),
+        );
         backend.set_editor_font(EDITOR_FONT_FAMILY, EDITOR_FONT_SIZE_PT);
         backend.set_ui_font(&format!("{EDITOR_FONT_FAMILY} {EDITOR_FONT_SIZE_PT}"));
     }
@@ -139,8 +149,7 @@ impl ShellApp for CoordApp {
                     // above this tree, see `build_sidebar_action_panel`) —
                     // kill is still a follow-up. The main area remains a
                     // single PTY surface.
-                    // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_tree` — `TreeView` is on the contract, but its cell-grid `Primitive::layout` takes the rightmost column for a scrollbar whenever the rows overflow, which the legacy TUI paint never draws; move to `draw_dyn` once that reservation matches (or this sidebar adopts the scrollbar deliberately).
-                    backend.draw_tree(sidebar_rect, &self.terminal_tree_view());
+                    draw_sidebar_tree(backend, sidebar_rect, self.terminal_tree_view());
                 }
                 // #638: Kanban sidebar is a placeholder — all content is in the main panel.
                 SidebarView::Kanban => {
@@ -160,14 +169,12 @@ impl ShellApp for CoordApp {
                 // Sessions trees. Was a static plan-count `ListView`
                 // placeholder (#975) before this.
                 SidebarView::Plans => {
-                    // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_tree` — `TreeView` is on the contract, but its cell-grid `Primitive::layout` takes the rightmost column for a scrollbar whenever the rows overflow, which the legacy TUI paint never draws; move to `draw_dyn` once that reservation matches (or this sidebar adopts the scrollbar deliberately).
-                    backend.draw_tree(sidebar_rect, &self.plans_tree_view());
+                    draw_sidebar_tree(backend, sidebar_rect, self.plans_tree_view());
                 }
                 // #1032: Sessions sidebar — machine → repo → session tree,
                 // same raw-`TreeView` pattern as the #953 Terminal tree.
                 SidebarView::Sessions => {
-                    // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_tree` — `TreeView` is on the contract, but its cell-grid `Primitive::layout` takes the rightmost column for a scrollbar whenever the rows overflow, which the legacy TUI paint never draws; move to `draw_dyn` once that reservation matches (or this sidebar adopts the scrollbar deliberately).
-                    backend.draw_tree(sidebar_rect, &self.sessions_tree_view());
+                    draw_sidebar_tree(backend, sidebar_rect, self.sessions_tree_view());
                 }
                 // #1039: Audit sidebar — entry count + "N recent" badge.
                 SidebarView::Audit => {
@@ -320,16 +327,13 @@ impl ShellApp for CoordApp {
                     // Tab bar.  `#464`: route through `detail_tab_bar_height`
                     // so the painted top of the content rect lines up with
                     // the hit-test origin in the TUI backend.
-                    let mut tab_bar = self.pipeline_detail_tab_bar();
+                    // #605: on a narrow width (six tabs overflow a small
+                    // screen) the bar's own layout scrolls the ACTIVE tab
+                    // into view; the click hit-test resolves the same layout.
+                    let tab_bar = self.pipeline_detail_tab_bar();
                     let tab_rect = Rect::new(m.x, m.y, m.width, tab_h);
                     let content_rect =
                         Rect::new(m.x, m.y + tab_h, m.width, (m.height - tab_h).max(0.0));
-                    // #605: scroll the tab bar so the ACTIVE tab is visible on a
-                    // narrow width (six tabs overflow a small screen). The TUI
-                    // painter renders from `scroll_offset` verbatim, so resolve
-                    // the offset that keeps the active tab on-screen before
-                    // drawing. The click hit-test derives the same offset.
-                    tab_bar.scroll_offset = active_tab_scroll_offset(&*backend, tab_rect, &tab_bar);
                     backend.draw_dyn(tab_rect, &tab_bar, &InteractionState::new());
 
                     // #818: helper — draw the compact read-only stage strip
@@ -2606,7 +2610,7 @@ impl CoordApp {
             self.detail_terminal_sessions.contains_key(&(slug, num))
         });
         TabBar {
-            chrome: Default::default(),
+            chrome: sub_tab_chrome(),
             glyphs: Default::default(),
             icons: Vec::new(),
             id: WidgetId::new("board-detail-tabs"),
@@ -2817,7 +2821,7 @@ impl CoordApp {
         // Refinement removed.  Order: Overview / Issue / Log / Summary /
         // Terminal, plus #2405's Completed grid pinned last.
         TabBar {
-            chrome: Default::default(),
+            chrome: sub_tab_chrome(),
             glyphs: Default::default(),
             icons: Vec::new(),
             id: WidgetId::new("pipeline-detail-tabs"),
@@ -4888,34 +4892,16 @@ pub(crate) fn log_source_label(a: &Assignment) -> String {
     }
 }
 
-/// The scroll offset that keeps `bar`'s active tab fully on screen when it
-/// is painted into `rect` — the smallest offset whose resolved layout places
-/// the active tab, so a bar that fits whole stays at offset 0.
-///
-/// The pixel layout's `corrected_scroll_offset` already fits the active
-/// tab; the cell layout's only clamps the bar's own `scroll_offset` and
-/// paints from it verbatim, so the fit is resolved here against the
-/// backend's own layout — the same geometry the painter and the click path
-/// both use. `None` active tab keeps the backend's answer.
-pub(crate) fn active_tab_scroll_offset(backend: &dyn Backend, rect: Rect, bar: &TabBar) -> usize {
-    let corrected = backend.layout_primitive(rect, bar).corrected_scroll_offset;
-    let Some(active) = bar.tabs.iter().position(|t| t.is_active) else {
-        return corrected;
-    };
-    let shows_active = |offset: usize| {
-        let probe = TabBar {
-            scroll_offset: offset,
-            ..bar.clone()
-        };
-        backend
-            .layout_primitive(rect, &probe)
-            .layout
-            .visible_tabs
-            .iter()
-            .any(|vt| vt.tab_idx == active)
-    };
-    if shows_active(corrected) {
-        return corrected;
+/// Paint a sidebar `tree` at `rect`. On a cell grid it goes through the
+/// `TreeView` contract with no scrollbar column, so every column goes to the
+/// rows, as the legacy TUI paint did.
+fn draw_sidebar_tree(backend: &mut dyn Backend, rect: Rect, mut tree: TreeView) {
+    if backend.cell_grid() {
+        tree.style.show_scrollbar = false;
+        backend.draw_dyn(rect, &tree, &InteractionState::new());
+    } else {
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_tree` on pixel backends only — the contract `TreeView` pixel layout reads `Style::default()` instead of the backend's live style and row height, and its contract scrollbar paints without the idle fade; move once both match the legacy GTK paint.
+        #[allow(deprecated)]
+        backend.draw_tree(rect, &tree);
     }
-    (0..=active).find(|&o| shows_active(o)).unwrap_or(corrected)
 }

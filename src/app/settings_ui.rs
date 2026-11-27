@@ -1840,7 +1840,7 @@ impl CoordApp {
             focused_field,
             scroll_offset: self.settings_form.borrow().scroll_offset(),
             has_focus: true,
-            ..form_base(ControlWidth::Content)
+            ..form_base(ControlWidth::ContentEnd)
         }
     }
 

@@ -357,7 +357,7 @@ impl CoordApp {
             focused_field,
             scroll_offset: 0,
             has_focus: focused.is_some(),
-            ..form_base(ControlWidth::Content)
+            ..form_base(ControlWidth::ContentEnd)
         }
     }
 
@@ -1510,7 +1510,8 @@ impl CoordApp {
                 // the main panel's origin (the section stack is above it),
                 // so a bare `pos - main_b` would mis-hit-test by the stack's
                 // height.
-                // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+                // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+                #[allow(deprecated)]
                 let layout = backend.draw_data_table(table_rect, &table, None);
                 *self.reports_table_layout.borrow_mut() = Some((table_rect, layout));
             }

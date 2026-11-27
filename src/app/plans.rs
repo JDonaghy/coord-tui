@@ -1356,7 +1356,8 @@ impl CoordApp {
             column_overrides: self.plans_grid_table.column_overrides.clone(),
             footer: None,
         };
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        #[allow(deprecated)]
         let layout = backend.draw_data_table(grid_rect, &table, None);
         *self.plans_grid_table.layout.borrow_mut() = Some((grid_rect, layout));
     }

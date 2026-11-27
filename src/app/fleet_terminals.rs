@@ -8,7 +8,7 @@
 //! kill (#5) is still out of scope here.
 //!
 //! This is the app's first sidebar built from a raw quadraui `TreeView`
-//! drawn via `backend.draw_tree` directly, rather than through the
+//! painted directly (`render.rs::draw_sidebar_tree`), rather than through the
 //! `SidebarSystem` compose widget used by the Board/Pipeline panels.
 //! `SidebarSystem` owns its own hit-testing (chevron-vs-row split regions,
 //! multi-section search forms, etc.) which is overkill for one flat

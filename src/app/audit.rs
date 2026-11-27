@@ -359,7 +359,8 @@ impl CoordApp {
             // #1094: the audit table has no pinned summary row.
             footer: None,
         };
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
+        #[allow(deprecated)]
         let layout = backend.draw_data_table(list_rect, &table, None);
         // #70: cache the rect alongside the layout (mirrors
         // `reports_table_layout`) so hit-testing/scrolling/resize-drag no

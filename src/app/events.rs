@@ -5793,13 +5793,7 @@ impl CoordApp {
             if pos.y - main_b.y < tab_h {
                 let bar = self.board_detail_tab_bar();
                 let tab_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                let hit = resolve_tab_bar_click(
-                    &bar,
-                    tab_rect,
-                    pos.x,
-                    backend,
-                    &TabChrome::default(),
-                );
+                let hit = resolve_tab_bar_click(&bar, tab_rect, pos.x, backend, &sub_tab_chrome());
                 if let Some(idx) = hit.map(tab_click_index) {
                     let new_tab = match idx {
                         0 => BoardDetailTab::Board,
@@ -5899,21 +5893,12 @@ impl CoordApp {
             if pos.y - main_b.y < tab_h {
                 // #605: the click must resolve against the SAME scroll offset
                 // the painter drew from, so a narrow bar (7 tabs) still routes
-                // clicks to the tab actually under the cursor.
-                // #24: both halves of that now come off one
-                // `layout_primitive` call on the bar's own rect — the
-                // offset the painter resolved AND per-tab slots in the
-                // backend's unit — instead of a local `fit_active_scroll_offset`
-                // guess in characters that GTK's pixel geometry made
-                // meaningless (and that the TUI painter, which honours
-                // `bar.scroll_offset` verbatim, never actually applied).
-                let mut bar = self.pipeline_detail_tab_bar();
+                // clicks to the tab actually under the cursor. Both come off
+                // the bar's own `layout_primitive`, which scrolls the active
+                // tab into view, with per-tab slots in the backend's unit.
+                let bar = self.pipeline_detail_tab_bar();
                 let tab_rect = Rect::new(main_b.x, main_b.y, main_b.width, tab_h);
-                // The same offset the painter resolves before `draw_dyn`
-                // (render.rs), so the slots below are the painted ones.
-                bar.scroll_offset = active_tab_scroll_offset(backend, tab_rect, &bar);
-                let hit =
-                    resolve_tab_bar_click(&bar, tab_rect, pos.x, backend, &TabChrome::default());
+                let hit = resolve_tab_bar_click(&bar, tab_rect, pos.x, backend, &sub_tab_chrome());
                 if let Some(idx) = hit.map(tab_click_index) {
                     // #818: Overview / Issue / Log / Summary / Terminal,
                     // plus #2405's Completed grid at index 5.
@@ -7110,7 +7095,7 @@ impl CoordApp {
 /// `resolve_doc_tab_click` with its own note.
 ///
 /// `chrome` must be the **same** chrome the paint path set on the bar it
-/// painted: [`doc_tab_chrome`] for the doc-tab strips, `TabChrome::default()`
+/// painted: [`doc_tab_chrome`] for the doc-tab strips, [`sub_tab_chrome`]
 /// for the plain sub-tab bars. Asking for different framing here than the
 /// painter used would shift `close_bounds` by the width of the opening
 /// bracket, which is exactly the class of paint/click disagreement this

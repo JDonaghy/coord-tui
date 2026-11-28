@@ -375,7 +375,7 @@ pub(crate) enum BoardDetailTab {
     Issue,
     /// #316 Phase A: board-level chat (new-issue or refine-board).
     /// Shows an empty state with Refine / New Issue CTAs when no chat is
-    /// open; shows the ChatController when a board chat is live.
+    /// open; shows the `Chat` widget when a board chat is live.
     Chat,
     /// #675: per-issue interactive shell for the Board detail view.
     /// Mirrors `PipelineDetailTab::Terminal` — spawned by "Chat about issue"

@@ -682,7 +682,7 @@ impl CoordApp {
 
         // ── #16: issue finder owns ALL input while open ─────────────────────
         // Rebuilt on quadraui's `Palette` primitive (via
-        // `DualModePaletteController`, the same wrapper `command_palette`
+        // `DualModePalette`, the same wrapper `command_palette`
         // and `doc_tab_picker` below already drive) — replaces the former
         // hand-rolled key-by-key dispatch (Esc/Enter/j/k/Backspace/chars)
         // this used to duplicate. Mirrors `doc_tab_picker`'s exact
@@ -699,15 +699,15 @@ impl CoordApp {
                 } else {
                     10
                 };
-                match picker.handle_event(&event, visible_rows) {
+                match picker.handle_event(&event, backend, popup, visible_rows) {
                     Handled::Event(DualModePaletteAction::Cancelled) => {}
                     Handled::Event(DualModePaletteAction::ItemConfirmed { idx }) => {
-                        let query = picker.query().to_string();
+                        let query = picker.palette.query.clone();
                         self.confirm_issue_finder(idx, &query);
                     }
                     Handled::Event(DualModePaletteAction::QueryChanged { value }) => {
                         let items = self.issue_finder_items(&value);
-                        picker.set_items(items);
+                        picker.palette.set_items(items);
                         self.issue_finder = Some(picker);
                     }
                     Handled::Event(_) | Handled::Consumed | Handled::Ignored => {
@@ -774,16 +774,16 @@ impl CoordApp {
                 } else {
                     10
                 };
-                match picker.palette.handle_event(&event, visible_rows) {
+                match picker.palette.handle_event(&event, backend, popup, visible_rows) {
                     Handled::Event(DualModePaletteAction::Cancelled) => {}
                     Handled::Event(DualModePaletteAction::ItemConfirmed { idx }) => {
-                        let query = picker.palette.query().to_string();
+                        let query = picker.palette.palette.query.clone();
                         self.confirm_doc_tab_picker(picker.scope, picker.pane, idx, &query);
                     }
                     Handled::Event(DualModePaletteAction::QueryChanged { value }) => {
                         let items =
                             self.doc_tab_picker_items_for(picker.scope, picker.pane, &value);
-                        picker.palette.set_items(items);
+                        picker.palette.palette.set_items(items);
                         self.doc_tab_picker = Some(picker);
                     }
                     Handled::Event(_) | Handled::Consumed | Handled::Ignored => {
@@ -852,10 +852,10 @@ impl CoordApp {
                     } else {
                         10
                     };
-                    match palette.handle_event(&event, visible_rows) {
+                    match palette.handle_event(&event, backend, popup, visible_rows) {
                         Handled::Event(DualModePaletteAction::Cancelled) => {}
                         Handled::Event(DualModePaletteAction::ItemConfirmed { idx }) => {
-                            let query = palette.query().to_string();
+                            let query = palette.palette.query.clone();
                             let matched = self.active_view_command_actions(&query);
                             if let Some(action) = matched.get(idx) {
                                 let action_id = action.id.as_str().to_string();
@@ -864,7 +864,9 @@ impl CoordApp {
                         }
                         Handled::Event(DualModePaletteAction::QueryChanged { value }) => {
                             let matched = self.active_view_command_actions(&value);
-                            palette.set_items(help_actions_to_palette_items(&matched, &value));
+                            palette
+                                .palette
+                                .set_items(help_actions_to_palette_items(&matched, &value));
                             self.command_palette = Some(palette);
                         }
                         Handled::Event(_) | Handled::Consumed | Handled::Ignored => {
@@ -884,15 +886,17 @@ impl CoordApp {
             // exactly like the `/` trigger below: otherwise a literal `?`
             // typed into that prompt's title text would be hijacked into
             // opening the cheatsheet instead of landing in the field.
-            // `self.help_overlay.is_open()` is checked first so Esc/`?`
+            // `self.help_overlay.open` is checked first so Esc/`?`
             // still closes an ALREADY-open overlay unconditionally (once
             // open, it's the only modal — `any_blocking_modal_active()`
             // is true only because of `help_overlay` itself).
-            if self.help_overlay.is_open() || !self.any_blocking_modal_active() {
+            if self.help_overlay.open || !self.any_blocking_modal_active() {
                 match self.help_overlay.handle_event(&event) {
-                    Handled::Event(HelpOverlayAction::Opened | HelpOverlayAction::Closed) | Handled::Consumed => {
+                    Handled::Event(action) => {
+                        self.help_overlay.apply(action);
                         return Reaction::Redraw;
                     }
+                    Handled::Consumed => return Reaction::Redraw,
                     Handled::Ignored => {}
                 }
             }
@@ -1141,7 +1145,7 @@ impl CoordApp {
                     ctx.main_bounds()
                 };
                 // #316 Phase B: `Ctrl+F` in a board new-issue-chat opens the
-                // file-issue modal.  Intercept before ChatController so the
+                // file-issue modal.  Intercept before the `Chat` widget so the
                 // chat input doesn't see Ctrl+F as a literal character.
                 // Previously matched bare `f`/`F` (#366: fixed to require Ctrl
                 // so literal 'f' can be typed in the chat input).
@@ -1166,7 +1170,7 @@ impl CoordApp {
                     }
                 }
                 // #319 Phase A: Ctrl+N triggers the refinement-notes
-                // finaliser.  Intercept BEFORE forwarding to ChatController
+                // finaliser.  Intercept BEFORE forwarding to the `Chat` widget
                 // so the chat input doesn't see Ctrl+N as a literal char.
                 if chat_is_refinement {
                     if let UiEvent::KeyPressed { key, modifiers, .. } = &event {
@@ -1186,10 +1190,10 @@ impl CoordApp {
                     .unwrap()
                     .handle_event(&event, backend, main_rect);
                 match result {
-                    Handled::Event(ChatControllerAction::Submit { text }) => {
+                    Handled::Event(ChatEvent::Submit { text }) => {
                         self.submit_inject(text);
                     }
-                    Handled::Event(ChatControllerAction::Cancelled) => {
+                    Handled::Event(ChatEvent::Cancelled) => {
                         // Worker-guidance chat: Esc just closes the modal
                         // (worker keeps running because the user is
                         // mid-task).
@@ -1388,7 +1392,9 @@ impl CoordApp {
                             && self.board_search.focused =>
                     {
                         self.board_search.clear(); // also sets focused = false
-                        self.board_sidebar.focus_form(0, false);
+                        if let Some(s) = self.board_sidebar.sections.get_mut(0) {
+                            s.form_focused = false;
+                        }
                         self.rebuild_board_sidebar();
                         needs_redraw = true;
                     }
@@ -1436,7 +1442,9 @@ impl CoordApp {
                             && self.pipeline_search.focused =>
                     {
                         self.pipeline_search.clear(); // also sets focused = false
-                        self.pipeline_sidebar.focus_form(0, false);
+                        if let Some(s) = self.pipeline_sidebar.sections.get_mut(0) {
+                            s.form_focused = false;
+                        }
                         self.rebuild_pipeline_sidebar(None);
                         needs_redraw = true;
                     }
@@ -1645,7 +1653,7 @@ impl CoordApp {
                     }
 
                     // ── Watch overlay: control keys ─────────────────────
-                    // 'b' opens the ChatController guidance overlay. When the
+                    // 'b' opens the `Chat` widget guidance overlay. When the
                     // overlay is open, ALL events are intercepted earlier in
                     // handle() — these arms only fire when it is closed.
                     Key::Char('b')
@@ -1655,12 +1663,14 @@ impl CoordApp {
                             let atype = w.assignment_type.clone();
                             let issue_n = w.issue_number;
                             let machine = w.machine.clone();
-                            let mut chat = ChatController::new("inject");
-                            chat.set_status(StyledText::plain(format!(
-                                "  Guidance → {} #{} on {}  (Ctrl+S or Alt+Enter = send · Esc = close)",
-                                atype, issue_n, machine
-                            )));
-                            chat.set_transcript(self.focused_transcript().to_vec());
+                            let chat = InjectChat::new(
+                                "inject",
+                                StyledText::plain(format!(
+                                    "  Guidance → {} #{} on {}  (Ctrl+S or Alt+Enter = send · Esc = close)",
+                                    atype, issue_n, machine
+                                )),
+                                self.focused_transcript().to_vec(),
+                            );
                             self.inject_chat = Some(chat);
                         }
                         needs_redraw = true;
@@ -2423,11 +2433,11 @@ impl CoordApp {
                         }
                     }
 
-                    // ── Tab — cycle sections within Board SidebarSystem ──
+                    // ── Tab — cycle sections within the Board sidebar ──
                     Key::Named(NamedKey::Tab) if self.active_view == SidebarView::Board => {
                         let prev_sel = self.board_selected_issue();
-                        let result = self.board_sidebar.handle(&event, backend, list_b);
-                        if result != SidebarEvent::Ignored {
+                        let result = self.drive_board_sidebar(&event, backend, list_b);
+                        if !matches!(result, Handled::Ignored) {
                             let new_sel = self.board_selected_issue();
                             if new_sel != prev_sel {
                                 self.detail_scroll = 0;
@@ -2695,12 +2705,14 @@ impl CoordApp {
                             self.inject_opened_from_log_tab = true;
                             // Open the guidance chat overlay — same shape as
                             // the 'b' handler in the watch overlay above.
-                            let mut chat = ChatController::new("inject");
-                            chat.set_status(StyledText::plain(format!(
-                                "  Steer → {} #{} on {}  (Ctrl+S or Alt+Enter = send · Esc = close)",
-                                atype, issue_n, machine
-                            )));
-                            chat.set_transcript(self.focused_transcript().to_vec());
+                            let chat = InjectChat::new(
+                                "inject",
+                                StyledText::plain(format!(
+                                    "  Steer → {} #{} on {}  (Ctrl+S or Alt+Enter = send · Esc = close)",
+                                    atype, issue_n, machine
+                                )),
+                                self.focused_transcript().to_vec(),
+                            );
                             self.inject_chat = Some(chat);
                         } else {
                             self.push_toast(
@@ -2728,8 +2740,8 @@ impl CoordApp {
                         match self.active_view {
                             SidebarView::Board => {
                                 let prev_sel = self.board_selected_issue();
-                                let result = self.board_sidebar.handle(&event, backend, list_b);
-                                if result != SidebarEvent::Ignored {
+                                let result = self.drive_board_sidebar(&event, backend, list_b);
+                                if !matches!(result, Handled::Ignored) {
                                     let new_sel = self.board_selected_issue();
                                     if new_sel != prev_sel {
                                         self.detail_scroll = 0;
@@ -2746,7 +2758,7 @@ impl CoordApp {
                             }
                             SidebarView::Pipeline => {
                                 let prev = self.pipeline_sel;
-                                self.pipeline_sidebar.handle(&event, backend, list_b);
+                                let _ = self.drive_pipeline_sidebar(&event, backend, list_b);
                                 self.pipeline_sel = self.selected_pipeline_index();
                                 if self.pipeline_sel != prev {
                                     self.pipeline_detail_scroll = 0;
@@ -2812,8 +2824,8 @@ impl CoordApp {
                         match self.active_view {
                             SidebarView::Board => {
                                 let prev_sel = self.board_selected_issue();
-                                let result = self.board_sidebar.handle(&event, backend, list_b);
-                                if result != SidebarEvent::Ignored {
+                                let result = self.drive_board_sidebar(&event, backend, list_b);
+                                if !matches!(result, Handled::Ignored) {
                                     let new_sel = self.board_selected_issue();
                                     if new_sel != prev_sel {
                                         self.detail_scroll = 0;
@@ -2829,7 +2841,7 @@ impl CoordApp {
                             }
                             SidebarView::Pipeline => {
                                 let prev = self.pipeline_sel;
-                                self.pipeline_sidebar.handle(&event, backend, list_b);
+                                let _ = self.drive_pipeline_sidebar(&event, backend, list_b);
                                 self.pipeline_sel = self.selected_pipeline_index();
                                 if self.pipeline_sel != prev {
                                     self.pipeline_detail_scroll = 0;
@@ -3061,7 +3073,7 @@ impl CoordApp {
                         match self.active_view {
                             SidebarView::Board => {
                                 let prev_sel = self.board_selected_issue();
-                                self.board_sidebar.handle(&event, backend, list_b);
+                                let _ = self.drive_board_sidebar(&event, backend, list_b);
                                 let new_sel = self.board_selected_issue();
                                 if new_sel != prev_sel {
                                     self.detail_scroll = 0;
@@ -3074,7 +3086,7 @@ impl CoordApp {
                             }
                             SidebarView::Pipeline => {
                                 let prev = self.pipeline_sel;
-                                self.pipeline_sidebar.handle(&event, backend, list_b);
+                                let _ = self.drive_pipeline_sidebar(&event, backend, list_b);
                                 self.pipeline_sel = self.selected_pipeline_index();
                                 if self.pipeline_sel != prev {
                                     self.pipeline_focused_stage =
@@ -3086,7 +3098,7 @@ impl CoordApp {
                                 // #237: jump to the first interactive field
                                 // in the unified form.
                                 self.settings_field_sel = 0;
-                                self.settings_form.borrow_mut().set_scroll_offset(0);
+                                self.settings_form_state.get_mut().scroll_offset = Some(0);
                             }
                             // #424: Terminal — no nav target for Home.
                             SidebarView::Terminal => {}
@@ -3147,7 +3159,7 @@ impl CoordApp {
                         match self.active_view {
                             SidebarView::Board => {
                                 let prev_sel = self.board_selected_issue();
-                                self.board_sidebar.handle(&event, backend, list_b);
+                                let _ = self.drive_board_sidebar(&event, backend, list_b);
                                 let new_sel = self.board_selected_issue();
                                 if new_sel != prev_sel {
                                     self.detail_scroll = 0;
@@ -3163,7 +3175,7 @@ impl CoordApp {
                             }
                             SidebarView::Pipeline => {
                                 let prev = self.pipeline_sel;
-                                self.pipeline_sidebar.handle(&event, backend, list_b);
+                                let _ = self.drive_pipeline_sidebar(&event, backend, list_b);
                                 self.pipeline_sel = self.selected_pipeline_index();
                                 if self.pipeline_sel != prev {
                                     self.pipeline_focused_stage =
@@ -3355,7 +3367,7 @@ impl CoordApp {
                     // ── PageDown (Board only) ─────────────────────────────
                     Key::Named(NamedKey::PageDown) if self.active_view == SidebarView::Board => {
                         let prev_sel = self.board_selected_issue();
-                        self.board_sidebar.handle(&event, backend, list_b);
+                        let _ = self.drive_board_sidebar(&event, backend, list_b);
                         let new_sel = self.board_selected_issue();
                         if new_sel != prev_sel {
                             self.detail_scroll = 0;
@@ -3366,7 +3378,7 @@ impl CoordApp {
                     // ── PageUp (Board only) ───────────────────────────────
                     Key::Named(NamedKey::PageUp) if self.active_view == SidebarView::Board => {
                         let prev_sel = self.board_selected_issue();
-                        self.board_sidebar.handle(&event, backend, list_b);
+                        let _ = self.drive_board_sidebar(&event, backend, list_b);
                         let new_sel = self.board_selected_issue();
                         if new_sel != prev_sel {
                             self.detail_scroll = 0;
@@ -4557,6 +4569,17 @@ impl CoordApp {
                     }
                     false
                 } else if ctx.in_main(pos.x, pos.y) {
+                    if self.active_view == SidebarView::Settings {
+                        // The settings form scrolls through its own wheel
+                        // handling, laid out by the backend that paints it.
+                        let _ = ScrolledForm::new(self.build_settings_form()).handle_event(
+                            self.settings_form_state.get_mut(),
+                            event,
+                            backend,
+                            ctx.main_bounds(),
+                        );
+                        return true;
+                    }
                     self.mouse_main_scroll(d, pos, ctx.main_bounds(), lh, char_w)
                 } else {
                     false
@@ -4576,17 +4599,17 @@ impl CoordApp {
                 let lh = backend.line_height();
                 let mut redraw = false;
                 // Forward to the active sidebar so scrollbar drag tracks the cursor.
-                // SidebarSystem.handle(MouseMoved) calls drag_to() internally and
-                // returns Consumed when scroll state changed — use that to trigger redraw.
+                // The sidebar tracks a scrollbar drag on MouseMoved and answers
+                // anything but Ignored when it moved — use that to trigger redraw.
                 if let Some(sidebar_b) = ctx.sidebar_bounds() {
                     let result = match self.active_view {
-                        SidebarView::Board => self.board_sidebar.handle(event, backend, sidebar_b),
+                        SidebarView::Board => self.drive_board_sidebar(event, backend, sidebar_b),
                         SidebarView::Pipeline => {
-                            self.pipeline_sidebar.handle(event, backend, sidebar_b)
+                            self.drive_pipeline_sidebar(event, backend, sidebar_b)
                         }
-                        _ => SidebarEvent::Ignored,
+                        _ => Handled::Ignored,
                     };
-                    if result != SidebarEvent::Ignored {
+                    if !matches!(result, Handled::Ignored) {
                         redraw = true;
                     }
                 }
@@ -4943,10 +4966,10 @@ impl CoordApp {
                 if let Some(sidebar_b) = ctx.sidebar_bounds() {
                     match self.active_view {
                         SidebarView::Board => {
-                            self.board_sidebar.handle(event, backend, sidebar_b);
+                            let _ = self.drive_board_sidebar(event, backend, sidebar_b);
                         }
                         SidebarView::Pipeline => {
-                            self.pipeline_sidebar.handle(event, backend, sidebar_b);
+                            let _ = self.drive_pipeline_sidebar(event, backend, sidebar_b);
                         }
                         _ => {}
                     }
@@ -5036,225 +5059,227 @@ impl CoordApp {
         }
         match self.active_view {
             SidebarView::Board => {
-                let result = self.board_sidebar.handle(event, backend, sidebar_b);
-                let result = super::sidebar::tui_chevron_click_guard(
-                    result,
-                    event,
-                    sidebar_b,
-                    &*backend,
-                    &self.board_branch_indents,
-                );
-                match result {
-                    SidebarEvent::RowSelected { section, ref path } => {
-                        // #646 focus-follows-click: row click blurs the search filter.
-                        if self.board_search.focused {
-                            self.board_search.focused = false;
-                            self.board_sidebar.focus_form(0, false);
-                        }
-                        if path.len() == 1 {
-                            // #410: click on a milestone header — toggle milestone expansion.
-                            let offset = self.board_repo_offset();
-                            if section >= offset {
-                                let repo_idx = section - offset;
-                                if let Some(repo) = self.board_repo_names.get(repo_idx).cloned() {
-                                    let milestone_idx = path[0] as usize;
-                                    let cache = self.board_issues_cache.clone();
-                                    let milestones = self.board_milestones_for_repo(&cache, &repo, true);
-                                    if let Some((m_key, _, group_issues)) =
-                                        milestones.get(milestone_idx)
-                                    {
-                                        let m_key = m_key.clone();
-                                        // #857: first click on an untouched key must
-                                        // invert the default it was actually painted
-                                        // with (in-flight ⇒ expanded), not a hardcoded
-                                        // `true` — else a non-in-flight (collapsed)
-                                        // milestone's first click would insert `true`
-                                        // and immediately negate it back to `false`,
-                                        // silently no-op'ing the click.
-                                        let default_expanded =
-                                            Self::board_milestone_has_inflight(group_issues);
-                                        let entry = self
-                                            .board_milestone_expanded
-                                            .entry((repo, m_key))
-                                            .or_insert(default_expanded);
-                                        *entry = !*entry;
-                                        self.rebuild_board_sidebar();
+                let actions = match self.drive_board_sidebar(event, backend, sidebar_b) {
+                    Handled::Event(actions) => actions,
+                    Handled::Consumed => return true,
+                    Handled::Ignored => return false,
+                };
+                let mut handled = false;
+                for result in actions {
+                    handled |= match result {
+                        SidebarAction::RowSelected { section, ref path } => {
+                            // #646 focus-follows-click: row click blurs the search filter.
+                            if self.board_search.focused {
+                                self.board_search.focused = false;
+                                if let Some(s) = self.board_sidebar.sections.get_mut(0) {
+                                    s.form_focused = false;
+                                }
+                            }
+                            if path.len() == 1 {
+                                // #410: click on a milestone header — toggle milestone expansion.
+                                let offset = self.board_repo_offset();
+                                if section >= offset {
+                                    let repo_idx = section - offset;
+                                    if let Some(repo) = self.board_repo_names.get(repo_idx).cloned() {
+                                        let milestone_idx = path[0] as usize;
+                                        let cache = self.board_issues_cache.clone();
+                                        let milestones = self.board_milestones_for_repo(&cache, &repo, true);
+                                        if let Some((m_key, _, group_issues)) =
+                                            milestones.get(milestone_idx)
+                                        {
+                                            let m_key = m_key.clone();
+                                            // #857: first click on an untouched key must
+                                            // invert the default it was actually painted
+                                            // with (in-flight ⇒ expanded), not a hardcoded
+                                            // `true` — else a non-in-flight (collapsed)
+                                            // milestone's first click would insert `true`
+                                            // and immediately negate it back to `false`,
+                                            // silently no-op'ing the click.
+                                            let default_expanded =
+                                                Self::board_milestone_has_inflight(group_issues);
+                                            let entry = self
+                                                .board_milestone_expanded
+                                                .entry((repo, m_key))
+                                                .or_insert(default_expanded);
+                                            *entry = !*entry;
+                                            self.rebuild_board_sidebar();
+                                        }
                                     }
                                 }
+                            } else {
+                                // #2282 (ms-65 §2e rules 1/2/4): a single click on
+                                // an issue row opens it in a PREVIEW tab — already
+                                // open → activate; a preview exists → replace it in
+                                // place; otherwise append. The sidebar has already
+                                // moved its selection to the clicked row by now, so
+                                // `board_selected_issue` names the clicked issue.
+                                //
+                                // #2285 (§5): the detail-scroll reset is `open_board_doc_tab`'s
+                                // job now, not this arm's — it checkpoints the OUTGOING tab's
+                                // scroll before switching, so zeroing the live field first
+                                // would bank a 0 onto the tab being left and lose its
+                                // position. `restore_detail_sub_state` zeroes it for a
+                                // first-open document and restores the stored offset for one
+                                // already open, which is what this line used to approximate
+                                // when the pane was a pure function of the sidebar row. Only
+                                // the no-issue-selected fallback still resets it here.
+                                match self.board_selected_issue() {
+                                    Some(key) => self.open_board_doc_tab(key, false),
+                                    None => self.detail_scroll = 0,
+                                }
                             }
-                        } else {
-                            // #2282 (ms-65 §2e rules 1/2/4): a single click on
-                            // an issue row opens it in a PREVIEW tab — already
-                            // open → activate; a preview exists → replace it in
-                            // place; otherwise append. The sidebar has already
-                            // moved its selection to the clicked row by now, so
-                            // `board_selected_issue` names the clicked issue.
-                            //
-                            // #2285 (§5): the detail-scroll reset is `open_board_doc_tab`'s
-                            // job now, not this arm's — it checkpoints the OUTGOING tab's
-                            // scroll before switching, so zeroing the live field first
-                            // would bank a 0 onto the tab being left and lose its
-                            // position. `restore_detail_sub_state` zeroes it for a
-                            // first-open document and restores the stored offset for one
-                            // already open, which is what this line used to approximate
-                            // when the pane was a pure function of the sidebar row. Only
-                            // the no-issue-selected fallback still resets it here.
-                            match self.board_selected_issue() {
-                                Some(key) => self.open_board_doc_tab(key, false),
-                                None => self.detail_scroll = 0,
+                            true
+                        }
+                        SidebarAction::RowActivated { section, ref path } => {
+                            // #646 focus-follows-click: row activate blurs the search filter.
+                            if self.board_search.focused {
+                                self.board_search.focused = false;
+                                if let Some(s) = self.board_sidebar.sections.get_mut(0) {
+                                    s.form_focused = false;
+                                }
                             }
-                        }
-                        true
-                    }
-                    SidebarEvent::RowActivated { section, ref path } => {
-                        // #646 focus-follows-click: row activate blurs the search filter.
-                        if self.board_search.focused {
-                            self.board_search.focused = false;
-                            self.board_sidebar.focus_form(0, false);
-                        }
-                        if path.len() == 1 {
-                            // Activate on a milestone header — toggle expansion.
-                            let offset = self.board_repo_offset();
-                            if section >= offset {
-                                let repo_idx = section - offset;
-                                if let Some(repo) = self.board_repo_names.get(repo_idx).cloned() {
-                                    let milestone_idx = path[0] as usize;
-                                    let cache = self.board_issues_cache.clone();
-                                    let milestones = self.board_milestones_for_repo(&cache, &repo, true);
-                                    if let Some((m_key, _, group_issues)) =
-                                        milestones.get(milestone_idx)
-                                    {
-                                        let m_key = m_key.clone();
-                                        // #857: first click on an untouched key must
-                                        // invert the default it was actually painted
-                                        // with (in-flight ⇒ expanded), not a hardcoded
-                                        // `true` — else a non-in-flight (collapsed)
-                                        // milestone's first click would insert `true`
-                                        // and immediately negate it back to `false`,
-                                        // silently no-op'ing the click.
-                                        let default_expanded =
-                                            Self::board_milestone_has_inflight(group_issues);
-                                        let entry = self
-                                            .board_milestone_expanded
-                                            .entry((repo, m_key))
-                                            .or_insert(default_expanded);
-                                        *entry = !*entry;
-                                        self.rebuild_board_sidebar();
+                            if path.len() == 1 {
+                                // Activate on a milestone header — toggle expansion.
+                                let offset = self.board_repo_offset();
+                                if section >= offset {
+                                    let repo_idx = section - offset;
+                                    if let Some(repo) = self.board_repo_names.get(repo_idx).cloned() {
+                                        let milestone_idx = path[0] as usize;
+                                        let cache = self.board_issues_cache.clone();
+                                        let milestones = self.board_milestones_for_repo(&cache, &repo, true);
+                                        if let Some((m_key, _, group_issues)) =
+                                            milestones.get(milestone_idx)
+                                        {
+                                            let m_key = m_key.clone();
+                                            // #857: first click on an untouched key must
+                                            // invert the default it was actually painted
+                                            // with (in-flight ⇒ expanded), not a hardcoded
+                                            // `true` — else a non-in-flight (collapsed)
+                                            // milestone's first click would insert `true`
+                                            // and immediately negate it back to `false`,
+                                            // silently no-op'ing the click.
+                                            let default_expanded =
+                                                Self::board_milestone_has_inflight(group_issues);
+                                            let entry = self
+                                                .board_milestone_expanded
+                                                .entry((repo, m_key))
+                                                .or_insert(default_expanded);
+                                            *entry = !*entry;
+                                            self.rebuild_board_sidebar();
+                                        }
                                     }
                                 }
-                            }
-                        } else {
-                            // #2285 (§5): the detail-scroll reset moved into
-                            // `open_board_doc_tab`'s checkpoint/restore pair — see the
-                            // RowSelected arm above for why zeroing it here would bank a
-                            // 0 onto the tab being switched away from.
-                            //
-                            // #2282 (ms-65 §2e rule 3): a double click (which
-                            // `SidebarSystem` reports as RowActivated) is
-                            // open-or-activate followed by PROMOTION — the tab
-                            // drops `is_preview` and stops being the
-                            // replaceable slot.
-                            //
-                            // …but only when the row really is the one the
-                            // gesture started on. A genuine double click always
-                            // arrives as `MouseDown` (RowSelected, which has
-                            // just opened and activated the row) *followed by*
-                            // `DoubleClick`, so at this point the row is the
-                            // active document by construction. When it is not,
-                            // the event is a plain second single click on a
-                            // DIFFERENT row that the TUI backend's 400 ms /
-                            // 1.5-cell `DoubleClickDetector` folded into a
-                            // `DoubleClick` — the user meant two single clicks,
-                            // so honour rule 1 (open a preview) rather than
-                            // silently pinning a tab they never double-clicked.
-                            match self.board_selected_issue() {
-                                Some(key) => {
-                                    let pin = self.board_doc_active_key() == Some(&key);
-                                    self.open_board_doc_tab(key, pin);
-                                }
-                                None => self.detail_scroll = 0,
-                            }
-                        }
-                        true
-                    }
-                    SidebarEvent::HeaderActivated { section: _ } => true,
-                    SidebarEvent::FormEvent {
-                        section: 0,
-                        event: FormEvent::TextInputChanged { ref value, .. },
-                    } => {
-                        self.board_search.set_value(value);
-                        self.rebuild_board_sidebar();
-                        true
-                    }
-                    // Click on the filter TextInput focuses it (emits FocusChanged).
-                    SidebarEvent::FormEvent {
-                        section: 0,
-                        event: FormEvent::FocusChanged { .. },
-                    } => {
-                        self.board_search.focused = true;
-                        self.board_sidebar.focus_form(0, true);
-                        true
-                    }
-                    // #410: Chevron click on a milestone header row (only depth-1 rows are headers).
-                    SidebarEvent::RowToggleExpand { section, ref path } if path.len() == 1 => {
-                        let offset = self.board_repo_offset();
-                        if section >= offset {
-                            let repo_idx = section - offset;
-                            if let Some(repo) = self.board_repo_names.get(repo_idx).cloned() {
-                                let cache = self.board_issues_cache.clone();
-                                let milestones = self.board_milestones_for_repo(&cache, &repo, true);
-                                let milestone_idx = path[0] as usize;
-                                if let Some((m_key, _, group_issues)) =
-                                    milestones.get(milestone_idx)
-                                {
-                                    let m_key = m_key.clone();
-                                    // #857: match the painted default (see the
-                                    // RowSelected/RowActivated arms above) so a
-                                    // chevron click never silently no-ops.
-                                    let default_expanded =
-                                        Self::board_milestone_has_inflight(group_issues);
-                                    let entry = self
-                                        .board_milestone_expanded
-                                        .entry((repo, m_key))
-                                        .or_insert(default_expanded);
-                                    *entry = !*entry;
-                                    self.rebuild_board_sidebar();
+                            } else {
+                                // #2285 (§5): the detail-scroll reset moved into
+                                // `open_board_doc_tab`'s checkpoint/restore pair — see the
+                                // RowSelected arm above for why zeroing it here would bank a
+                                // 0 onto the tab being switched away from.
+                                //
+                                // #2282 (ms-65 §2e rule 3): a double click (which
+                                // the sidebar reports as RowActivated) is
+                                // open-or-activate followed by PROMOTION — the tab
+                                // drops `is_preview` and stops being the
+                                // replaceable slot.
+                                //
+                                // …but only when the row really is the one the
+                                // gesture started on. A genuine double click always
+                                // arrives as `MouseDown` (RowSelected, which has
+                                // just opened and activated the row) *followed by*
+                                // `DoubleClick`, so at this point the row is the
+                                // active document by construction. When it is not,
+                                // the event is a plain second single click on a
+                                // DIFFERENT row that the TUI backend's 400 ms /
+                                // 1.5-cell `DoubleClickDetector` folded into a
+                                // `DoubleClick` — the user meant two single clicks,
+                                // so honour rule 1 (open a preview) rather than
+                                // silently pinning a tab they never double-clicked.
+                                match self.board_selected_issue() {
+                                    Some(key) => {
+                                        let pin = self.board_doc_active_key() == Some(&key);
+                                        self.open_board_doc_tab(key, pin);
+                                    }
+                                    None => self.detail_scroll = 0,
                                 }
                             }
+                            true
                         }
-                        true
-                    }
-                    // #1270: an epic row is a branch too — collapsing it
-                    // hides just its own nested children, leaving the epic
-                    // row and its milestone siblings visible. Matched by
-                    // identity via `board_epic_row_keys` (mirrors Pipeline's
-                    // `pipeline_epic_row_keys` handling) rather than a fixed
-                    // path length, since depth-2 rows are ordinary issue
-                    // rows UNLESS they happen to be an epic with children.
-                    // This arm must precede the generic catch-all below.
-                    SidebarEvent::RowToggleExpand { section, ref path }
-                        if self
-                            .board_epic_row_keys
-                            .contains_key(&(section, path.clone())) =>
-                    {
-                        if let Some(key) =
-                            self.board_epic_row_keys.get(&(section, path.clone())).cloned()
-                        {
-                            // Default expanded — mirrors the render-path
-                            // default in `epic_expand_state_in`.
-                            let entry = self.board_epic_expanded.entry(key).or_insert(true);
-                            *entry = !*entry;
+                        SidebarAction::HeaderActivated { section: _ } => true,
+                        SidebarAction::Form {
+                            section: 0,
+                            event: FormEvent::TextInputChanged { ref value, .. },
+                        } => {
+                            self.board_search.set_value(value);
                             self.rebuild_board_sidebar();
+                            true
                         }
-                        true
-                    }
-                    SidebarEvent::StateChanged
-                    | SidebarEvent::Consumed
-                    | SidebarEvent::ScrollChanged { .. }
-                    | SidebarEvent::FormEvent { .. }
-                    | SidebarEvent::RowToggleExpand { .. } => true,
-                    _ => false,
+                        // Click on the filter TextInput focuses it (emits FocusChanged).
+                        SidebarAction::Form {
+                            section: 0,
+                            event: FormEvent::FocusChanged { .. },
+                        } => {
+                            self.board_search.focused = true;
+                            if let Some(s) = self.board_sidebar.sections.get_mut(0) {
+                                s.form_focused = true;
+                            }
+                            true
+                        }
+                        // #410: Chevron click on a milestone header row (only depth-1 rows are headers).
+                        SidebarAction::RowToggleExpand { section, ref path } if path.len() == 1 => {
+                            let offset = self.board_repo_offset();
+                            if section >= offset {
+                                let repo_idx = section - offset;
+                                if let Some(repo) = self.board_repo_names.get(repo_idx).cloned() {
+                                    let cache = self.board_issues_cache.clone();
+                                    let milestones = self.board_milestones_for_repo(&cache, &repo, true);
+                                    let milestone_idx = path[0] as usize;
+                                    if let Some((m_key, _, group_issues)) =
+                                        milestones.get(milestone_idx)
+                                    {
+                                        let m_key = m_key.clone();
+                                        // #857: match the painted default (see the
+                                        // RowSelected/RowActivated arms above) so a
+                                        // chevron click never silently no-ops.
+                                        let default_expanded =
+                                            Self::board_milestone_has_inflight(group_issues);
+                                        let entry = self
+                                            .board_milestone_expanded
+                                            .entry((repo, m_key))
+                                            .or_insert(default_expanded);
+                                        *entry = !*entry;
+                                        self.rebuild_board_sidebar();
+                                    }
+                                }
+                            }
+                            true
+                        }
+                        // #1270: an epic row is a branch too — collapsing it
+                        // hides just its own nested children, leaving the epic
+                        // row and its milestone siblings visible. Matched by
+                        // identity via `board_epic_row_keys` (mirrors Pipeline's
+                        // `pipeline_epic_row_keys` handling) rather than a fixed
+                        // path length, since depth-2 rows are ordinary issue
+                        // rows UNLESS they happen to be an epic with children.
+                        // This arm must precede the generic catch-all below.
+                        SidebarAction::RowToggleExpand { section, ref path }
+                            if self
+                                .board_epic_row_keys
+                                .contains_key(&(section, path.clone())) =>
+                        {
+                            if let Some(key) =
+                                self.board_epic_row_keys.get(&(section, path.clone())).cloned()
+                            {
+                                // Default expanded — mirrors the render-path
+                                // default in `epic_expand_state_in`.
+                                let entry = self.board_epic_expanded.entry(key).or_insert(true);
+                                *entry = !*entry;
+                                self.rebuild_board_sidebar();
+                            }
+                            true
+                        }
+                        _ => true,
+                    };
                 }
+                handled
             }
             SidebarView::Machines => {
                 // Row 0 = title strip; item i starts at row 1+i-scroll.
@@ -5271,8 +5296,8 @@ impl CoordApp {
                 false
             }
             // #953: the Terminal-view tree is a raw `TreeView` (not
-            // `SidebarSystem`), so — like Machines above — click dispatch
-            // uses flat pixel-row math rather than a `SidebarEvent`. No
+            // `Sidebar` widget), so — like Machines above — click dispatch
+            // uses flat pixel-row math rather than a `SidebarAction`. No
             // title row (unlike Machines' `ListView.title`), so row 0 maps
             // directly to the first tree row.
             //
@@ -5292,228 +5317,245 @@ impl CoordApp {
             }
             SidebarView::Pipeline => {
                 let prev = self.pipeline_sel;
-                let result = self.pipeline_sidebar.handle(event, backend, sidebar_b);
-                let result = super::sidebar::tui_chevron_click_guard(
-                    result,
-                    event,
-                    sidebar_b,
-                    &*backend,
-                    &self.pipeline_branch_indents,
-                );
+                let actions = match self.drive_pipeline_sidebar(event, backend, sidebar_b) {
+                    Handled::Event(actions) => actions,
+                    Handled::Consumed => return true,
+                    Handled::Ignored => return false,
+                };
                 self.pipeline_sel = self.selected_pipeline_index();
                 if self.pipeline_sel != prev {
                     self.pipeline_focused_stage = self.default_focused_stage_for_selected_issue();
                     self.pipeline_stage_content_scroll = 0;
                 }
-                match result {
-                    SidebarEvent::FormEvent {
-                        section: 0,
-                        event: FormEvent::TextInputChanged { ref value, .. },
-                    } => {
-                        self.pipeline_search.set_value(value);
-                        self.rebuild_pipeline_sidebar(None);
-                        true
-                    }
-                    // Click on the filter TextInput focuses it (emits FocusChanged).
-                    SidebarEvent::FormEvent {
-                        section: 0,
-                        event: FormEvent::FocusChanged { .. },
-                    } => {
-                        self.pipeline_search.focused = true;
-                        self.pipeline_sidebar.focus_form(0, true);
-                        true
-                    }
-                    SidebarEvent::RowToggleExpand { section, ref path } if path.len() == 1 => {
-                        // A one-level path = a repo sub-header was toggled.
-                        // Every grouped section keys by repo (#1487 replaced
-                        // In-progress's Live/Idle split with repo nodes), and
-                        // all persist expand state in pipeline_lifecycle_expanded
-                        // keyed by (lc_key, repo_key).  In-progress still needs
-                        // its own accessor: it orders issues in-flight-first
-                        // within a repo, so `gi` must index the same group list
-                        // the renderer emitted.
-                        let search_offset = 1usize;
-                        if section >= search_offset {
-                            let state_idx = section - search_offset;
-                            if let Some(&lc_key) = self.pipeline_state_section_names.get(state_idx)
-                            {
-                                let groups = if lc_key == "in-progress" {
-                                    self.pipeline_active_by_repo()
-                                } else {
-                                    self.pipeline_repos_for_state(lc_key)
-                                };
-                                let gi = path[0] as usize;
-                                if let Some((group_key, _)) = groups.get(gi) {
-                                    let group_key = group_key.clone();
-                                    let entry = self
-                                        .pipeline_lifecycle_expanded
-                                        .entry((lc_key.to_string(), group_key))
-                                        .or_insert(true);
-                                    *entry = !*entry;
-                                    self.rebuild_pipeline_sidebar(None);
-                                }
-                            }
-                        }
-                        true
-                    }
-                    // #1197: an epic row is a branch too — collapsing it hides
-                    // just its own children, leaving the epic row and its
-                    // milestone siblings visible (previously the only way to
-                    // hide an epic's children was collapsing the whole
-                    // milestone, which hid the epic itself along with them).
-                    // Matched by identity via `pipeline_epic_row_keys` rather
-                    // than by path length: epic rows land at len 2 (Done,
-                    // Refining/Pending) *or* len 3 (New, In-progress) depending
-                    // on whether that section is milestone-grouped.  This arm
-                    // must precede the milestone arm below — a Refining epic
-                    // row and a New milestone header are both len 2.
-                    SidebarEvent::RowToggleExpand { section, ref path }
-                        if self
-                            .pipeline_epic_row_keys
-                            .contains_key(&(section, path.clone())) =>
-                    {
-                        if let Some(key) =
-                            self.pipeline_epic_row_keys.get(&(section, path.clone())).cloned()
+                // A click anywhere on a group header (a branch row that names
+                // no issue) expands or collapses it, as Board's milestone
+                // headers do — not only a click on its chevron cells, which
+                // are all the tree itself treats as the toggle.
+                let actions: Vec<SidebarAction> = actions
+                    .into_iter()
+                    .map(|action| match action {
+                        SidebarAction::RowSelected { section, path }
+                            if self.pipeline_sel.is_none()
+                                && self.pipeline_row_is_branch(section, &path) =>
                         {
-                            // Default expanded — mirrors the render-path
-                            // default in `epic_expand_state`.
-                            let entry =
-                                self.pipeline_epic_expanded.entry(key).or_insert(true);
-                            *entry = !*entry;
-                            self.rebuild_pipeline_sidebar(None);
+                            SidebarAction::RowToggleExpand { section, path }
                         }
-                        true
-                    }
-                    SidebarEvent::RowToggleExpand { section, ref path } if path.len() == 2 => {
-                        // #668/#1069: A two-level path = a milestone sub-header
-                        // was toggled, within either a New section or an
-                        // In-progress section — both grouped repo → milestone
-                        // (#1487).  Persist the state in
-                        // pipeline_milestone_expanded keyed by (lc_key,
-                        // repo_key, milestone_key).
-                        // Refining/Pending have no milestone tier, so a
-                        // path.len()==2 there is an issue row (not a header) —
-                        // those sections handle selection via RowSelected, not
-                        // here.  #728: Done no longer has milestone
-                        // sub-headers (flat list), so path.len()==2 in Done is
-                        // an issue row — skip it here.
-                        let search_offset = 1usize;
-                        if section >= search_offset {
-                            let state_idx = section - search_offset;
-                            if let Some(&lc_key) = self.pipeline_state_section_names.get(state_idx)
-                            {
-                                if lc_key == "new" {
-                                    let repo_groups = self.pipeline_repos_for_state(lc_key);
-                                    let ri = path[0] as usize;
-                                    let mi = path[1] as usize;
-                                    if let Some((repo_key, repo_issue_idxs)) =
-                                        repo_groups.get(ri)
-                                    {
-                                        let repo_key = repo_key.clone();
-                                        let milestones = self
-                                            .pipeline_milestones_for_issues(repo_issue_idxs);
-                                        if let Some((mil_key, _, _)) = milestones.get(mi) {
-                                            let mil_key = mil_key.clone();
-                                            // #857: default is collapsed (New has no
-                                            // in-flight concept — those issues are
-                                            // pre-dispatch by definition), matching
-                                            // the render-path default above.
-                                            let entry = self
-                                                .pipeline_milestone_expanded
-                                                .entry((
-                                                    lc_key.to_string(),
-                                                    repo_key,
-                                                    mil_key,
-                                                ))
-                                                .or_insert(false);
-                                            *entry = !*entry;
-                                            self.rebuild_pipeline_sidebar(None);
-                                        }
-                                    }
-                                } else if lc_key == "in-progress" {
-                                    let groups = self.pipeline_active_by_repo();
+                        other => other,
+                    })
+                    .collect();
+                let mut handled = false;
+                for result in actions {
+                    handled |= match result {
+                        SidebarAction::Form {
+                            section: 0,
+                            event: FormEvent::TextInputChanged { ref value, .. },
+                        } => {
+                            self.pipeline_search.set_value(value);
+                            self.rebuild_pipeline_sidebar(None);
+                            true
+                        }
+                        // Click on the filter TextInput focuses it (emits FocusChanged).
+                        SidebarAction::Form {
+                            section: 0,
+                            event: FormEvent::FocusChanged { .. },
+                        } => {
+                            self.pipeline_search.focused = true;
+                            if let Some(s) = self.pipeline_sidebar.sections.get_mut(0) {
+                                s.form_focused = true;
+                            }
+                            true
+                        }
+                        SidebarAction::RowToggleExpand { section, ref path } if path.len() == 1 => {
+                            // A one-level path = a repo sub-header was toggled.
+                            // Every grouped section keys by repo (#1487 replaced
+                            // In-progress's Live/Idle split with repo nodes), and
+                            // all persist expand state in pipeline_lifecycle_expanded
+                            // keyed by (lc_key, repo_key).  In-progress still needs
+                            // its own accessor: it orders issues in-flight-first
+                            // within a repo, so `gi` must index the same group list
+                            // the renderer emitted.
+                            let search_offset = 1usize;
+                            if section >= search_offset {
+                                let state_idx = section - search_offset;
+                                if let Some(&lc_key) = self.pipeline_state_section_names.get(state_idx)
+                                {
+                                    let groups = if lc_key == "in-progress" {
+                                        self.pipeline_active_by_repo()
+                                    } else {
+                                        self.pipeline_repos_for_state(lc_key)
+                                    };
                                     let gi = path[0] as usize;
-                                    let mi = path[1] as usize;
-                                    if let Some((group_key, issue_idxs)) = groups.get(gi) {
+                                    if let Some((group_key, _)) = groups.get(gi) {
                                         let group_key = group_key.clone();
-                                        let milestones =
-                                            self.pipeline_milestones_for_issues(issue_idxs);
-                                        if let Some((mil_key, _, _)) = milestones.get(mi) {
-                                            let mil_key = mil_key.clone();
-                                            // #1069: default is expanded — unlike
-                                            // New, In-progress work is already
-                                            // in flight and should be visible.
-                                            let entry = self
-                                                .pipeline_milestone_expanded
-                                                .entry((
-                                                    lc_key.to_string(),
-                                                    group_key,
-                                                    mil_key,
-                                                ))
-                                                .or_insert(true);
-                                            *entry = !*entry;
-                                            self.rebuild_pipeline_sidebar(None);
+                                        let entry = self
+                                            .pipeline_lifecycle_expanded
+                                            .entry((lc_key.to_string(), group_key))
+                                            .or_insert(true);
+                                        *entry = !*entry;
+                                        self.rebuild_pipeline_sidebar(None);
+                                    }
+                                }
+                            }
+                            true
+                        }
+                        // #1197: an epic row is a branch too — collapsing it hides
+                        // just its own children, leaving the epic row and its
+                        // milestone siblings visible (previously the only way to
+                        // hide an epic's children was collapsing the whole
+                        // milestone, which hid the epic itself along with them).
+                        // Matched by identity via `pipeline_epic_row_keys` rather
+                        // than by path length: epic rows land at len 2 (Done,
+                        // Refining/Pending) *or* len 3 (New, In-progress) depending
+                        // on whether that section is milestone-grouped.  This arm
+                        // must precede the milestone arm below — a Refining epic
+                        // row and a New milestone header are both len 2.
+                        SidebarAction::RowToggleExpand { section, ref path }
+                            if self
+                                .pipeline_epic_row_keys
+                                .contains_key(&(section, path.clone())) =>
+                        {
+                            if let Some(key) =
+                                self.pipeline_epic_row_keys.get(&(section, path.clone())).cloned()
+                            {
+                                // Default expanded — mirrors the render-path
+                                // default in `epic_expand_state`.
+                                let entry =
+                                    self.pipeline_epic_expanded.entry(key).or_insert(true);
+                                *entry = !*entry;
+                                self.rebuild_pipeline_sidebar(None);
+                            }
+                            true
+                        }
+                        SidebarAction::RowToggleExpand { section, ref path } if path.len() == 2 => {
+                            // #668/#1069: A two-level path = a milestone sub-header
+                            // was toggled, within either a New section or an
+                            // In-progress section — both grouped repo → milestone
+                            // (#1487).  Persist the state in
+                            // pipeline_milestone_expanded keyed by (lc_key,
+                            // repo_key, milestone_key).
+                            // Refining/Pending have no milestone tier, so a
+                            // path.len()==2 there is an issue row (not a header) —
+                            // those sections handle selection via RowSelected, not
+                            // here.  #728: Done no longer has milestone
+                            // sub-headers (flat list), so path.len()==2 in Done is
+                            // an issue row — skip it here.
+                            let search_offset = 1usize;
+                            if section >= search_offset {
+                                let state_idx = section - search_offset;
+                                if let Some(&lc_key) = self.pipeline_state_section_names.get(state_idx)
+                                {
+                                    if lc_key == "new" {
+                                        let repo_groups = self.pipeline_repos_for_state(lc_key);
+                                        let ri = path[0] as usize;
+                                        let mi = path[1] as usize;
+                                        if let Some((repo_key, repo_issue_idxs)) =
+                                            repo_groups.get(ri)
+                                        {
+                                            let repo_key = repo_key.clone();
+                                            let milestones = self
+                                                .pipeline_milestones_for_issues(repo_issue_idxs);
+                                            if let Some((mil_key, _, _)) = milestones.get(mi) {
+                                                let mil_key = mil_key.clone();
+                                                // #857: default is collapsed (New has no
+                                                // in-flight concept — those issues are
+                                                // pre-dispatch by definition), matching
+                                                // the render-path default above.
+                                                let entry = self
+                                                    .pipeline_milestone_expanded
+                                                    .entry((
+                                                        lc_key.to_string(),
+                                                        repo_key,
+                                                        mil_key,
+                                                    ))
+                                                    .or_insert(false);
+                                                *entry = !*entry;
+                                                self.rebuild_pipeline_sidebar(None);
+                                            }
+                                        }
+                                    } else if lc_key == "in-progress" {
+                                        let groups = self.pipeline_active_by_repo();
+                                        let gi = path[0] as usize;
+                                        let mi = path[1] as usize;
+                                        if let Some((group_key, issue_idxs)) = groups.get(gi) {
+                                            let group_key = group_key.clone();
+                                            let milestones =
+                                                self.pipeline_milestones_for_issues(issue_idxs);
+                                            if let Some((mil_key, _, _)) = milestones.get(mi) {
+                                                let mil_key = mil_key.clone();
+                                                // #1069: default is expanded — unlike
+                                                // New, In-progress work is already
+                                                // in flight and should be visible.
+                                                let entry = self
+                                                    .pipeline_milestone_expanded
+                                                    .entry((
+                                                        lc_key.to_string(),
+                                                        group_key,
+                                                        mil_key,
+                                                    ))
+                                                    .or_insert(true);
+                                                *entry = !*entry;
+                                                self.rebuild_pipeline_sidebar(None);
+                                            }
                                         }
                                     }
                                 }
                             }
+                            true
                         }
-                        true
-                    }
-                    // #646 focus-follows-click: row click blurs the search filter.
-                    //
-                    // #2284 (ms-65 §3): a single click on an issue row opens
-                    // it in the Pipeline scope's own PREVIEW tab — the exact
-                    // Board rule (§2e 1/2/4, `open_board_doc_tab`), just
-                    // against `PanelScope::Pipeline`. `self.pipeline_sel`
-                    // (resynced from the tree path just above, via
-                    // `selected_pipeline_index`) is already `None` for a
-                    // header row at any bucket's depth, so this only fires
-                    // for a genuine issue row — the same discriminator the
-                    // Board arm gets for free from `path.len() == 2`.
-                    SidebarEvent::RowSelected { .. } => {
-                        if self.pipeline_search.focused {
-                            self.pipeline_search.focused = false;
-                            self.pipeline_sidebar.focus_form(0, false);
-                        }
-                        if let Some(idx) = self.pipeline_sel {
-                            if let Some(issue) = self.pipeline_issues.get(idx) {
-                                let key = (issue.repo_slug.clone(), issue.number);
-                                self.open_pipeline_doc_tab(key, false);
+                        // #646 focus-follows-click: row click blurs the search filter.
+                        //
+                        // #2284 (ms-65 §3): a single click on an issue row opens
+                        // it in the Pipeline scope's own PREVIEW tab — the exact
+                        // Board rule (§2e 1/2/4, `open_board_doc_tab`), just
+                        // against `PanelScope::Pipeline`. `self.pipeline_sel`
+                        // (resynced from the tree path just above, via
+                        // `selected_pipeline_index`) is already `None` for a
+                        // header row at any bucket's depth, so this only fires
+                        // for a genuine issue row — the same discriminator the
+                        // Board arm gets for free from `path.len() == 2`.
+                        SidebarAction::RowSelected { .. } => {
+                            if self.pipeline_search.focused {
+                                self.pipeline_search.focused = false;
+                                if let Some(s) = self.pipeline_sidebar.sections.get_mut(0) {
+                                    s.form_focused = false;
+                                }
                             }
-                        }
-                        true
-                    }
-                    // #2284 (ms-65 §3): a double click (RowActivated) is
-                    // open-or-activate followed by PROMOTION — mirrors
-                    // `open_board_doc_tab`'s rule-3 call site: only pin when
-                    // the row the gesture landed on is already the active
-                    // document (a genuine double click always is, by the
-                    // time RowSelected's MouseDown has run first; see the
-                    // Board arm's own comment for the DoubleClickDetector
-                    // fold case this guards against).
-                    SidebarEvent::RowActivated { .. } => {
-                        if self.pipeline_search.focused {
-                            self.pipeline_search.focused = false;
-                            self.pipeline_sidebar.focus_form(0, false);
-                        }
-                        if let Some(idx) = self.pipeline_sel {
-                            if let Some(issue) = self.pipeline_issues.get(idx) {
-                                let key = (issue.repo_slug.clone(), issue.number);
-                                let pin = self.pipeline_doc_active_key() == Some(&key);
-                                self.open_pipeline_doc_tab(key, pin);
+                            if let Some(idx) = self.pipeline_sel {
+                                if let Some(issue) = self.pipeline_issues.get(idx) {
+                                    let key = (issue.repo_slug.clone(), issue.number);
+                                    self.open_pipeline_doc_tab(key, false);
+                                }
                             }
+                            true
                         }
-                        true
-                    }
-                    SidebarEvent::HeaderActivated { .. }
-                    | SidebarEvent::StateChanged
-                    | SidebarEvent::Consumed
-                    | SidebarEvent::ScrollChanged { .. }
-                    | SidebarEvent::FormEvent { .. }
-                    | SidebarEvent::RowToggleExpand { .. } => true,
-                    _ => false,
+                        // #2284 (ms-65 §3): a double click (RowActivated) is
+                        // open-or-activate followed by PROMOTION — mirrors
+                        // `open_board_doc_tab`'s rule-3 call site: only pin when
+                        // the row the gesture landed on is already the active
+                        // document (a genuine double click always is, by the
+                        // time RowSelected's MouseDown has run first; see the
+                        // Board arm's own comment for the DoubleClickDetector
+                        // fold case this guards against).
+                        SidebarAction::RowActivated { .. } => {
+                            if self.pipeline_search.focused {
+                                self.pipeline_search.focused = false;
+                                if let Some(s) = self.pipeline_sidebar.sections.get_mut(0) {
+                                    s.form_focused = false;
+                                }
+                            }
+                            if let Some(idx) = self.pipeline_sel {
+                                if let Some(issue) = self.pipeline_issues.get(idx) {
+                                    let key = (issue.repo_slug.clone(), issue.number);
+                                    let pin = self.pipeline_doc_active_key() == Some(&key);
+                                    self.open_pipeline_doc_tab(key, pin);
+                                }
+                            }
+                            true
+                        }
+                        _ => true,
+                    };
                 }
+                handled
             }
             SidebarView::Settings => {
                 // #237: the Settings sidebar is now an empty placeholder —
@@ -5530,9 +5572,9 @@ impl CoordApp {
             // list + DAG both live in the main panel (`mouse_main_click`).
             SidebarView::MilestoneDag => false,
             // #1121: the Plans-view tree is a raw `TreeView` (not
-            // `SidebarSystem`), so — like Terminal/Sessions above — click
+            // `Sidebar` widget), so — like Terminal/Sessions above — click
             // dispatch uses flat pixel-row math rather than a
-            // `SidebarEvent`. No title row, so row 0 maps directly to the
+            // `SidebarAction`. No title row, so row 0 maps directly to the
             // first tree row.
             SidebarView::Plans => {
                 match crate::app::tree_nav::row_at_y(pos.y, sidebar_b.y, lh, self.plans_tree_scroll)
@@ -5542,8 +5584,8 @@ impl CoordApp {
                 }
             }
             // #1032: the Sessions-view tree is a raw `TreeView` (not
-            // `SidebarSystem`), so — like Terminal above — click dispatch
-            // uses flat pixel-row math rather than a `SidebarEvent`. No
+            // `Sidebar` widget), so — like Terminal above — click dispatch
+            // uses flat pixel-row math rather than a `SidebarAction`. No
             // title row, so row 0 maps directly to the first tree row.
             SidebarView::Sessions => {
                 match crate::app::tree_nav::row_at_y(
@@ -5627,15 +5669,15 @@ impl CoordApp {
     /// Handle a left-click in the main panel.
     ///
     /// Routes the click to the right handler depending on the active view:
-    /// - **Settings** — delegates to the `FormController` (field clicks, toggle, segmented control).
+    /// - **Settings** — delegates to the settings `ScrolledForm` (field clicks, toggle, segmented control).
     /// - **Board** — handles the Board/Issue tab bar.
     /// - **Pipeline** — handles the tab bar and the `PipelineView` primitive
     ///   hit-test (dispatches the Go action when a stage button is clicked).
     /// - **Machines** — no-op (no interactive elements in the main panel).
     ///
     /// Takes `backend` (read-only) so the Pipeline stage hit-test can go
-    /// through `Backend::pipeline_view_layout` — the same paint-free
-    /// measurer `draw_pipeline_view` derives its own layout from (#1377) —
+    /// through the `PipelineView` contract's `layout_primitive` — the same
+    /// layout its paint uses (#1377) —
     /// rather than a hand-rolled re-derivation that can silently drift from
     /// the painted geometry.
     pub(crate) fn mouse_main_click(
@@ -5660,28 +5702,34 @@ impl CoordApp {
         // #646 focus-follows-click: click in main area blurs any active filter.
         if self.board_search.focused {
             self.board_search.focused = false;
-            self.board_sidebar.focus_form(0, false);
+            if let Some(s) = self.board_sidebar.sections.get_mut(0) {
+                s.form_focused = false;
+            }
         }
         if self.pipeline_search.focused {
             self.pipeline_search.focused = false;
-            self.pipeline_sidebar.focus_form(0, false);
+            if let Some(s) = self.pipeline_sidebar.sections.get_mut(0) {
+                s.form_focused = false;
+            }
         }
 
         if self.active_view == SidebarView::Settings {
-            // Route click to FormController. FormController::handle_cached
-            // uses metrics cached by render_and_cache().
+            // Route the click through the settings form's own handling,
+            // laid out exactly as `render_main` paints it.
             let click_event = UiEvent::MouseDown {
                 widget: None,
                 button: MouseButton::Left,
                 position: pos,
                 modifiers: Modifiers::default(),
             };
-            let result = self
-                .settings_form
-                .borrow_mut()
-                .handle_cached_event(&click_event, main_b);
+            let result = ScrolledForm::new(self.build_settings_form()).handle_event(
+                self.settings_form_state.get_mut(),
+                &click_event,
+                backend,
+                main_b,
+            );
             match result {
-                Handled::Event(FormControllerAction::FormAction(ref form_event)) => {
+                Handled::Event(ref form_event) => {
                     // Sync keyboard focus indicator to the clicked field so
                     // keyboard navigation picks up from where the mouse clicked.
                     let clicked_id = match form_event {
@@ -5700,7 +5748,7 @@ impl CoordApp {
                     }
                     return changed;
                 }
-                Handled::Event(FormControllerAction::ScrollChanged) | Handled::Consumed => return true,
+                Handled::Consumed => return true,
                 Handled::Ignored => return false,
             }
         }
@@ -5992,15 +6040,13 @@ impl CoordApp {
                     let pv_rect = pipeline_detail_pv_rect(pv_origin, lh);
                     // Match the render path: stripped view → action_height=0,
                     // so action_bounds is always None and only Body hits fire.
-                    // #1377: go through `Backend::pipeline_view_layout` —
-                    // the same paint-free measurer `draw_pipeline_view`
-                    // derives its layout from — instead of a hand-rolled
-                    // re-derivation, so paint and hit-test can never drift
+                    // #1377: go through the `PipelineView` contract's
+                    // `layout_primitive` — the same layout its paint uses —
+                    // instead of a hand-rolled re-derivation, so paint and hit-test can never drift
                     // (e.g. the focus-caret row quadraui's rasteriser
                     // reserves above the boxes).
                     let render_view = pipeline_view_for_render(&view);
-                    // TODO(quadraui widget contract): legacy `Backend::pipeline_view_layout` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
-                    let layout = backend.pipeline_view_layout(pv_rect, &render_view);
+                    let layout = backend.layout_primitive(pv_rect, &render_view).layout;
                     match layout.hit_test(pos.x, pos.y) {
                         PipelineHit::Action(stage_idx) => {
                             // Defensive: with action-stripped view this branch
@@ -6043,8 +6089,7 @@ impl CoordApp {
                     );
                     let strip_rect = pipeline_detail_pv_rect_strip(content_rect, lh);
                     let render_view = pipeline_view_for_render(&view);
-                    // TODO(quadraui widget contract): legacy `Backend::pipeline_view_layout` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
-                    let layout = backend.pipeline_view_layout(strip_rect, &render_view);
+                    let layout = backend.layout_primitive(strip_rect, &render_view).layout;
                     if let PipelineHit::Body(stage_idx) = layout.hit_test(pos.x, pos.y) {
                         self.pipeline_focused_stage = Some(stage_idx);
                         self.pipeline_stage_content_scroll = 0;
@@ -6160,6 +6205,7 @@ impl CoordApp {
                 // treat it (and the other non-actionable hits) as a no-op.
                 Some(DataTableHit::Header { .. })
                 | Some(DataTableHit::Footer)
+                | Some(DataTableHit::Scrollbar)
                 | Some(DataTableHit::Empty)
                 | None => false,
             };
@@ -6218,7 +6264,10 @@ impl CoordApp {
                     self.queue_resize_col = Some(col);
                     true
                 }
-                Some(DataTableHit::Footer) | Some(DataTableHit::Empty) | None => false,
+                Some(DataTableHit::Footer)
+                | Some(DataTableHit::Scrollbar)
+                | Some(DataTableHit::Empty)
+                | None => false,
             };
         }
         // #1911: Reports main panel is now just the result `DataTable` (+
@@ -6258,6 +6307,7 @@ impl CoordApp {
                 // no-op.
                 Some(DataTableHit::Row { .. })
                 | Some(DataTableHit::Footer)
+                | Some(DataTableHit::Scrollbar)
                 | Some(DataTableHit::Empty)
                 | None => false,
             };
@@ -6549,8 +6599,8 @@ impl CoordApp {
     ) -> bool {
         match self.active_view {
             SidebarView::Board => {
-                // Delegate to the SidebarSystem's built-in scroll handler.
-                self.board_sidebar.handle(event, backend, sidebar_b);
+                // Delegate to the sidebar's own wheel handling.
+                let _ = self.drive_board_sidebar(event, backend, sidebar_b);
                 true
             }
             SidebarView::Machines => {
@@ -6567,7 +6617,7 @@ impl CoordApp {
                 true
             }
             SidebarView::Pipeline => {
-                self.pipeline_sidebar.handle(event, backend, sidebar_b);
+                let _ = self.drive_pipeline_sidebar(event, backend, sidebar_b);
                 true
             }
             SidebarView::Settings => {
@@ -6602,7 +6652,7 @@ impl CoordApp {
             // the wheel — matching every catalogue in production today (3
             // reports, each ≤ 5 rows expanded) comfortably fits a sidebar
             // without scrolling. A catalogue that stops fitting needs this
-            // wired for real (`SidebarSystem`'s `scroll_panel` is the
+            // wired for real (the `Sidebar` widget's panel scroll is the
             // pattern to follow); tracked as a known gap rather than solved
             // speculatively here.
             SidebarView::Reports => false,
@@ -6836,19 +6886,10 @@ impl CoordApp {
                 let _ = visible;
                 true
             }
-            SidebarView::Settings => {
-                // Forward scroll to FormController (scrolls through form fields).
-                let scroll_event = UiEvent::Scroll {
-                    widget: None,
-                    position: Point::new(0.0, 0.0),
-                    delta,
-                };
-                let _ = self
-                    .settings_form
-                    .borrow_mut()
-                    .handle_cached_event(&scroll_event, main_b);
-                true
-            }
+            // The settings form takes the wheel through its own
+            // `ScrolledForm` handling in `handle_mouse`, which has the
+            // backend it is laid out by.
+            SidebarView::Settings => false,
             // #454: Terminal pane — forward scroll wheel to the PTY when
             // the child has mouse reporting enabled or is on the alt screen
             // (e.g. tmux, vim, less).  Fall back to local scrollback when
@@ -7025,7 +7066,7 @@ impl CoordApp {
         let restore = self.render_pane.replace(Some(pane));
         // Use the addressed pane's active sub-tab's actual list so the scroll
         // max matches what's rendered. Board tab → detail_list; Issue tab →
-        // body. Chat tab scroll is handled by ChatController itself, and the
+        // body. Chat tab scroll is handled by the `Chat` widget itself, and the
         // Terminal tab's by the PTY session (#675).
         let items = match self.board_pane_detail_tab() {
             BoardDetailTab::Board => self.detail_list().items.len(),

@@ -547,6 +547,9 @@ impl CoordApp {
                 items,
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: false,
                 h_scroll: 0,
@@ -633,6 +636,9 @@ impl CoordApp {
                 items,
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: false,
                 h_scroll: 0,
@@ -1197,7 +1203,7 @@ impl CoordApp {
         // #101: 9 chars fits the longest realistic `format_age` output
         // ("999d ago", 8) plus one to breathe — see `queue_reason_age_cell`'s
         // doc comment for why this is its own column instead of a suffix.
-        ("Age", native_column_width(9.0), ColumnAlign::Left),
+        ("Age", ColumnWidth::Native(9.0), ColumnAlign::Left),
     ];
 
     /// #2043: the Queue grid never squeezes its columns below this many
@@ -1595,6 +1601,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -1666,6 +1675,9 @@ impl CoordApp {
             }],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: false,
             h_scroll: 0,
@@ -1761,6 +1773,12 @@ impl CoordApp {
             rows: Self::queue_data_rows(&rows),
             selected_idx: Some(self.queue_sel.min(rows.len() - 1)),
             scroll_offset: self.queue_scroll,
+            selection_mode: SelectionMode::Single,
+            selected_indices: Vec::new(),
+            items_window: None,
+            scroll_px: None,
+            striped: false,
+            glyphs: None,
             // The ▲/▼ header indicator is drawn by the primitive itself —
             // the app only says which column and which way.
             sort: self.queue_sort,
@@ -1811,17 +1829,13 @@ impl CoordApp {
         // is what lets the clamp land BEFORE this frame paints, not after —
         // clamping post-paint would still ship one fully mis-rendered frame
         // per resize, exactly the bug this fixes.
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::data_table_layout` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-        #[allow(deprecated)]
-        let probe = backend.data_table_layout(list_rect, &table);
+        let probe = data_table_layout(backend, list_rect, &table);
         let visible_w = (probe.viewport_width - probe.scrollbar_width).max(1.0);
         let clamped_h_scroll =
             Self::queue_clamp_h_scroll(self.queue_h_scroll.get(), probe.content_width, visible_w);
         self.queue_h_scroll.set(clamped_h_scroll);
         table.h_scroll = clamped_h_scroll;
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-        #[allow(deprecated)]
-        let layout = backend.draw_data_table(list_rect, &table, None);
+        let layout = draw_data_table(backend, list_rect, &table);
         // Cached WITH the rect it was painted into — the Reports pattern,
         // not Audit's. This table does not necessarily start at the main
         // panel's origin, so a bare `pos - main_b` would mis-hit-test.
@@ -1856,15 +1870,14 @@ impl CoordApp {
         self.last_queue_detail_item_count
             .set(detail_list.items.len());
         // #2017: the detail pane's scrollbar geometry, from the SAME
-        // `ListView` and rect the paint below uses — `Backend::
-        // list_vscrollbar` is the single source of truth the rasteriser
+        // `ListView` and rect the paint below uses — the list's own
+        // `layout_primitive` is the single source of truth the painter
         // consumes too, so a click can never hit-test against geometry the
         // paint disagrees with. `None` when the body fits (no track), which
         // `queue_detail_scrollbar_hit` / `queue_apply_detail_vscroll` both
         // already treat as "nothing to do".
         *self.queue_detail_scrollbar.borrow_mut() =
-            // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::list_vscrollbar` — `ListViewPrimitiveLayout` carries no vscrollbar (unlike `TreeViewPrimitiveLayout`), so there is no contract source for this track yet.
-            backend.list_vscrollbar(detail_rect, &detail_list);
+            backend.layout_primitive(detail_rect, &detail_list).vscrollbar;
         draw_list_view(backend, detail_rect, &detail_list);
     }
 

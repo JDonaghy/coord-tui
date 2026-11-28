@@ -33,12 +33,8 @@ pub use super::data::{set_test_board_service, TestBoardServiceGuard};
 /// daemon, no I/O. This is the seam every other fixture in this module (and
 /// every in-crate `#[cfg(test)]` test) builds on.
 pub fn make_test_app(data: BoardData) -> CoordApp {
-    let mut sidebar = SidebarSystem::new(Vec::new());
-    sidebar.set_navigation_mode(NavigationMode::Selection);
-    sidebar.set_allow_collapse(true);
-    let mut pipeline_sidebar = SidebarSystem::new(Vec::new());
-    pipeline_sidebar.set_navigation_mode(NavigationMode::Selection);
-    pipeline_sidebar.set_allow_collapse(true);
+    let sidebar = selection_sidebar(BOARD_SIDEBAR_ID, &[]);
+    let pipeline_sidebar = selection_sidebar(PIPELINE_SIDEBAR_ID, &[]);
     let (inject_fallback_tx, inject_fallback_rx) = std::sync::mpsc::channel();
     // #1326: derive straight from the fixture's `data` — never touch the
     // real `~/.coord/workspace.json` from a test fixture (mirrors
@@ -65,6 +61,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         workspace,
         active_view: SidebarView::default(),
         board_sidebar: sidebar,
+        board_sidebar_state: Default::default(),
         board_repo_names: Vec::new(),
         board_issues_cache: Vec::new(),
         has_proposals_section: false,
@@ -90,10 +87,10 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         board_split_layout: std::cell::RefCell::new(None),
         board_pane_chord: None,
         board_section_rows: Vec::new(),
-        board_branch_indents: std::collections::HashMap::new(),
         board_tree_hidden_above: std::collections::HashMap::new(),
         last_sidebar_geom: std::cell::Cell::new(None),
         pipeline_sidebar,
+        pipeline_sidebar_state: Default::default(),
         pipeline_repo_names: Vec::new(),
         pipeline_state_section_names: Vec::new(),
         pipeline_search: SidebarFilter::default(),
@@ -102,7 +99,6 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         pipeline_epic_expanded: std::collections::HashMap::new(),
         pipeline_epic_row_keys: std::collections::HashMap::new(),
         pipeline_section_rows: Vec::new(),
-        pipeline_branch_indents: std::collections::HashMap::new(),
         last_pipeline_sidebar_geom: std::cell::Cell::new(None),
         pipeline_issues: Vec::new(),
         pipeline_sel: None,
@@ -231,7 +227,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
         // unaffected by this default.
         settings: TuiSettings { nerd_font_icons: false, ..TuiSettings::default() },
         parsed_keybindings: parse_keybindings(&TuiSettings::default()),
-        settings_form: std::cell::RefCell::new(FormController::new("settings".to_string())),
+        settings_form_state: Default::default(),
         settings_field_sel: 0,
         audio_prev_running: std::collections::HashSet::new(),
         test_build_jobs: std::collections::HashMap::new(),
@@ -389,7 +385,7 @@ pub fn make_test_app(data: BoardData) -> CoordApp {
             registry.register("panel:board", CoordApp::board_view_help());
             registry
         },
-        help_overlay: HelpOverlayController::new(),
+        help_overlay: HelpOverlay::new(WidgetId::new("help-cheatsheet")),
         command_palette: None,
         // #975
         plans_sel: 0,

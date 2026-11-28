@@ -9,8 +9,8 @@
 //!
 //! This is the app's first sidebar built from a raw quadraui `TreeView`
 //! painted directly (`render.rs::draw_sidebar_tree`), rather than through the
-//! `SidebarSystem` compose widget used by the Board/Pipeline panels.
-//! `SidebarSystem` owns its own hit-testing (chevron-vs-row split regions,
+//! `Sidebar` compose widget used by the Board/Pipeline panels.
+//! `Sidebar` owns its own hit-testing (chevron-vs-row split regions,
 //! multi-section search forms, etc.) which is overkill for one flat
 //! machine→terminal tree — so click dispatch here uses the same simple
 //! flat pixel-row math the Machines panel already uses (`mouse_sidebar_click`
@@ -164,6 +164,8 @@ impl CoordApp {
             selection_mode: SelectionMode::Single,
             selected_path: self.terminal_tree_selected.clone(),
             scroll_offset: self.terminal_tree_scroll,
+            items_window: None,
+            scroll_px: None,
             style: TreeStyle::default(),
             // The tree only reads as "focused" (selection highlight) when
             // the PTY pane itself isn't soaking up keyboard focus (#424).
@@ -266,8 +268,9 @@ impl CoordApp {
     /// called after every click/j/k navigation.
     ///
     /// #12/A3: this used to be a character-for-character copy of quadraui's
-    /// `TreeController::scroll_to_visible`; the clamp now goes through
-    /// `tree_nav::scroll_to_visible`, which delegates to that very method.
+    /// scroll-to-visible clamp; the clamp now goes through
+    /// `tree_nav::scroll_to_visible`, which delegates to quadraui's own
+    /// `behaviour::scroll::ensure_visible`.
     /// What stays here is the Terminal-specific part — resolving the selected
     /// `TreePath` to a flat row index.
     pub(crate) fn fix_terminal_tree_scroll(&mut self, visible: usize) {

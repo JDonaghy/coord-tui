@@ -269,7 +269,7 @@ pub(crate) fn extract_assistant_text_after(ctx: &WatchContext, floor: usize) -> 
 
 /// `wrap_width` is the live chat-overlay transcript width in backend units
 /// (character columns for TUI, pixels for GTK), used only to pick the wrap
-/// point for the markdown adapter below — `quadraui::ChatController` itself
+/// point for the markdown adapter below — `quadraui::Chat` itself
 /// re-wraps every row to its exact paint-time rect regardless, so this only
 /// needs to be in the right ballpark (see `CoordApp::last_chat_panel_cols`'s
 /// doc comment). `wrap_width == 0` falls back to the unwrapped adapter path.
@@ -318,7 +318,7 @@ pub(crate) fn chat_transcript_from_pool(ctx: &WatchContext, wrap_width: usize) -
         // so headings, bold, italic, inline code, lists, blockquotes, and
         // fenced code blocks are styled.
         // #57: use the *_wrapped variant — the plain (unwrapped) adapter left
-        // long lines to run past the overlay edge before ChatController's own
+        // long lines to run past the overlay edge before the `Chat` widget's own
         // generic re-wrap ever saw them (and that re-wrap doesn't know about
         // fenced code blocks, so wrapping here first — where the adapter can
         // still see the block boundaries — keeps fenced content intact).

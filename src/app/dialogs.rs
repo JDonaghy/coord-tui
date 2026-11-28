@@ -580,6 +580,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: true,
             h_scroll: 0,
@@ -1726,7 +1729,8 @@ impl CoordApp {
         Some(true)
     }
 
-    /// Move the keyboard selection within the currently-deepest open menu level,
+    /// Move the keyboard selection one step within the currently-deepest open
+    /// menu level — down for a positive `delta`, up for a negative one —
     /// skipping separators and disabled items.  No-op when no menu is open.
     pub(crate) fn context_menu_move_selection(&mut self, delta: i32) {
         let Some(ref state) = self.pending_context_menu else {
@@ -1740,7 +1744,7 @@ impl CoordApp {
         };
 
         let level_items = items_at_depth(state, depth);
-        // Build a transient quadraui menu to reuse its move_selection logic
+        // Build a transient quadraui menu to reuse its navigation logic
         // (skips separators + disabled items, wraps around).
         let qui_items: Vec<QuiContextMenuItem> = level_items.iter().map(coord_item_to_qui).collect();
         let temp = ContextMenu {
@@ -1751,7 +1755,12 @@ impl CoordApp {
             bg: None,
             placement: ContextMenuPlacement::AnchorPoint,
         };
-        let new_sel = temp.move_selection(current_sel, delta);
+        let key = if delta < 0 {
+            quadraui::behaviour::nav::NavKey::Up
+        } else {
+            quadraui::behaviour::nav::NavKey::Down
+        };
+        let new_sel = temp.navigate(current_sel, key, 1).unwrap_or(current_sel);
 
         if let Some(ref mut s) = self.pending_context_menu {
             if depth == 0 {
@@ -4900,6 +4909,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -5062,12 +5074,14 @@ impl CoordApp {
         }
         self.watch_focused = Some(aid.clone());
         // Open the inject_chat overlay so the user can type immediately.
-        let mut chat = ChatController::new("refinement-chat");
-        chat.set_status(StyledText::plain(format!(
-            "  Refinement chat → {} #{}  (Ctrl+S/Alt+Enter = send · Ctrl+N = post notes · Esc = finish)",
-            pending.repo, pending.issue_number
-        )));
-        chat.set_transcript(Vec::new());
+        let chat = InjectChat::new(
+            "refinement-chat",
+            StyledText::plain(format!(
+                "  Refinement chat → {} #{}  (Ctrl+S/Alt+Enter = send · Ctrl+N = post notes · Esc = finish)",
+                pending.repo, pending.issue_number
+            )),
+            Vec::new(),
+        );
         self.inject_chat = Some(chat);
         // #264/#818: route the user to the Pipeline view.  The Refinement
         // tab was removed in #818, so we land on Overview instead.  The
@@ -5253,9 +5267,11 @@ impl CoordApp {
             )
         };
 
-        let mut chat = ChatController::new("board-chat");
-        chat.set_status(StyledText::plain(status_hint));
-        chat.set_transcript(Vec::new());
+        let chat = InjectChat::new(
+            "board-chat",
+            StyledText::plain(status_hint),
+            Vec::new(),
+        );
         self.inject_chat = Some(chat);
 
         // Route to Board Chat tab immediately.
@@ -5381,12 +5397,14 @@ impl CoordApp {
         }
         self.watch_focused = Some(aid.clone());
 
-        let mut chat = ChatController::new("milestone-chat");
-        chat.set_status(StyledText::plain(format!(
-            "  Milestone chat → {}  (Ctrl+S/Alt+Enter = send · Esc = close)",
-            pending.label
-        )));
-        chat.set_transcript(Vec::new());
+        let chat = InjectChat::new(
+            "milestone-chat",
+            StyledText::plain(format!(
+                "  Milestone chat → {}  (Ctrl+S/Alt+Enter = send · Esc = close)",
+                pending.label
+            )),
+            Vec::new(),
+        );
         self.inject_chat = Some(chat);
 
         // Route to the Board Chat tab — milestone chats are plan/board-level
@@ -5596,7 +5614,7 @@ impl CoordApp {
     /// (`coord/decomposition_chat.py`'s dispatcher sets it). On hit, adds it
     /// to `watch_pool`, focuses it, and — mirroring
     /// `maybe_bind_pending_milestone_chat` — routes to the Board panel's
-    /// Chat sub-tab with an empty-transcript `ChatController` overlay. No
+    /// Chat sub-tab with an empty-transcript `Chat` overlay. No
     /// second toast: contract §4d's "chat ready" toast already fired at
     /// dispatch time above. Returns true when the overlay was opened.
     pub(crate) fn maybe_bind_pending_decomposition_chat(&mut self) -> bool {
@@ -5693,12 +5711,14 @@ impl CoordApp {
         }
         self.watch_focused = Some(aid.clone());
 
-        let mut chat = ChatController::new("decomposition-chat");
-        chat.set_status(StyledText::plain(format!(
-            "  Decomposition chat → {}  (Ctrl+S/Alt+Enter = send · Esc = close)",
-            pending.submission_id
-        )));
-        chat.set_transcript(Vec::new());
+        let chat = InjectChat::new(
+            "decomposition-chat",
+            StyledText::plain(format!(
+                "  Decomposition chat → {}  (Ctrl+S/Alt+Enter = send · Esc = close)",
+                pending.submission_id
+            )),
+            Vec::new(),
+        );
         self.inject_chat = Some(chat);
 
         // Route to the Board Chat tab — same redirect every sibling chat
@@ -5858,12 +5878,14 @@ impl CoordApp {
         }
         self.watch_focused = Some(aid.clone());
         // Open the inject_chat overlay.
-        let mut chat = ChatController::new("test-chat");
-        chat.set_status(StyledText::plain(format!(
-            "  Test chat → {} #{}  (Ctrl+S/Alt+Enter = send · Esc = close)",
-            pending.repo, pending.issue_number
-        )));
-        chat.set_transcript(Vec::new());
+        let chat = InjectChat::new(
+            "test-chat",
+            StyledText::plain(format!(
+                "  Test chat → {} #{}  (Ctrl+S/Alt+Enter = send · Esc = close)",
+                pending.repo, pending.issue_number
+            )),
+            Vec::new(),
+        );
         self.inject_chat = Some(chat);
         // #818: Refinement tab removed; land on Overview instead.
         // #1029 bug A: keep the ActivityBar/header chrome in sync too.
@@ -6064,6 +6086,9 @@ impl CoordApp {
                 items: Vec::new(),
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: true,
                 bordered: true,
                 h_scroll: 0,
@@ -6117,6 +6142,9 @@ impl CoordApp {
                 items,
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: true,
                 bordered: false,
                 h_scroll: 0,
@@ -6218,9 +6246,7 @@ impl CoordApp {
     /// after open.
     pub(crate) fn open_issue_finder(&mut self) {
         let items = self.issue_finder_items("");
-        self.issue_finder = Some(
-            DualModePaletteController::new("Find issue", None, items).with_id("issue-finder"),
-        );
+        self.issue_finder = Some(PaletteModal::new("issue-finder", "Find issue", items));
     }
 
     /// Called when the user presses Enter in the issue finder.
@@ -6383,7 +6409,7 @@ impl CoordApp {
     /// hand-tracked scroll window, and a copy-pasted `match_fg` colour
     /// literal (`Color::rgb(255, 200, 80)`) that had silently drifted from
     /// `quadraui::theme::Theme::match_fg` into a second, unlinked source of
-    /// truth. `DualModePaletteController` (already driving `command_palette`
+    /// truth. quadraui's `DualModePalette` (already driving `command_palette`
     /// and `doc_tab_picker`) owns all of that now — cursor, scroll,
     /// selection highlight, and, via `PaletteItem::match_positions`
     /// (populated in `issue_finder_items`), the per-character fuzzy-match
@@ -6393,7 +6419,7 @@ impl CoordApp {
             return;
         };
         let popup = Self::issue_finder_popup_rect(viewport);
-        finder.render(popup, backend);
+        finder.draw(popup, backend);
     }
 
     // ── Live-session display helpers ────────────────────────────────────────
@@ -6450,6 +6476,9 @@ impl CoordApp {
                     items: Vec::new(),
                     selected_idx: 0,
                     scroll_offset: 0,
+                    items_window: None,
+                    scroll_px: None,
+                    striped: false,
                     has_focus: false,
                     bordered: true,
                     h_scroll: 0,
@@ -6458,7 +6487,7 @@ impl CoordApp {
                 },
             );
             if let Some(ref chat) = self.inject_chat {
-                chat.render(backend, content_rect);
+                chat.draw(backend, content_rect);
             }
         } else {
             // Empty state: CTA buttons + explanatory text.
@@ -6551,6 +6580,9 @@ impl CoordApp {
                     items,
                     selected_idx: 0,
                     scroll_offset: 0,
+                    items_window: None,
+                    scroll_px: None,
+                    striped: false,
                     has_focus: false,
                     bordered: false,
                     h_scroll: 0,
@@ -6646,7 +6678,7 @@ impl CoordApp {
                 // (mod.rs / render.rs changed signature — this call site is
                 // outside coord-tui#57's file scope but needed updating to
                 // keep the crate compiling). `last_chat_panel_cols` is the
-                // ballpark-only overlay width Cell; ChatController re-wraps
+                // ballpark-only overlay width Cell; the `Chat` widget re-wraps
                 // every row to its exact rect at paint time regardless.
                 chat_transcript_from_pool(old_ctx, self.last_chat_panel_cols.get().max(40))
                     .into_iter()
@@ -7285,7 +7317,7 @@ impl CoordApp {
                 "#{}: tagging status:refining…",
             ),
             // #264: Refine with chat — dispatch a refinement-chat worker
-            // and open a ChatController bound to it.
+            // and open a `Chat` widget bound to it.
             "refine-chat" => self.dispatch_refine_chat(target),
             // #pause: toggle routing-pause for a machine.
             "machine-pause" | "machine-resume" => {

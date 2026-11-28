@@ -8,6 +8,47 @@ use super::*;
 // ─── Selected-item action bar (#270) ─────────────────────────────────────────
 
 impl CoordApp {
+    /// [`drive_sidebar`] for the Board sidebar.
+    pub(crate) fn drive_board_sidebar(
+        &mut self,
+        event: &UiEvent,
+        backend: &dyn Backend,
+        rect: Rect,
+    ) -> Handled<Vec<SidebarAction>> {
+        drive_sidebar(
+            &mut self.board_sidebar,
+            self.board_sidebar_state.get_mut(),
+            event,
+            backend,
+            rect,
+        )
+    }
+
+    /// Whether the Pipeline sidebar row at `path` in `section` is a branch
+    /// (it has an expand chevron).
+    pub(crate) fn pipeline_row_is_branch(&self, section: usize, path: &TreePath) -> bool {
+        self.pipeline_sidebar
+            .tree(section)
+            .and_then(|t| t.rows.iter().find(|r| &r.path == path))
+            .is_some_and(|r| r.is_expanded.is_some())
+    }
+
+    /// [`drive_sidebar`] for the Pipeline sidebar.
+    pub(crate) fn drive_pipeline_sidebar(
+        &mut self,
+        event: &UiEvent,
+        backend: &dyn Backend,
+        rect: Rect,
+    ) -> Handled<Vec<SidebarAction>> {
+        drive_sidebar(
+            &mut self.pipeline_sidebar,
+            self.pipeline_sidebar_state.get_mut(),
+            event,
+            backend,
+            rect,
+        )
+    }
+
     /// #272: build the `SidebarPanel` for the Board / Pipeline sidebar.
     ///
     /// Always emits a header toolbar — even when no row-specific verbs
@@ -254,7 +295,7 @@ impl CoordApp {
             || self.pending_kill_session.is_some()
             // #1124: Plans `?` help overlay / `/` command palette — both
             // own ALL input while open (see `events.rs`'s dispatch block).
-            || self.help_overlay.is_open()
+            || self.help_overlay.open
             || self.command_palette.is_some()
             // #1631: the fleet-health detail overlay owns ALL input while open.
             || self.fleet_health_overlay_open
@@ -750,178 +791,121 @@ pub(crate) fn icon_for_action(action_id: &str) -> Option<Icon> {
     Some(Icon::new(glyph, fallback))
 }
 
-/// Re-resolve a `SidebarSystem` chevron click on a cell backend to the
-/// chevron hit region coord-tui's sidebars have always had.
-///
-/// TODO(quadraui SidebarSystem / list-tree-table group #2609): on a cell
-/// backend `SidebarSystem::handle` sizes a branch row's chevron hit region
-/// with the pixel `layout_metrics::tree_layout` at
-/// `Style::default().row_padding_x` (8), where it used to use 2. With
-/// `line_height` 1 that widens the region from `[0, 6.65 + indent)` to
-/// `[0, 12.65 + indent)` cells, so a click well into a branch row's title
-/// toggles it instead of selecting it. On a cell grid
-/// (`Backend::cell_grid`) this turns a `RowToggleExpand` whose click lands
-/// past the original region back into the `RowSelected` the same click
-/// produced before. `SidebarSystem` has already selected the row for both
-/// outcomes, so only the event changes. Pixel backends and every other event
-/// pass through untouched. Remove once `SidebarSystem` sizes chevrons from
-/// the cell tree geometry.
-///
-/// The region comes from quadraui's own `layout_metrics::tree_layout`
-/// (at the original 2-cell padding), so it follows any change to quadraui's
-/// chevron formula. It is measured from `rect.x`, while `SidebarSystem`
-/// measures from the section body's x; on a cell grid a vertical
-/// `MultiSectionView` gives every section body the sidebar's own x, which
-/// `sidebar_tests::cell_msv_section_bodies_start_at_the_sidebar_x` pins.
-pub(crate) fn tui_chevron_click_guard(
-    result: SidebarEvent,
-    event: &UiEvent,
-    rect: Rect,
-    backend: &dyn Backend,
-    branch_indents: &std::collections::HashMap<(usize, TreePath), u16>,
-) -> SidebarEvent {
-    if !backend.cell_grid() {
-        return result;
-    }
-    let UiEvent::MouseDown {
-        button: quadraui::MouseButton::Left,
-        position,
-        ..
-    } = event
-    else {
-        return result;
-    };
-    let SidebarEvent::RowToggleExpand { section, ref path } = result else {
-        return result;
-    };
-    let Some(&indent) = branch_indents.get(&(section, path.clone())) else {
-        return result;
-    };
-    let Some(chevron_end_x) = original_chevron_end_x(indent, backend.line_height()) else {
-        return result;
-    };
-    if position.x - rect.x < chevron_end_x {
-        result
-    } else {
-        SidebarEvent::RowSelected {
-            section,
-            path: path.clone(),
+/// Widget id of the Board view's sidebar.
+pub(crate) const BOARD_SIDEBAR_ID: &str = "board-sidebar";
+/// Widget id of the Pipeline view's sidebar.
+pub(crate) const PIPELINE_SIDEBAR_ID: &str = "pipeline-sidebar";
+
+/// A Board/Pipeline-style sidebar with one section per `defs` entry: keys
+/// move the selection (`NavigationMode::Selection`, with `j`/`k` aliasing
+/// Down/Up in every tree section), and a header click collapses its section.
+pub(crate) fn selection_sidebar(id: &str, defs: &[SidebarSectionDef]) -> Sidebar {
+    let mut sidebar = Sidebar::from_defs(id, defs);
+    sidebar.navigation_mode = NavigationMode::Selection;
+    sidebar.allow_collapse = true;
+    for section in &mut sidebar.sections {
+        if let Some(tree) = section.tree_mut() {
+            tree.style.vim_keys = true;
         }
     }
+    sidebar
 }
 
-/// Row padding `SidebarSystem` sized cell-backend chevron hit regions with
-/// before it moved to `Style::default().row_padding_x`.
-const ORIGINAL_SIDEBAR_ROW_PADDING_X: f32 = 2.0;
+/// Drive `sidebar` with one raw event, laid out at `rect` the way `backend`
+/// paints it, and store every change it reports onto the sidebar
+/// (`Sidebar::apply`). The reports come back for the app's own reactions —
+/// opening a document tab, toggling a milestone — in the order the event
+/// produced them.
+pub(crate) fn drive_sidebar(
+    sidebar: &mut Sidebar,
+    state: &mut SidebarState,
+    event: &UiEvent,
+    backend: &dyn Backend,
+    rect: Rect,
+) -> Handled<Vec<SidebarAction>> {
+    let handled = sidebar.handle_event(state, event, backend, rect);
+    if let Handled::Event(actions) = &handled {
+        for action in actions {
+            sidebar.apply(action);
+        }
+    }
+    handled
+}
 
-/// The right edge (relative to the tree's x) of the chevron hit region a
-/// collapsed branch row at `indent` had, from quadraui's own tree layout at
-/// [`ORIGINAL_SIDEBAR_ROW_PADDING_X`].
-fn original_chevron_end_x(indent: u16, line_height: f32) -> Option<f32> {
-    let tree = TreeView {
-        id: WidgetId::new("chevron-probe"),
-        rows: vec![TreeRow {
-            path: vec![0],
-            indent,
-            icon: None,
-            text: StyledText::plain("x"),
-            badge: None,
-            is_expanded: Some(false),
-            decoration: Decoration::Normal,
-            edit: None,
-        }],
-        selection_mode: SelectionMode::Single,
-        selected_path: None,
-        scroll_offset: 0,
-        style: Default::default(),
-        has_focus: false,
-    };
-    let area = Rect::new(0.0, 0.0, 10_000.0, line_height * 4.0);
-    let layout = quadraui::primitives::layout_metrics::tree_layout(
-        &tree,
-        area,
-        line_height as f64,
-        ORIGINAL_SIDEBAR_ROW_PADDING_X,
-    );
-    layout.hit_regions.iter().find_map(|(r, hit)| {
-        matches!(hit, quadraui::TreeViewHit::Chevron(0)).then_some(r.x + r.width)
-    })
+/// Paint `sidebar` at `rect` with its interaction state lent to the widget,
+/// with no row hovered or pressed, and return the layout the paint used.
+pub(crate) fn draw_sidebar(
+    backend: &mut dyn Backend,
+    rect: Rect,
+    sidebar: &Sidebar,
+    state: &std::cell::RefCell<SidebarState>,
+) -> SidebarLayout {
+    let (lent, layout) = quadraui::lend_widget_state(sidebar.id, state.take(), || {
+        draw_unhovered(backend, rect, sidebar)
+    });
+    state.replace(lent);
+    layout
+}
+
+/// The height of one section header in `layout`, in the backend's own unit.
+pub(crate) fn sidebar_header_size(layout: &SidebarLayout) -> f32 {
+    layout
+        .msv
+        .chrome
+        .sections
+        .first()
+        .map_or(0.0, |s| s.header_bounds.height)
 }
 
 #[cfg(test)]
 mod sidebar_tests {
     use super::*;
-    use quadraui::{
-        MsvAxis, MultiSectionView, ScrollMode, Section, SectionBody, SectionHeader, SectionSize,
-    };
 
-    fn tree_section(id: &str, size: SectionSize) -> Section {
-        Section {
-            id: id.into(),
-            header: SectionHeader {
-                title: StyledText::plain(id),
-                show_chevron: true,
-                ..Default::default()
-            },
-            body: SectionBody::Tree(TreeView {
-                id: WidgetId::new(format!("{id}-tree")),
-                rows: Vec::new(),
-                selection_mode: SelectionMode::Single,
-                selected_path: None,
-                scroll_offset: 0,
-                style: Default::default(),
-                has_focus: false,
-            }),
-            aux: None,
-            size,
-            collapsed: false,
-            min_size: None,
-            max_size: None,
+    fn defs() -> Vec<SidebarSectionDef> {
+        vec![SidebarSectionDef::new("repo:a", "a")]
+    }
+
+    fn row(i: u16) -> TreeRow {
+        TreeRow {
+            path: vec![i],
+            indent: 0,
+            icon: None,
+            text: StyledText::plain(format!("row {i}")),
+            badge: None,
+            is_expanded: None,
+            decoration: Decoration::Normal,
+            edit: None,
         }
     }
 
-    /// `tui_chevron_click_guard` measures click x from the sidebar rect
-    /// while `SidebarSystem` measures from the section body; the two agree
-    /// only while a cell-grid vertical `MultiSectionView` (the shape
-    /// `SidebarSystem` builds) starts every section body at the sidebar x.
+    /// `j` moves a sidebar tree's selection the way Down does, and the move
+    /// lands on the descriptor `drive_sidebar` stores it on.
     #[test]
-    fn cell_msv_section_bodies_start_at_the_sidebar_x() {
+    fn j_moves_the_selection_and_is_stored() {
         let backend = quadraui::tui::TuiBackend::new();
-        let rect = Rect::new(3.0, 2.0, 40.0, 30.0);
-        for scroll_mode in [ScrollMode::PerSection, ScrollMode::WholePanel] {
-            let view = MultiSectionView {
-                id: WidgetId::new("sidebar-system"),
-                sections: vec![
-                    tree_section("a", SectionSize::Content),
-                    tree_section("b", SectionSize::EqualShare),
-                ],
-                active_section: Some(1),
-                axis: MsvAxis::Vertical,
-                allow_resize: false,
-                allow_collapse: true,
-                scroll_mode,
-                has_focus: true,
-                panel_scroll: 0.0,
-            };
-            let layout = backend.msv_layout(rect, &view);
-            assert_eq!(layout.sections.len(), 2);
-            for s in &layout.sections {
-                assert_eq!(
-                    s.body_bounds.x, rect.x,
-                    "{scroll_mode:?} section body x: {:?}",
-                    s.body_bounds
-                );
-            }
+        let mut sidebar = selection_sidebar(BOARD_SIDEBAR_ID, &defs());
+        sidebar.set_rows(0, (0..3).map(row).collect());
+        sidebar.active_section = Some(0);
+        if let Some(t) = sidebar.tree_mut(0) {
+            t.selected_path = Some(vec![0]);
         }
-    }
-
-    /// The derived region is the one coord-tui's sidebars have always had:
-    /// `[0, 6.65 + indent)` cells at a one-cell line height.
-    #[test]
-    fn original_chevron_region_matches_the_cell_formula() {
-        for indent in 0..4u16 {
-            let end = original_chevron_end_x(indent, 1.0).expect("a branch row has a chevron");
-            assert!((end - (6.65 + indent as f32)).abs() < 1e-4, "indent {indent}: {end}");
-        }
+        let mut state = SidebarState::default();
+        let event = UiEvent::KeyPressed {
+            key: Key::Char('j'),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        };
+        let handled = drive_sidebar(
+            &mut sidebar,
+            &mut state,
+            &event,
+            &backend,
+            Rect::new(0.0, 0.0, 30.0, 20.0),
+        );
+        assert!(!matches!(handled, Handled::Ignored));
+        assert_eq!(
+            sidebar.tree(0).and_then(|t| t.selected_path.clone()),
+            Some(vec![1])
+        );
     }
 }

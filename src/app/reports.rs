@@ -26,7 +26,7 @@
 //! Structurally modelled on `audit.rs` — the closest existing panel:
 //! server-sourced read-only data, a background fetch gated to only run while
 //! this panel is the active view (see `settings_ui.rs`'s poll loop), a simple
-//! `usize` selection index clamped on navigation, no `SidebarSystem` tree.
+//! `usize` selection index clamped on navigation, no `Sidebar` tree.
 //!
 //! **coord-tui's first `MultiSectionView`.** The reusable half of that wiring
 //! (cache-the-painted-layout, hit-test, descend into a `Form` body) lives in
@@ -530,10 +530,7 @@ impl CoordApp {
         }
 
         let view = self.reports_view();
-        // TODO(quadraui widget contract): legacy `Backend::msv_layout` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
-        let layout = backend.msv_layout(rect, &view);
-        // TODO(quadraui widget contract): legacy `Backend::draw_multi_section_view` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
-        backend.draw_multi_section_view(rect, &view);
+        let layout = backend.draw_primitive(rect, &view).chrome;
         let forms: Vec<Option<FormLayout>> = view
             .sections
             .iter()
@@ -1003,6 +1000,9 @@ impl CoordApp {
             }],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -1240,6 +1240,8 @@ impl CoordApp {
             title: spec.title.clone(),
             chart: Box::new(Chart {
                 id: WidgetId::new("reports-chart"),
+                hovered_point: None,
+                crosshair_x: None,
                 kind,
                 // A legend is the only place a series name can appear in a
                 // terminal chart, so it is on whenever there is more than
@@ -1413,12 +1415,9 @@ impl CoordApp {
                     // a glance down does not already give. The returned
                     // `ChartLayout` is discarded for the same reason —
                     // nothing hit-tests it.
-                    // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
-                    backend.draw_chart(
+                    let _ = backend.draw_primitive(
                         Rect::new(rect.x, rect.y + title_h, rect.width, chart_h - title_h),
-                        chart,
-                        None,
-                        None,
+                        chart.as_ref(),
                     );
                 }
                 ChartPlan::Degrade(reason) if degrade_h > 0.0 => {
@@ -1470,6 +1469,12 @@ impl CoordApp {
                     ),
                     selected_idx: None,
                     scroll_offset: self.reports_result_scroll,
+                    selection_mode: SelectionMode::Single,
+                    selected_indices: Vec::new(),
+                    items_window: None,
+                    scroll_px: None,
+                    striped: false,
+                    glyphs: None,
                     // The ▲/▼ header indicator is drawn by the primitive
                     // itself — the app only says which column and which way.
                     sort,
@@ -1510,9 +1515,7 @@ impl CoordApp {
                 // the main panel's origin (the section stack is above it),
                 // so a bare `pos - main_b` would mis-hit-test by the stack's
                 // height.
-                // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-                #[allow(deprecated)]
-                let layout = backend.draw_data_table(table_rect, &table, None);
+                let layout = draw_data_table(backend, table_rect, &table);
                 *self.reports_table_layout.borrow_mut() = Some((table_rect, layout));
             }
         }
@@ -1530,6 +1533,9 @@ impl CoordApp {
                     items,
                     selected_idx: 0,
                     scroll_offset: 0,
+                    items_window: None,
+                    scroll_px: None,
+                    striped: false,
                     has_focus: false,
                     bordered: true,
                     h_scroll: 0,
@@ -1775,6 +1781,8 @@ impl CoordApp {
         );
         let merged_chart = Chart {
             id: WidgetId::new("trend-chart-merged"),
+            hovered_point: None,
+            crosshair_x: None,
             kind: ChartKind::Bar,
             series: vec![Self::trend_merged_series(result)],
             // No x-axis legend on the top chart — one shared legend under
@@ -1791,8 +1799,7 @@ impl CoordApp {
         // No hover point/crosshair: same reasoning as the #2271 single
         // chart — this is a scan aid, nothing hit-tests the returned
         // layout.
-        // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
-        backend.draw_chart(top_chart, &merged_chart, None, None);
+        let _ = backend.draw_primitive(top_chart, &merged_chart);
 
         draw_list_view(backend, 
             bottom_caption,
@@ -1815,6 +1822,8 @@ impl CoordApp {
             Some(series) => {
                 let cost_chart = Chart {
                     id: WidgetId::new("trend-chart-cost"),
+                    hovered_point: None,
+                    crosshair_x: None,
                     kind: ChartKind::Line,
                     series: vec![series],
                     x_label,
@@ -1826,8 +1835,7 @@ impl CoordApp {
                     x_ticks: None,
                     show_grid: true,
                 };
-                // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
-                backend.draw_chart(bottom_chart, &cost_chart, None, None);
+                let _ = backend.draw_primitive(bottom_chart, &cost_chart);
             }
             None => {
                 draw_list_view(backend, 

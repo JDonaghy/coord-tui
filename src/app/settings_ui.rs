@@ -895,7 +895,7 @@ impl CoordApp {
         // content changes (transcript / SSE drain) below.
         if let Some(ref mut chat) = self.inject_chat {
             self.inject_spinner_frame = self.inject_spinner_frame.wrapping_add(1);
-            chat.set_spinner_frame(self.inject_spinner_frame);
+            chat.chat.spinner_frame = self.inject_spinner_frame;
         }
 
         // #235: Drain Phase 1 build completions and toast the outcome.
@@ -1662,6 +1662,9 @@ impl CoordApp {
             items: Vec::new(),
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -1681,8 +1684,8 @@ impl CoordApp {
     /// metrics were sized for a different rect than where it was actually
     /// drawn.  One rect ⇒ no drift.
     ///
-    /// Field IDs are stable across renders so the `FormController` can
-    /// match events correctly.
+    /// Field IDs are stable across renders so the form's interaction state
+    /// (`settings_form_state`) keeps matching the same fields.
     pub(crate) fn build_settings_form(&self) -> Form {
         let mut fields: Vec<FormField> = Vec::new();
 
@@ -1838,7 +1841,7 @@ impl CoordApp {
             id: WidgetId::new("settings-form"),
             fields,
             focused_field,
-            scroll_offset: self.settings_form.borrow().scroll_offset(),
+            scroll_offset: self.settings_form_state.borrow().scroll_offset.unwrap_or(0),
             has_focus: true,
             ..form_base(ControlWidth::ContentEnd)
         }

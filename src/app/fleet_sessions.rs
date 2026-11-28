@@ -229,6 +229,8 @@ impl CoordApp {
             selection_mode: SelectionMode::Single,
             selected_path: self.sessions_tree_selected.clone(),
             scroll_offset: self.sessions_tree_scroll,
+            items_window: None,
+            scroll_px: None,
             style: TreeStyle::default(),
             has_focus: true,
         }
@@ -332,7 +334,7 @@ impl CoordApp {
     /// called after every click/j/k navigation.
     ///
     /// #12/A3: the clamp is `tree_nav::scroll_to_visible` (quadraui's
-    /// `TreeController::scroll_to_visible`) — this no longer "mirrors"
+    /// `behaviour::scroll::ensure_visible`) — this no longer "mirrors"
     /// `fix_terminal_tree_scroll`, it shares with it. Only the
     /// `TreePath` → flat-row-index resolution is Sessions-specific.
     pub(crate) fn fix_sessions_tree_scroll(&mut self, visible: usize) {

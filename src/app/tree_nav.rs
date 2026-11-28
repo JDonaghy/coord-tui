@@ -12,26 +12,21 @@
 //! mirrors one of the others — the exact churn pattern #12 was filed about.
 //!
 //! **Why this delegates to quadraui instead of re-deriving the arithmetic.**
-//! `quadraui::TreeController::scroll_to_visible` *is* the canonical
-//! implementation, and finding A3's whole point is that a local copy —
-//! however well factored — becomes the next thing to keep in sync with the
-//! framework. So [`scroll_to_visible`] below owns no arithmetic of its own:
-//! it hands the offset to a `TreeController` and reads the answer back. If
-//! quadraui's clamp rule changes, every panel in coord-tui follows for free.
+//! `quadraui::behaviour::scroll::ensure_visible` *is* the canonical
+//! implementation — the same clamp `TreeView`'s own keyboard navigation and
+//! `Sidebar::reveal` scroll with — and finding A3's whole point is that a
+//! local copy, however well factored, becomes the next thing to keep in sync
+//! with the framework. So [`scroll_to_visible`] below owns no arithmetic of
+//! its own. If quadraui's clamp rule changes, every panel in coord-tui
+//! follows for free.
 //!
 //! The per-panel `fix_*_scroll` methods survive as thin wrappers because each
 //! one still resolves its *own* notion of "which flat row is selected"
 //! (`merge_queue_display_idx_for_sel`, `terminal_tree_selected_flat_index`,
 //! …) — that part is genuinely panel-specific. What they no longer own is the
 //! clamp.
-//!
-//! Full `TreeController` adoption for the Terminal/Sessions/Plans trees
-//! (`set_rows`/`render`/`handle`, and with it `TreeControllerEvent::
-//! ContextMenuRequested`) is the other half of A3 and is blocked on
-//! quadraui#475 for the selection plumbing; this module is the part that is
-//! unblocked today.
 
-use quadraui::TreeController;
+use quadraui::behaviour::scroll::ensure_visible;
 
 /// Clamp `scroll` so that flat row `selected` is inside a `visible`-row
 /// viewport, then write the (possibly unchanged) offset back.
@@ -40,16 +35,9 @@ use quadraui::TreeController;
 /// is no viewport to scroll into. That matches the `if visible == 0 { return }`
 /// guard every call site used to open with.
 ///
-/// Delegates to [`TreeController::scroll_to_visible`], which is stateless with
-/// respect to the controller's rows/selection: it reads and writes only
-/// `scroll_offset`. Constructing a throwaway controller is therefore exact,
-/// and cheap enough for a per-keystroke path (one empty `Vec` + one small
-/// `String`).
+/// Delegates to [`ensure_visible`].
 pub(crate) fn scroll_to_visible(scroll: &mut usize, selected: usize, visible: usize) {
-    let mut probe = TreeController::new("coord-tui/tree_nav");
-    probe.set_scroll_offset(*scroll);
-    probe.scroll_to_visible(selected, visible);
-    *scroll = probe.scroll_offset();
+    *scroll = ensure_visible(*scroll, visible, selected);
 }
 
 /// Map a click's y position inside a scrolled, flat row list to the row index

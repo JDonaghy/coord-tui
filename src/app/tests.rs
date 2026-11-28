@@ -259,7 +259,7 @@
     // `fmt_dur`'s largest unit is the hour, which is right for a *duration*
     // but unbounded for an *age*: a year-old timestamp rendered
     // `9732h35m ago` (12 cells) and got clipped to `9732h35m …` in the Audit
-    // Time column (`native_column_width(11.0)` -> 10 usable), losing the `ago`
+    // Time column (`ColumnWidth::Native(11.0)` -> 10 usable), losing the `ago`
     // suffix #1039 contract §4a requires. Ages now roll up to whole days.
     //
     // Helper: build a ts that is exactly `age_secs` in the past.
@@ -792,8 +792,10 @@
         let mut app = make_app_with_assignments(assignments);
         // Section 0 = search form; section 1 = repo-a (running first).
         // #406: Path is now 3-level: [milestone_idx=0, status_idx=0 (In-flight), issue_idx=0].
-        app.board_sidebar.set_active_section(Some(1));
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0, 0]));
+        app.board_sidebar.active_section = Some(1);
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0, 0]);
+        }
         let sel = app.board_selected_issue();
         assert!(sel.is_some(), "expected Some, got None");
         let (repo, issue_num) = sel.unwrap();
@@ -6837,12 +6839,11 @@
         );
         let pv_rect = pipeline_detail_pv_rect(pv_origin, lh);
         // Match the production hit-test: stripped view, no action bounds,
-        // and the same `Backend::pipeline_view_layout` production now uses
+        // and the same `layout_primitive` production now uses
         // (#1377) rather than a hand-rolled re-derivation.
         let backend = quadraui::tui::TuiBackend::new();
         let view = app.build_pipeline_widget().expect("widget");
-        // TODO(quadraui widget contract): legacy `Backend::pipeline_view_layout` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
-        let layout = backend.pipeline_view_layout(pv_rect, &pipeline_view_for_render(&view));
+        let layout = backend.layout_primitive(pv_rect, &pipeline_view_for_render(&view)).layout;
 
         let work_stage = &layout.stages[0];
         let bb = work_stage.box_bounds;
@@ -6929,11 +6930,11 @@
         ];
         let mut app = make_app_with_assignments(assignments);
         // Simulate the user having scrolled the sidebar panel.
-        app.board_sidebar.set_panel_scroll(42.0);
+        app.board_sidebar.panel_scroll = 42.0;
         // A 5-second data refresh triggers rebuild_board_sidebar().
         app.rebuild_board_sidebar();
         assert_eq!(
-            app.board_sidebar.panel_scroll(),
+            app.board_sidebar.panel_scroll,
             42.0,
             "panel_scroll should survive rebuild"
         );
@@ -6947,15 +6948,17 @@
         ];
         let mut app = make_app_with_assignments(assignments);
         // Section 0 = search form; section 1 = repo-a; section 2 = repo-b.
-        app.board_sidebar.set_collapsed(1, true);
-        assert!(app.board_sidebar.is_collapsed(1));
+        if let Some(s) = app.board_sidebar.sections.get_mut(1) {
+            s.collapsed = true;
+        }
+        assert!(app.board_sidebar.sections.get(1).is_some_and(|s| s.collapsed));
         app.rebuild_board_sidebar();
         assert!(
-            app.board_sidebar.is_collapsed(1),
+            app.board_sidebar.sections.get(1).is_some_and(|s| s.collapsed),
             "collapsed state should survive rebuild"
         );
         assert!(
-            !app.board_sidebar.is_collapsed(2),
+            !app.board_sidebar.sections.get(2).is_some_and(|s| s.collapsed),
             "uncollapsed section should remain uncollapsed"
         );
     }
@@ -6978,7 +6981,7 @@
         app.rebuild_board_sidebar();
         // Section 0 = search form; section 1 = empty-repo.
         assert!(
-            app.board_sidebar.is_collapsed(1),
+            app.board_sidebar.sections.get(1).is_some_and(|s| s.collapsed),
             "empty repo should be auto-collapsed on first build"
         );
     }
@@ -7396,7 +7399,7 @@
         // route to Completed.
         seed_open_issue_records(&mut app, "repo-a", &[10, 20]);
         app.select_issue("repo-a", 20);
-        let path = app.board_sidebar.selected_path(1).cloned();
+        let path = app.board_sidebar.tree(1).and_then(|t| t.selected_path.as_ref()).cloned();
         // The flat order inside the No-milestone group is sorted by issue
         // number; #20 sits at index 1 (after #10).
         // Accept both orderings in case sort order differs.
@@ -9151,14 +9154,14 @@
     fn rebuild_pipeline_sidebar_preserves_panel_scroll() {
         let mut app = make_pipeline_app();
         // Set a non-zero panel scroll (simulating the user having scrolled).
-        app.pipeline_sidebar.set_panel_scroll(42.0);
-        assert_eq!(app.pipeline_sidebar.panel_scroll(), 42.0);
+        app.pipeline_sidebar.panel_scroll = 42.0;
+        assert_eq!(app.pipeline_sidebar.panel_scroll, 42.0);
 
         // Simulate a refresh that doesn't change the issue list.
         app.rebuild_pipeline_sidebar(None);
 
         assert_eq!(
-            app.pipeline_sidebar.panel_scroll(),
+            app.pipeline_sidebar.panel_scroll,
             42.0,
             "panel scroll must survive rebuild — otherwise the view yanks to top on refresh",
         );
@@ -9195,23 +9198,25 @@
         assert_eq!(app.pipeline_state_section_names, vec!["in-progress", "new"]);
         // #2405: #815's collapsed-by-default carve-out was Done-only and went
         // with the section — every remaining section starts expanded.
-        assert!(!app.pipeline_sidebar.is_collapsed(1));
-        assert!(!app.pipeline_sidebar.is_collapsed(2));
+        assert!(!app.pipeline_sidebar.sections.get(1).is_some_and(|s| s.collapsed));
+        assert!(!app.pipeline_sidebar.sections.get(2).is_some_and(|s| s.collapsed));
 
         // Collapse New, leave In-progress expanded (user action).
-        app.pipeline_sidebar.set_collapsed(2, true);
-        assert!(!app.pipeline_sidebar.is_collapsed(1));
-        assert!(app.pipeline_sidebar.is_collapsed(2));
+        if let Some(s) = app.pipeline_sidebar.sections.get_mut(2) {
+            s.collapsed = true;
+        }
+        assert!(!app.pipeline_sidebar.sections.get(1).is_some_and(|s| s.collapsed));
+        assert!(app.pipeline_sidebar.sections.get(2).is_some_and(|s| s.collapsed));
 
         // Rebuild — collapse state must be preserved across rebuild.
         app.rebuild_pipeline_sidebar(None);
 
         assert!(
-            !app.pipeline_sidebar.is_collapsed(1),
+            !app.pipeline_sidebar.sections.get(1).is_some_and(|s| s.collapsed),
             "In-progress section stays expanded across rebuild",
         );
         assert!(
-            app.pipeline_sidebar.is_collapsed(2),
+            app.pipeline_sidebar.sections.get(2).is_some_and(|s| s.collapsed),
             "New section collapse state must survive rebuild",
         );
     }
@@ -9244,8 +9249,11 @@
         });
         app.rebuild_pipeline_sidebar(None);
         assert_eq!(app.pipeline_state_section_names, vec!["new"]);
-        app.pipeline_sidebar.set_collapsed(1, true); // collapse New (section 1)
-        assert!(app.pipeline_sidebar.is_collapsed(1));
+        // Collapse New (section 1).
+        if let Some(s) = app.pipeline_sidebar.sections.get_mut(1) {
+            s.collapsed = true;
+        }
+        assert!(app.pipeline_sidebar.sections.get(1).is_some_and(|s| s.collapsed));
 
         // Dispatch work on a second issue — "in-progress" sorts before "new",
         // so New moves to section 2. Collapse state is keyed by NAME, so it
@@ -9269,11 +9277,11 @@
 
         assert_eq!(app.pipeline_state_section_names, vec!["in-progress", "new"]);
         assert!(
-            !app.pipeline_sidebar.is_collapsed(1),
+            !app.pipeline_sidebar.sections.get(1).is_some_and(|s| s.collapsed),
             "In-progress section must not be retroactively collapsed",
         );
         assert!(
-            app.pipeline_sidebar.is_collapsed(2),
+            app.pipeline_sidebar.sections.get(2).is_some_and(|s| s.collapsed),
             "New collapse state followed from section 1 to section 2",
         );
     }
@@ -9285,7 +9293,7 @@
     fn rebuild_pipeline_sidebar_preserves_both_selection_and_scroll() {
         let mut app = make_pipeline_app();
         app.pipeline_sel = Some(0);
-        app.pipeline_sidebar.set_panel_scroll(17.5);
+        app.pipeline_sidebar.panel_scroll = 17.5;
 
         let prev_sel = app.capture_pipeline_selection_id();
         let mut new_issues = vec![PipelineIssue {
@@ -9313,7 +9321,7 @@
             "selection still on the original issue",
         );
         assert_eq!(
-            app.pipeline_sidebar.panel_scroll(),
+            app.pipeline_sidebar.panel_scroll,
             17.5,
             "scroll preserved alongside selection",
         );
@@ -9517,16 +9525,18 @@
         app.board_search.insert_char('h');
         app.board_search.insert_char('i');
         app.rebuild_board_sidebar();
-        assert!(app.board_sidebar.form_has_focus(0), "precondition: form focused");
+        assert!(app.board_sidebar.sections.first().is_some_and(|s| s.form().is_some() && s.form_focused), "precondition: form focused");
 
         // Replicate what the keyboard ESC arm does:
         app.board_search.clear(); // sets focused = false
-        app.board_sidebar.focus_form(0, false);
+        if let Some(s) = app.board_sidebar.sections.get_mut(0) {
+            s.form_focused = false;
+        }
         app.rebuild_board_sidebar();
 
         assert!(!app.board_search.focused, "filter must be unfocused after ESC");
         assert!(app.board_search.is_empty(), "filter must be cleared after ESC");
-        assert!(!app.board_sidebar.form_has_focus(0), "quadraui form must be unfocused");
+        assert!(!app.board_sidebar.sections.first().is_some_and(|s| s.form().is_some() && s.form_focused), "quadraui form must be unfocused");
     }
 
     /// ESC while the filter is focused AND empty blurs instead of quitting (#566).
@@ -9541,11 +9551,13 @@
 
         // Replicate the #646 ESC arm:
         app.board_search.clear();
-        app.board_sidebar.focus_form(0, false);
+        if let Some(s) = app.board_sidebar.sections.get_mut(0) {
+            s.form_focused = false;
+        }
         app.rebuild_board_sidebar();
 
         assert!(!app.board_search.focused, "ESC on empty focused filter must blur, not quit");
-        assert!(!app.board_sidebar.form_has_focus(0), "quadraui form must be unfocused");
+        assert!(!app.board_sidebar.sections.first().is_some_and(|s| s.form().is_some() && s.form_focused), "quadraui form must be unfocused");
     }
 
     /// ESC while the pipeline filter is focused blurs it.
@@ -9558,11 +9570,13 @@
 
         // Replicate the #646 ESC arm:
         app.pipeline_search.clear();
-        app.pipeline_sidebar.focus_form(0, false);
+        if let Some(s) = app.pipeline_sidebar.sections.get_mut(0) {
+            s.form_focused = false;
+        }
         app.rebuild_pipeline_sidebar(None);
 
         assert!(!app.pipeline_search.focused, "pipeline filter must blur on ESC");
-        assert!(!app.pipeline_sidebar.form_has_focus(0), "pipeline quadraui form must be unfocused");
+        assert!(!app.pipeline_sidebar.sections.first().is_some_and(|s| s.form().is_some() && s.form_focused), "pipeline quadraui form must be unfocused");
     }
 
     /// Focusing the filter, then clearing + rebuilding, leaves it unfocused
@@ -9572,13 +9586,17 @@
         let mut app = make_app_default();
         // Focus then immediately blur without the sidebar rebuild in between.
         app.board_search.focused = true;
-        app.board_sidebar.focus_form(0, true);
+        if let Some(s) = app.board_sidebar.sections.get_mut(0) {
+            s.form_focused = true;
+        }
         // Now blur:
         app.board_search.focused = false;
-        app.board_sidebar.focus_form(0, false);
+        if let Some(s) = app.board_sidebar.sections.get_mut(0) {
+            s.form_focused = false;
+        }
         app.rebuild_board_sidebar(); // rebuild must not re-focus
         assert!(!app.board_search.focused);
-        assert!(!app.board_sidebar.form_has_focus(0), "rebuild must not re-apply focus when board_search.focused is false");
+        assert!(!app.board_sidebar.sections.first().is_some_and(|s| s.form().is_some() && s.form_focused), "rebuild must not re-apply focus when board_search.focused is false");
     }
 
     // ── Pipeline FILTER box ───────────────────────────────────────────────
@@ -9740,7 +9758,7 @@
         );
         // The active section is a state section, i.e. >= search_offset (1),
         // never the FILTER form at section 0.
-        let active = app.pipeline_sidebar.active_section().unwrap();
+        let active = app.pipeline_sidebar.active_section.unwrap();
         assert!(
             active >= 1,
             "active section is a state section, not the FILTER form"
@@ -18453,9 +18471,11 @@
         // the "No milestone" milestone).
         let mut app = make_app_with_one_completed_issue();
         // Section 1 = repo-a (section 0 is the search form).
-        app.board_sidebar.set_active_section(Some(1));
+        app.board_sidebar.active_section = Some(1);
         // Path [0, 0]: milestone 0 ("No milestone"), status 0 ("Completed").
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
         assert!(app.board_selection_in_completed_group());
     }
 
@@ -18464,8 +18484,10 @@
         // Issue row within Completed group.
         // #406: path is now 3-level: [milestone_idx, status_idx, issue_idx].
         let mut app = make_app_with_one_completed_issue();
-        app.board_sidebar.set_active_section(Some(1));
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0, 0]));
+        app.board_sidebar.active_section = Some(1);
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0, 0]);
+        }
         assert!(app.board_selection_in_completed_group());
     }
 
@@ -18474,8 +18496,10 @@
         // Running group only — group_idx 0 is "Running", not "Completed".
         let assignments = vec![make_assignment_typed("running", 10, "repo-a", Some("work"))];
         let mut app = make_app_with_assignments(assignments);
-        app.board_sidebar.set_active_section(Some(1));
-        app.board_sidebar.set_selected_path(1, Some(vec![0]));
+        app.board_sidebar.active_section = Some(1);
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0]);
+        }
         assert!(!app.board_selection_in_completed_group());
     }
 
@@ -18483,8 +18507,10 @@
     fn purge_guard_false_when_failed_group_selected() {
         let assignments = vec![make_assignment_typed("failed", 10, "repo-a", Some("work"))];
         let mut app = make_app_with_assignments(assignments);
-        app.board_sidebar.set_active_section(Some(1));
-        app.board_sidebar.set_selected_path(1, Some(vec![0]));
+        app.board_sidebar.active_section = Some(1);
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0]);
+        }
         assert!(!app.board_selection_in_completed_group());
     }
 
@@ -28954,7 +28980,7 @@
             "select_issue + board_selected_issue should round-trip",
         );
         // #410: Path must be exactly 2-level: [milestone_idx, issue_idx].
-        let path = app.board_sidebar.selected_path(1).cloned();
+        let path = app.board_sidebar.tree(1).and_then(|t| t.selected_path.as_ref()).cloned();
         assert!(
             path.as_ref().map(|p| p.len()) == Some(2),
             "path should be 2-level, got {:?}",
@@ -29089,9 +29115,9 @@
     #[test]
     fn tuidriver_board_milestone_click_expands_collapsed_milestone() {
         // #857: clicking a collapsed (non-in-flight) milestone header must
-        // expand it and reveal its issue — full event round-trip. Unlike
-        // Pipeline, a Board milestone header toggles on a plain row click
-        // (`SidebarEvent::RowSelected`), not just the chevron — see the
+        // expand it and reveal its issue — full event round-trip. A Board
+        // milestone header toggles on a plain row click
+        // (`SidebarAction::RowSelected`), not just the chevron — see the
         // `path.len() == 1` arm in events.rs — so clicking directly on the
         // text found by `find()` is sufficient.
         use quadraui::tui::testing::driver_with_shell;
@@ -29540,27 +29566,30 @@
             .position(|&k| k == "in-progress")
             .expect("in-progress section must exist")
             + 1; // + search_offset
-        app.pipeline_sidebar.set_active_section(Some(section));
+        app.pipeline_sidebar.active_section = Some(section);
 
         // api (gi=0) → v1.0 (mi=0) → #10 (ii=0).
-        app.pipeline_sidebar
-            .set_selected_path(section, Some(vec![0, 0, 0]));
+        if let Some(t) = app.pipeline_sidebar.tree_mut(section) {
+            t.selected_path = Some(vec![0, 0, 0]);
+        }
         let idx = app
             .selected_pipeline_index()
             .expect("3-level issue path must resolve");
         assert_eq!(app.pipeline_issues[idx].number, 10);
 
         // api (gi=0) → v2.0 (mi=1) → #20 (ii=0).
-        app.pipeline_sidebar
-            .set_selected_path(section, Some(vec![0, 1, 0]));
+        if let Some(t) = app.pipeline_sidebar.tree_mut(section) {
+            t.selected_path = Some(vec![0, 1, 0]);
+        }
         let idx = app
             .selected_pipeline_index()
             .expect("3-level issue path must resolve");
         assert_eq!(app.pipeline_issues[idx].number, 20);
 
         // A 2-level path (milestone header selected) must resolve to None.
-        app.pipeline_sidebar
-            .set_selected_path(section, Some(vec![0, 0]));
+        if let Some(t) = app.pipeline_sidebar.tree_mut(section) {
+            t.selected_path = Some(vec![0, 0]);
+        }
         assert_eq!(
             app.selected_pipeline_index(),
             None,
@@ -29568,8 +29597,9 @@
         );
 
         // A 1-level path (repo header selected) must also resolve to None.
-        app.pipeline_sidebar
-            .set_selected_path(section, Some(vec![0]));
+        if let Some(t) = app.pipeline_sidebar.tree_mut(section) {
+            t.selected_path = Some(vec![0]);
+        }
         assert_eq!(
             app.selected_pipeline_index(),
             None,
@@ -29975,8 +30005,10 @@
             .expect("the nested child must be locatable");
         assert!(path.len() >= 4, "must be a nested path (deeper than a top-level row): {path:?}");
         assert_eq!(sel, Some(child_idx), "resolves to the child's own index, not the epic's");
-        app.pipeline_sidebar.set_active_section(Some(section));
-        app.pipeline_sidebar.set_selected_path(section, Some(path));
+        app.pipeline_sidebar.active_section = Some(section);
+        if let Some(t) = app.pipeline_sidebar.tree_mut(section) {
+            t.selected_path = Some(path);
+        }
         app.pipeline_sel = app.selected_pipeline_index();
         assert_eq!(app.pipeline_sel, Some(child_idx), "sanity: the child is selected");
 
@@ -30087,8 +30119,10 @@
             .locate_pipeline_selection("acme/api", 102)
             .expect("the nested child row is still rendered for display");
         assert_eq!(sel, None, "precondition: #102 isn't independently tracked");
-        app.pipeline_sidebar.set_active_section(Some(section));
-        app.pipeline_sidebar.set_selected_path(section, Some(path));
+        app.pipeline_sidebar.active_section = Some(section);
+        if let Some(t) = app.pipeline_sidebar.tree_mut(section) {
+            t.selected_path = Some(path);
+        }
         app.pipeline_sel = app.selected_pipeline_index();
         assert_eq!(
             app.pipeline_sel, None,
@@ -30117,11 +30151,10 @@
              (None) — not snapped onto the unrelated open doc tab #200"
         );
         let section = app
-            .pipeline_sidebar
-            .active_section()
+            .pipeline_sidebar.active_section
             .expect("a state section is still active");
         assert!(
-            app.pipeline_sidebar.selected_path(section).is_some(),
+            app.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).is_some(),
             "the nested child row itself stays visually selected"
         );
     }
@@ -33927,11 +33960,11 @@
     // case-insensitive behaviour end to end.
     //
     // #16: the finder itself now renders on quadraui's shipped `Palette`
-    // primitive (`DualModePaletteController`) instead of a hand-rolled
+    // primitive (`DualModePalette`) instead of a hand-rolled
     // `IssueFinder` state machine — its own cursor/selection/scroll
     // book-keeping (and the tests that exercised it directly, e.g. the old
     // `finder_selection_clamped_after_query_change`) are gone with it;
-    // `DualModePaletteController`'s own up/down-clamp behaviour is already
+    // `DualModePalette`'s own up/down-clamp behaviour is already
     // covered upstream (quadraui's `dual_mode_palette` tests). What remains
     // worth testing here is the app-specific glue: `finder_matches` (scoring
     // + `match_positions` positions) and `confirm_issue_finder`'s Board vs.
@@ -34186,7 +34219,7 @@
     }
 
     /// #16: opening the finder must seed it from every open issue (empty
-    /// query) — the `DualModePaletteController` replacing `IssueFinder`
+    /// query) — the `DualModePalette` replacing `IssueFinder`
     /// starts life with an explicit item list, unlike the old struct's
     /// implicit "recompute from `data.open_issues` every render" behaviour.
     #[test]
@@ -34631,7 +34664,9 @@
         // milestone — matches the single "No milestone" group rebuild_board_sidebar
         // creates for a single running issue).  After rebuild_board_sidebar the
         // active section is already 1 (repo-a); we just need the row path.
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
         // Switch to the Issue detail tab so render_content draws board_issue_body_list.
         app.board_detail_tab = BoardDetailTab::Issue;
 
@@ -34693,7 +34728,9 @@
 
         // Pre-select the issue in the sidebar (same path as
         // `tuidriver_board_issue_body_renders` above) and switch to Issue.
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
         app.board_detail_tab = BoardDetailTab::Issue;
 
         // Wrap in the full ShellAdapter → TestBackend driver.
@@ -34751,7 +34788,9 @@
                 synced_at: None,
                 state_reason: String::new(),
             });
-            app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+            if let Some(t) = app.board_sidebar.tree_mut(1) {
+                t.selected_path = Some(vec![0, 0]);
+            }
             app.board_detail_tab = BoardDetailTab::Issue;
             app
         };
@@ -34888,7 +34927,9 @@
         let mut app = make_app_with_assignments(assignments);
         // Pre-select the issue row (single milestone → single issue group,
         // same path shape as `tuidriver_board_issue_body_renders` above).
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
 
         let driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
         let screen = driver.screen();
@@ -34938,7 +34979,9 @@
             state_reason: String::new(),
         });
         // Pre-select the issue row so the Issue tab has content to switch to.
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
 
         let mut driver = driver_with_shell(app, CoordApp::shell_config(), 120, 40);
 
@@ -35447,8 +35490,10 @@
         let mut app = make_app_with_assignments(assignments);
 
         // Select the board issue.
-        app.board_sidebar.set_active_section(Some(1));
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        app.board_sidebar.active_section = Some(1);
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
 
         // Set a pipeline selection that differs from the board issue.
         app.pipeline_issues = vec![PipelineIssue {
@@ -35524,8 +35569,10 @@
         // Section 0 = search form; section 1 = first repo (repo-a).
         // Board issue rows use 2-level paths: [milestone_idx, issue_idx].
         // (Extra elements are ignored, so vec![0, 0, 0] is equivalent to vec![0, 0].)
-        app.board_sidebar.set_active_section(Some(1));
-        app.board_sidebar.set_selected_path(1, Some(vec![0, 0]));
+        app.board_sidebar.active_section = Some(1);
+        if let Some(t) = app.board_sidebar.tree_mut(1) {
+            t.selected_path = Some(vec![0, 0]);
+        }
 
         // Also set a pipeline selection that differs from the board issue.
         app.pipeline_issues = vec![PipelineIssue {
@@ -49455,7 +49502,7 @@ Milestone tracking issue.
     /// (`tests/acceptance/ms-33/audit_1039.rs`) pins *absolute* 2025
     /// timestamps, and as wall-clock drifted past them `format_unix_time`
     /// grew an unbounded hour count: `9732h35m ago`, 12 cells wide. The Time
-    /// column is `native_column_width(11.0)` (10 usable), so `draw_data_table`
+    /// column is `ColumnWidth::Native(11.0)` (10 usable), so `draw_data_table`
     /// clipped it to `9732h35m …` and the `ago` suffix vanished — a
     /// time-bomb failure of #1039 contract §4a that no commit introduced.
     ///
@@ -51321,6 +51368,12 @@ Milestone tracking issue.
             rows: Vec::new(),
             selected_idx: None,
             scroll_offset: 0,
+            selection_mode: SelectionMode::Single,
+            selected_indices: Vec::new(),
+            items_window: None,
+            scroll_px: None,
+            striped: false,
+            glyphs: None,
             sort: None,
             has_focus: false,
             show_scrollbar: true,
@@ -55703,7 +55756,7 @@ Milestone tracking issue.
         // `on_shell_event_ctx` forwards to (quadraui#1109's migration off
         // the deprecated one-argument `on_shell_event` — see its doc),
         // callable here with no shell in the loop.
-        app.route_panel_changed(&quadraui::AppShellEvent::PanelChanged {
+        app.route_panel_changed(&quadraui::ShellEvent::PanelChanged {
             panel_id: WidgetId::new("panel:usage"),
         });
         assert_eq!(
@@ -58336,8 +58389,7 @@ Milestone tracking issue.
             .nth(1)
             .expect("the Queue grid's DataTable literal must exist");
         let window = after_grid
-            // TODO(quadraui widget contract, list/tree/table group, quadraui #2609): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-            .split("backend.draw_data_table(list_rect, &table, None)")
+            .split("draw_data_table(backend, list_rect, &table)")
             .next()
             .unwrap_or(after_grid);
         assert!(
@@ -62291,7 +62343,7 @@ Milestone tracking issue.
     // ── #16: Ctrl+P issue finder, rebuilt on quadraui's `Palette` ─────────
     //
     // Black-box coverage for the finder's migration off the hand-rolled
-    // `IssueFinder`/`render_issue_finder` onto `DualModePaletteController` —
+    // `IssueFinder`/`render_issue_finder` onto `DualModePalette` —
     // same "open, type to filter, Enter activates, Esc cancels" shape the
     // Ctrl+E doc-tab picker's own tests just above exercise, since both now
     // share the identical primitive.
@@ -62733,11 +62785,10 @@ Milestone tracking issue.
             "precondition: #42 (index 0) is the active document, selected"
         );
         let section = app
-            .pipeline_sidebar
-            .active_section()
+            .pipeline_sidebar.active_section
             .expect("precondition: a state section is active");
         assert!(
-            app.pipeline_sidebar.selected_path(section).is_some(),
+            app.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).is_some(),
             "precondition: #42's row is selected before typing"
         );
 
@@ -62772,11 +62823,10 @@ Milestone tracking issue.
         );
 
         let section = app
-            .pipeline_sidebar
-            .active_section()
+            .pipeline_sidebar.active_section
             .expect("a state section is still active (#99 keeps it non-empty)");
         assert!(
-            app.pipeline_sidebar.selected_path(section).is_none(),
+            app.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).is_none(),
             "#2452: no row may be selected — not #99's, not any other — \
              while the active tab's own issue is hidden by the filter"
         );
@@ -62825,11 +62875,10 @@ Milestone tracking issue.
         );
 
         let section = app
-            .pipeline_sidebar
-            .active_section()
+            .pipeline_sidebar.active_section
             .expect("a state section is still active");
         assert!(
-            app.pipeline_sidebar.selected_path(section).is_none(),
+            app.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).is_none(),
             "#2452: #42 became the active tab but its row is filtered out — \
              the tree must show no selection, not the stale #99 row that \
              was selected before the close"
@@ -62986,9 +63035,9 @@ Milestone tracking issue.
             Some(42),
             "#2452 regression: unchanged default-select-first-row behaviour"
         );
-        let section = app.pipeline_sidebar.active_section().unwrap();
+        let section = app.pipeline_sidebar.active_section.unwrap();
         assert!(
-            app.pipeline_sidebar.selected_path(section).is_some(),
+            app.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).is_some(),
             "#2452 regression: the default selection is a real row, not \
              the explicit no-selection state introduced for the \
              filtered-target case"
@@ -63006,7 +63055,7 @@ Milestone tracking issue.
             "running", 10, "repo-a", Some("work"),
         )]);
         assert!(
-            app.board_sidebar.active_section().is_some(),
+            app.board_sidebar.active_section.is_some(),
             "#2452 regression: a fresh paint still activates a section"
         );
         assert!(
@@ -63072,17 +63121,17 @@ Milestone tracking issue.
             .expect("claude-coordinator has a section");
 
         assert_eq!(
-            app.board_sidebar.active_section(),
+            app.board_sidebar.active_section,
             Some(b_idx + offset),
             "fix: reveal must move keyboard focus to the target repo B's \
              OWN section, not leave repo A's section focused"
         );
         assert!(
-            app.board_sidebar.selected_path(b_idx + offset).is_none(),
+            app.board_sidebar.tree(b_idx + offset).and_then(|t| t.selected_path.as_ref()).is_none(),
             "fix: repo B's section shows no selection since #7 is filtered out"
         );
         assert!(
-            app.board_sidebar.selected_path(a_idx + offset).is_some(),
+            app.board_sidebar.tree(a_idx + offset).and_then(|t| t.selected_path.as_ref()).is_some(),
             "fix: repo A's still-valid selection must survive a doc-tab \
              reveal for an unrelated repo B — the not-found fallback must \
              never clear a section other than the target's own"

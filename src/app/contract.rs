@@ -17,21 +17,28 @@
 //!   [`PlacedContextMenu`] and [`PlacedDialog`] wrap the widget with that
 //!   already-resolved layout so the contract paints it where the host put
 //!   it, and the click path keeps hit-testing the same geometry.
-//! - **Native-unit table columns.** [`native_column_width`] keeps a fixed
-//!   `DataTable` column in the backend's own unit (cells on TUI, pixels on
-//!   GTK).
-//! - **List paint.** [`draw_list_view`] paints every `ListView` in the app
-//!   through the contract, except a `bordered` one (see its doc).
+//! - **Raw-event hosts.** [`InjectChat`] and [`PaletteModal`] keep a
+//!   controlled widget together with the interaction state quadraui keeps
+//!   for it, paint it with that state lent, and store what each event
+//!   reports back onto the descriptor — the hosting pattern quadraui
+//!   documents for an app whose events do not reach the widget through a
+//!   frame tree.
+//! - **List and table paint.** [`draw_list_view`] paints every `ListView` in
+//!   the app through the contract; [`draw_data_table`] paints a `DataTable`
+//!   with no row hover and returns the geometry its click path hit-tests.
 
 use quadraui::primitive::{LayoutCtx, PaintEnv, Primitive};
 use quadraui::primitives::context_menu::ContextMenuPrimitiveLayout;
 use quadraui::primitives::dialog::DialogPrimitiveLayout;
 use quadraui::primitives::toolbar::ToolbarSubPart;
-use quadraui::{A11yInfo, A11yPrimitive};
+use quadraui::{A11yInfo, A11yPrimitive, Interactive};
 use quadraui::{
-    Backend, ContextMenu, ContextMenuLayout, Dialog, DialogLayout, DrawsPrimitives,
-    InteractionState, ListView, Rect, Toolbar, ToolbarButton, WidgetId,
+    drive_ui_event, lend_widget_state, Backend, Chat, ChatEvent, ChatState, ChatTurn, ContextMenu,
+    ContextMenuLayout, DataTable, DataTableLayout, Dialog, DialogLayout, DrawsPrimitives,
+    DualModePalette, DualModePaletteAction, DualModePaletteState, Handled, InteractionState,
+    ListView, PaletteItem, Rect, StyledText, Toolbar, ToolbarButton, UiEvent, WidgetId,
 };
+use std::cell::RefCell;
 
 /// The `InteractionState` that paints `hovered` — a button id inside
 /// `bar` — as hovered, when `bar` is painted under `owner`'s id (the bar's
@@ -210,30 +217,176 @@ pub(crate) fn draw_placed_dialog(
 }
 
 /// Paint `list` at `rect` through the `ListView` contract
-/// (`DrawsPrimitives::draw_primitive`). On a cell grid the contract paint
-/// runs the same `tui::draw_list` rasteriser as the legacy method, and on a
-/// pixel backend an unbordered list paints identically too.
-///
-/// A `bordered` list stays on the legacy `Backend::draw_list`: the contract
-/// `ListView` paint on pixel backends strokes no frame and insets its rows
-/// by nothing (`supports_border: false`, `border_inset: 0`), whereas the
-/// legacy GTK paint strokes the rounded frame and clips inside it.
+/// (`DrawsPrimitives::draw_primitive`), bordered or not.
 pub(crate) fn draw_list_view(backend: &mut dyn Backend, rect: Rect, list: &ListView) {
-    if list.bordered {
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_list` for bordered lists only — move to `draw_primitive` once the contract `ListView` paint strokes the `bordered` frame on pixel backends.
-        #[allow(deprecated)]
-        backend.draw_list(rect, list);
-    } else {
-        let _ = backend.draw_primitive(rect, list);
+    let _ = backend.draw_primitive(rect, list);
+}
+
+/// Paint `widget` at `rect` through the contract with nothing hovered or
+/// pressed — whatever the runtime's pointer is over — and return the layout
+/// the paint used, for the click path to hit-test.
+pub(crate) fn draw_unhovered<W>(backend: &mut dyn Backend, rect: Rect, widget: &W) -> W::Layout
+where
+    W: Interactive + 'static,
+    W::Layout: Clone + 'static,
+    W::State: 'static,
+{
+    let painted = backend.draw_dyn(rect, widget, &InteractionState::new());
+    painted
+        .downcast_ref::<W::Layout>()
+        .expect("draw_dyn lays a widget out as its own Primitive::Layout")
+        .clone()
+}
+
+/// Paint `table` at `rect` through the `DataTable` contract with no row
+/// hovered or pressed, and hand back the table-local geometry the paint
+/// used, so a click hit-tests exactly what is on screen.
+pub(crate) fn draw_data_table(
+    backend: &mut dyn Backend,
+    rect: Rect,
+    table: &DataTable,
+) -> DataTableLayout {
+    draw_unhovered(backend, rect, table).layout
+}
+
+/// The table-local geometry `draw_data_table` would paint `table` with at
+/// `rect`, without painting it.
+pub(crate) fn data_table_layout(
+    backend: &dyn Backend,
+    rect: Rect,
+    table: &DataTable,
+) -> DataTableLayout {
+    backend.layout_primitive(rect, table).layout
+}
+
+/// The inline chat composer: the `Chat` descriptor coord-tui owns, plus the
+/// `ChatState` quadraui's `Interactive` keeps for it (the input history, the
+/// gesture in flight). The state is a `RefCell` so the `&self` paint path
+/// can lend it to the widget.
+pub(crate) struct InjectChat {
+    pub(crate) chat: Chat,
+    state: RefCell<ChatState>,
+}
+
+impl InjectChat {
+    /// An empty-input chat under `id`, `status` in its status strip, showing
+    /// `transcript`.
+    pub(crate) fn new(id: &str, status: StyledText, transcript: Vec<ChatTurn>) -> Self {
+        let mut chat = Chat::new(id);
+        chat.status = status;
+        chat.transcript = transcript;
+        Self {
+            chat,
+            state: RefCell::default(),
+        }
+    }
+
+    /// Paint the chat at `rect`, with nothing hovered or pressed.
+    pub(crate) fn draw(&self, backend: &mut dyn Backend, rect: Rect) {
+        let (lent, _) = lend_widget_state(self.chat.id, self.state.take(), || {
+            draw_unhovered(backend, rect, &self.chat)
+        });
+        self.state.replace(lent);
+    }
+
+    /// Drive the chat with one raw event, laid out at `rect` the way
+    /// `backend` paints it, and store every write-back it reports (input
+    /// edits, transcript scroll, turn focus and collapse) onto
+    /// [`Self::chat`]. What is left for the app — a submit, a cancel, a stop
+    /// request, an unclaimed key, a turn click — comes back as the event;
+    /// [`Handled::Consumed`] when the event only changed what the chat
+    /// stores.
+    pub(crate) fn handle_event(
+        &mut self,
+        event: &UiEvent,
+        backend: &dyn Backend,
+        rect: Rect,
+    ) -> Handled<ChatEvent> {
+        let Some(driven) = drive_ui_event(&self.chat, self.state.get_mut(), event, backend, rect)
+        else {
+            return Handled::Ignored;
+        };
+        for emitted in driven.emitted {
+            if let UiEvent::Chat(id, ev) = emitted {
+                if id == self.chat.id {
+                    self.chat.apply(&ev);
+                }
+            }
+        }
+        match driven.handled {
+            Handled::Event(ev) => {
+                self.chat.apply(&ev);
+                match ev {
+                    ChatEvent::InputChanged { .. }
+                    | ChatEvent::TranscriptScrolled { .. }
+                    | ChatEvent::FocusedTurnChanged { .. }
+                    | ChatEvent::TurnCollapsed { .. } => Handled::Consumed,
+                    ev => Handled::Event(ev),
+                }
+            }
+            other => other,
+        }
     }
 }
 
-/// A fixed `DataTable` column `width` wide in the backend's native unit —
-/// cells on a cell grid, pixels on a pixel backend — so a TUI column and its
-/// GTK twin keep the widths they have always had.
-///
-/// TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3039): `ColumnWidth::Fixed` is deprecated, and neither non-deprecated replacement keeps the native unit (`FixedCells` widens GTK columns from N px to N glyphs; `FixedPx` narrows TUI ones); move once quadraui offers a native-unit variant or the GTK widths are deliberately changed.
-#[allow(deprecated)]
-pub(crate) const fn native_column_width(width: f32) -> quadraui::ColumnWidth {
-    quadraui::ColumnWidth::Fixed(width)
+/// A modal search palette — the issue finder, the command palette, the
+/// doc-tab picker: the `DualModePalette` coord-tui owns plus the
+/// `DualModePaletteState` quadraui's `Interactive` keeps for it (the live
+/// query caret).
+pub(crate) struct PaletteModal {
+    pub(crate) palette: DualModePalette,
+    state: DualModePaletteState,
+}
+
+impl PaletteModal {
+    /// A list-mode palette under `id`, titled `title`, showing `items`.
+    pub(crate) fn new(id: &str, title: &str, items: Vec<PaletteItem>) -> Self {
+        Self {
+            palette: DualModePalette::new(WidgetId::new(id), title, None, items),
+            state: DualModePaletteState::default(),
+        }
+    }
+
+    /// Paint the palette inside `rect`.
+    pub(crate) fn draw(&self, rect: Rect, backend: &mut dyn Backend) {
+        let _ = lend_widget_state(self.palette.id, self.state.clone(), || {
+            backend.draw_dyn(rect, &self.palette, &())
+        });
+    }
+
+    /// Drive the palette with one keystroke, laid out at `rect` the way
+    /// `backend` paints it. A highlight, query or mode change is stored onto
+    /// [`Self::palette`] (`visible_rows` is the list height a highlight move
+    /// scrolls within); a highlight move alone answers
+    /// [`Handled::Consumed`], and everything else — a query change to
+    /// refilter on, a confirmation, a dismissal — comes back for the app.
+    pub(crate) fn handle_event(
+        &mut self,
+        event: &UiEvent,
+        backend: &dyn Backend,
+        rect: Rect,
+        visible_rows: usize,
+    ) -> Handled<DualModePaletteAction> {
+        let Some(driven) = drive_ui_event(&self.palette, &mut self.state, event, backend, rect)
+        else {
+            return Handled::Ignored;
+        };
+        for emitted in driven.emitted {
+            if let UiEvent::DualModePalette(id, action) = emitted {
+                if id == self.palette.id {
+                    self.palette.apply(&action, visible_rows);
+                }
+            }
+        }
+        match driven.handled {
+            Handled::Event(action) => {
+                self.palette.apply(&action, visible_rows);
+                match action {
+                    DualModePaletteAction::SelectionChanged { .. } => Handled::Consumed,
+                    action => Handled::Event(action),
+                }
+            }
+            other => other,
+        }
+    }
 }

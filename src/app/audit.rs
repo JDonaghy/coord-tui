@@ -2,7 +2,7 @@
 //!
 //! Newest-first list of the audit trail (`/audit`, #1037) with an inline
 //! entry-detail view — modeled on the Plans panel (`plans.rs`): no
-//! `SidebarSystem`/tree in the main panel, a simple `usize` selection index
+//! `Sidebar`/tree in the main panel, a simple `usize` selection index
 //! clamped on navigation, and a background fetch gated to only run while
 //! this panel is the active view (mirrors `spawn_artifact_fetch`'s
 //! Pipeline-only gating in `data.rs`).
@@ -110,7 +110,7 @@ impl CoordApp {
         // #1040 deliverable 1 / contract §10 ("f=filter"): free-text filter
         // on `/audit`'s `type` param, reusing `SidebarFilter`'s state (same
         // struct Board/Pipeline embed) but rendered as a plain row here —
-        // this sidebar is a bare `ListView`, not a `SidebarSystem`-backed
+        // this sidebar is a bare `ListView`, not a `Sidebar`-backed
         // tree/form like Board/Pipeline's own embedded filter. A trailing
         // block cursor stands in for a real text-input caret while focused.
         let type_line = if self.audit_type_filter.focused {
@@ -127,6 +127,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -185,17 +188,17 @@ impl CoordApp {
         vec![
             Column {
                 title: "Time".to_string(),
-                width: native_column_width(11.0),
+                width: ColumnWidth::Native(11.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Category".to_string(),
-                width: native_column_width(9.0),
+                width: ColumnWidth::Native(9.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Actor".to_string(),
-                width: native_column_width(12.0),
+                width: ColumnWidth::Native(12.0),
                 align: ColumnAlign::Left,
             },
             Column {
@@ -350,6 +353,12 @@ impl CoordApp {
             // with `audit_sel` and scrollbar drags by `fix_audit_scroll` /
             // `audit_apply_vscroll` / `audit_apply_hscroll` (events.rs).
             scroll_offset: self.audit_scroll,
+            selection_mode: SelectionMode::Single,
+            selected_indices: Vec::new(),
+            items_window: None,
+            scroll_px: None,
+            striped: false,
+            glyphs: None,
             sort: None,
             has_focus: true,
             show_scrollbar: true,
@@ -359,9 +368,7 @@ impl CoordApp {
             // #1094: the audit table has no pinned summary row.
             footer: None,
         };
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-        #[allow(deprecated)]
-        let layout = backend.draw_data_table(list_rect, &table, None);
+        let layout = draw_data_table(backend, list_rect, &table);
         // #70: cache the rect alongside the layout (mirrors
         // `reports_table_layout`) so hit-testing/scrolling/resize-drag no
         // longer need a `main_b` passed back in at click time — see the
@@ -378,6 +385,9 @@ impl CoordApp {
                         items: Self::audit_detail_items(entry),
                         selected_idx: 0,
                         scroll_offset: 0,
+                        items_window: None,
+                        scroll_px: None,
+                        striped: false,
                         has_focus: false,
                         bordered: true,
                         h_scroll: 0,

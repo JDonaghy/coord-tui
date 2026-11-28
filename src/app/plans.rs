@@ -45,7 +45,7 @@
 //!
 //! **`?` help overlay + `/` command palette (#1124).** Populates the
 //! reusable quadraui help layer (#431 — `HelpRegistry` / `ViewHelp` /
-//! `HelpOverlayController` / `DualModePaletteController`) for this panel —
+//! `HelpOverlay` / `DualModePalette`) for this panel —
 //! the pattern other panels are meant to copy as they adopt `?`/`/`:
 //!
 //! 1. Register a [`ViewHelp`] under a `"panel:X"` key in
@@ -59,7 +59,7 @@
 //!    for free.
 //!
 //! **Why the cheatsheet is painted by a local `render_help_overlay`
-//! instead of [`HelpOverlayController::render`].** That method hardcodes
+//! instead of `HelpOverlay`'s own card paint.** That paint hardcodes
 //! the title format as `"Help — {title}"`; ms-38 contract §5b pins the
 //! *opposite* order, `"Plans — Help"`. quadraui is a dependency here, not
 //! modified in place (see CLAUDE.md) — a title-order override belongs in a
@@ -68,9 +68,9 @@
 //! rolls its own small paint routine (built from this file's existing
 //! `ListView` pattern, not quadraui's `Panel`/`TextDisplay`) to get the
 //! exact required title. The overlay's open/close *state machine*
-//! (`HelpOverlayController::handle`) is reused as-is — only rendering is
+//! (`HelpOverlay::handle_event`) is reused as-is — only rendering is
 //! local. Likewise the command palette reuses
-//! `DualModePaletteController`'s state machine verbatim and only adds a
+//! `DualModePalette`'s state machine verbatim and only adds a
 //! thin "{title} actions" section-label strip above its popup, since
 //! `PaletteItem` has no header/separator concept to hang that label on.
 #[allow(unused_imports)]
@@ -607,6 +607,8 @@ impl CoordApp {
             selection_mode: SelectionMode::Single,
             selected_path: self.plans_tree_selected.clone(),
             scroll_offset: self.plans_tree_scroll,
+            items_window: None,
+            scroll_px: None,
             style: TreeStyle::default(),
             has_focus: true,
         }
@@ -992,6 +994,9 @@ impl CoordApp {
             items,
             selected_idx,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -1012,7 +1017,7 @@ impl CoordApp {
         vec![
             Column {
                 title: "#".to_string(),
-                width: native_column_width(8.0),
+                width: ColumnWidth::Native(8.0),
                 align: ColumnAlign::Left,
             },
             Column {
@@ -1022,12 +1027,12 @@ impl CoordApp {
             },
             Column {
                 title: "Status".to_string(),
-                width: native_column_width(13.0),
+                width: ColumnWidth::Native(13.0),
                 align: ColumnAlign::Left,
             },
             Column {
                 title: "Order".to_string(),
-                width: native_column_width(16.0),
+                width: ColumnWidth::Native(16.0),
                 align: ColumnAlign::Left,
             },
         ]
@@ -1317,6 +1322,9 @@ impl CoordApp {
                 }],
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: false,
                 h_scroll: 0,
@@ -1348,6 +1356,12 @@ impl CoordApp {
             rows: Self::plans_grid_data_rows(&rows),
             selected_idx: Some(sel),
             scroll_offset: self.plans_grid_table.scroll,
+            selection_mode: SelectionMode::Single,
+            selected_indices: Vec::new(),
+            items_window: None,
+            scroll_px: None,
+            striped: false,
+            glyphs: None,
             sort: None,
             has_focus: true,
             show_scrollbar: true,
@@ -1356,9 +1370,7 @@ impl CoordApp {
             column_overrides: self.plans_grid_table.column_overrides.clone(),
             footer: None,
         };
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-        #[allow(deprecated)]
-        let layout = backend.draw_data_table(grid_rect, &table, None);
+        let layout = draw_data_table(backend, grid_rect, &table);
         *self.plans_grid_table.layout.borrow_mut() = Some((grid_rect, layout));
     }
 
@@ -1698,6 +1710,9 @@ impl CoordApp {
             items,
             selected_idx,
             scroll_offset: self.plans_detail_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -1742,6 +1757,9 @@ impl CoordApp {
             items,
             selected_idx,
             scroll_offset: self.plans_detail_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -1888,6 +1906,9 @@ impl CoordApp {
             items: vec![placeholder; row_targets.len()],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -1977,6 +1998,9 @@ impl CoordApp {
                 items,
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: false,
                 h_scroll: 0,
@@ -2327,10 +2351,10 @@ impl CoordApp {
     /// overlay — see `events.rs`'s open-trigger gate on `help_view_id`).
     ///
     /// Built directly from this file's existing `ListView`/`ListItem`
-    /// pattern rather than `HelpOverlayController::render` — see the
+    /// pattern rather than `HelpOverlay`'s own card paint — see the
     /// module docs for why (contract §5b's title-string ordering).
     pub(crate) fn render_help_overlay(&self, backend: &mut dyn Backend, main: Rect, lh: f32) {
-        if !self.help_overlay.is_open() {
+        if !self.help_overlay.open {
             return;
         }
         let Some(view_id) = self.active_view.help_view_id() else {
@@ -2412,12 +2436,15 @@ impl CoordApp {
             &ListView {
                 id: WidgetId::new("help-overlay"),
                 // Contract §5b: the exact title is "Plans — Help" (title
-                // first) — the reverse of `HelpOverlayController::render`'s
+                // first) — the reverse of `HelpOverlay`'s
                 // baked-in "Help — {title}" (see the module docs).
                 title: Some(StyledText::plain(format!("{} — Help", help.title))),
                 items,
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: true,
                 h_scroll: 0,
@@ -2456,7 +2483,7 @@ impl CoordApp {
     /// header/separator concept (unlike `ListItem`'s `Decoration::Header`),
     /// so a label baked into the item list would occupy a real,
     /// keyboard-selectable slot and would reset-select to it on every
-    /// keystroke (`DualModePaletteController::set_items` always resets
+    /// keystroke (`DualModePalette::set_items` always resets
     /// `selected` to 0).
     pub(crate) fn render_command_palette(&self, backend: &mut dyn Backend, main: Rect, lh: f32) {
         let Some(palette) = &self.command_palette else {
@@ -2494,6 +2521,9 @@ impl CoordApp {
                 }],
                 selected_idx: 0,
                 scroll_offset: 0,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: false,
                 h_scroll: 0,
@@ -2502,7 +2532,7 @@ impl CoordApp {
             },
         );
         let popup = Self::command_palette_popup_rect(main, lh);
-        palette.render(popup, backend);
+        palette.draw(popup, backend);
     }
 
     /// Registered actions for the currently active help-registry view
@@ -2528,10 +2558,11 @@ impl CoordApp {
     /// (`events.rs`), so this should always find content in practice.
     pub(crate) fn open_command_palette(&mut self) {
         let items = help_actions_to_palette_items(&self.active_view_command_actions(""), "");
-        self.command_palette = Some(
-            DualModePaletteController::new("command palette", None, items)
-                .with_id("plans-command-palette"),
-        );
+        self.command_palette = Some(PaletteModal::new(
+            "plans-command-palette",
+            "command palette",
+            items,
+        ));
     }
 
     /// Execute the command bound to `action_id` when a `/` palette entry
@@ -2692,7 +2723,7 @@ fn cheatsheet_header_item(text: &str) -> ListItem {
 /// then `description` — same fixed-character-width column layout as
 /// quadraui's own `build_cheatsheet_lines` (`compose/help_layer.rs`), so
 /// the two visually match if a reader compares this panel against a
-/// future one that DOES use the stock `HelpOverlayController::render`.
+/// future one that DOES use the stock `HelpOverlay`.
 fn cheatsheet_entry_item(label: &str, accelerator: Option<&str>, description: &str) -> ListItem {
     let text = format!(
         "  {:<28}{:<14}{}",

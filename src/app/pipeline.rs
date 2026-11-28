@@ -1531,13 +1531,13 @@ impl CoordApp {
     /// `pipeline_issues`.
     pub(crate) fn selected_nested_child_id(&self) -> Option<(String, u64)> {
         let search_offset = 1usize;
-        let section = self.pipeline_sidebar.active_section()?;
+        let section = self.pipeline_sidebar.active_section?;
         if section < search_offset {
             return None;
         }
         let state_idx = section - search_offset;
         let &state_key = self.pipeline_state_section_names.get(state_idx)?;
-        let path = self.pipeline_sidebar.selected_path(section)?;
+        let path = self.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref())?;
 
         // Resolve the base issue index (the epic at the state's base depth)
         // plus require the trailing nested-child segment. #1487: `in_progress`
@@ -2702,6 +2702,9 @@ impl CoordApp {
             }],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -2795,6 +2798,12 @@ impl CoordApp {
             rows: Self::completed_data_rows(&rows),
             selected_idx: None,
             scroll_offset: self.completed_grid.table.scroll.min(rows.len().saturating_sub(1)),
+            selection_mode: SelectionMode::Single,
+            selected_indices: Vec::new(),
+            items_window: None,
+            scroll_px: None,
+            striped: false,
+            glyphs: None,
             sort: self.completed_grid.table.sort,
             has_focus: false,
             show_scrollbar: true,
@@ -2814,9 +2823,7 @@ impl CoordApp {
             column_overrides: self.completed_grid.table.column_overrides.clone(),
             footer: None,
         };
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_data_table` — `DataTable` is on the contract, but its GTK `Primitive::layout` sizes `Content` columns with a `CharWidthMeasure` estimate instead of the real text measurement the legacy paint uses (and drops the painted-text record), so clicks could resolve against different column edges; move once the two agree.
-        #[allow(deprecated)]
-        let layout = backend.draw_data_table(body_rect, &table, None);
+        let layout = draw_data_table(backend, body_rect, &table);
         *self.completed_grid.table.layout.borrow_mut() = Some((body_rect, layout));
     }
 
@@ -3808,6 +3815,9 @@ impl CoordApp {
             items: vec![activity_item(&hint, Color::rgb(160, 160, 160))],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -3967,6 +3977,9 @@ impl CoordApp {
             items,
             selected_idx,
             scroll_offset: self.merge_queue_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -4144,6 +4157,9 @@ impl CoordApp {
             items,
             selected_idx,
             scroll_offset: self.merge_queue_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: true,
             bordered: true,
             h_scroll: 0,
@@ -5468,7 +5484,7 @@ impl CoordApp {
         }
     }
 
-    /// Build the SidebarSystem entries for the Pipeline panel.
+    /// Build the `Sidebar` entries for the Pipeline panel.
     ///
     /// One section per repo; within each repo, issues are bucketed into
     /// five lifecycle sub-groups (New → Refining → Pending → In-progress →
@@ -5511,7 +5527,7 @@ impl CoordApp {
         // refresh resets the sidebar's scroll to 0 and yanks the visible
         // area back to the top, even when the selection itself is restored
         // correctly.
-        let prev_panel_scroll = self.pipeline_sidebar.panel_scroll();
+        let prev_panel_scroll = self.pipeline_sidebar.panel_scroll;
         // Section 0 is always the FILTER form; state sections start at
         // `search_offset`.
         let search_offset = 1usize;
@@ -5522,7 +5538,7 @@ impl CoordApp {
             .pipeline_state_section_names
             .iter()
             .enumerate()
-            .map(|(i, &name)| (name, self.pipeline_sidebar.is_collapsed(i + search_offset)))
+            .map(|(i, &name)| (name, self.pipeline_sidebar.sections.get(i + search_offset).is_some_and(|s| s.collapsed)))
             .collect();
 
         // Collect unique repo keys in stable order.
@@ -5606,27 +5622,23 @@ impl CoordApp {
 
         // #2452: row shape per section, captured alongside `sidebar` below —
         // mirrors `mod.rs`'s `board_section_rows` exactly (same
-        // `(TreePath, is_header)` shape, same reason: `SidebarSystem` exposes
-        // no `rows()` getter, so `scroll_pipeline_selection_into_view` has no
-        // other way to work out how far down the panel a row sits). Indexed
+        // `(TreePath, is_header)` shape, read by
+        // `scroll_pipeline_selection_into_view` the same way). Indexed
         // by section, so it has to cover every section, form section (0)
         // included — that slot stays an empty vec (the FILTER form's height
         // comes from its field count instead, same as Board's).
         let defs_len = defs.len();
         let mut section_rows: Vec<Vec<(TreePath, bool)>> = vec![Vec::new(); defs_len];
-        let mut branch_indents = std::collections::HashMap::new();
 
-        let mut sidebar = SidebarSystem::new(defs);
-        sidebar.set_navigation_mode(NavigationMode::Selection);
-        sidebar.set_allow_collapse(true);
-        sidebar.set_scroll_mode(ScrollMode::WholePanel);
+        let mut sidebar = selection_sidebar(PIPELINE_SIDEBAR_ID, &defs);
+        sidebar.scroll_mode = ScrollMode::WholePanel;
 
         // Populate search form (section 0).
-        sidebar.set_form(
-            0,
-            self.pipeline_search
-                .form("pipeline-search", "Filter issues… (#4 = number only)"),
-        );
+        if let Some(f) = sidebar.form_mut(0) {
+            *f = self
+                .pipeline_search
+                .form("pipeline-search", "Filter issues… (#4 = number only)");
+        }
 
         // Colour palette per lifecycle state — mirrors the Board's
         // Backlog / Refining / Refined / In-flight / Completed palette
@@ -5683,10 +5695,9 @@ impl CoordApp {
                     // letter badge any more (#1487): the repo node above it
                     // already names the repo, and a repo group can't be
                     // mixed-repo by construction.
-                    sidebar.set_section_badge(
-                        section_idx,
-                        Some(StyledText::plain(format!("({})", active_flat.len()))),
-                    );
+                    if let Some(s) = sidebar.sections.get_mut(section_idx) {
+                        s.badge = Some(StyledText::plain(format!("({})", active_flat.len())));
+                    }
                     for (gi, (group_key, issue_idxs)) in active_by_repo.iter().enumerate() {
                         let is_expanded = self
                             .pipeline_lifecycle_expanded
@@ -5884,10 +5895,9 @@ impl CoordApp {
                         _ => unreachable!("invalid lifecycle key in state_sections"),
                     };
                     let total: usize = repo_groups.iter().map(|(_, v)| v.len()).sum();
-                    sidebar.set_section_badge(
-                        section_idx,
-                        Some(StyledText::plain(format!("({})", total))),
-                    );
+                    if let Some(s) = sidebar.sections.get_mut(section_idx) {
+                        s.badge = Some(StyledText::plain(format!("({})", total)));
+                    }
                     let milestone_grouped = lc_key == "new";
                     for (ri, (repo_key, issue_idxs)) in repo_groups.iter().enumerate() {
                         // Repo sub-header: expand/collapse keyed by
@@ -6240,11 +6250,6 @@ impl CoordApp {
                     .map(|r| (r.path.clone(), matches!(r.decoration, Decoration::Header)))
                     .collect();
             }
-            branch_indents.extend(
-                rows.iter()
-                    .filter(|r| r.is_expanded.is_some())
-                    .map(|r| ((section_idx, r.path.clone()), r.indent)),
-            );
             sidebar.set_rows(section_idx, rows);
         }
         // #1197: publish this pass's epic-row identity map (stale entries
@@ -6252,12 +6257,11 @@ impl CoordApp {
         // issues move between sections).
         self.pipeline_epic_row_keys = epic_row_keys;
         self.pipeline_section_rows = section_rows;
-        self.pipeline_branch_indents = branch_indents;
 
         // Default-select the first issue in the first non-empty state section.
-        if sidebar.active_section().is_none() && !state_sections.is_empty() {
+        if sidebar.active_section.is_none() && !state_sections.is_empty() {
             let section_idx = search_offset; // first state section
-            sidebar.set_active_section(Some(section_idx));
+            sidebar.active_section = Some(section_idx);
             // Done / Refining / Pending use path [group_idx, issue_idx] (2-level).
             // New and In-progress use path [group_idx, milestone_idx, issue_idx]
             // (3-level — New since #668, In-progress since #1069).
@@ -6268,7 +6272,9 @@ impl CoordApp {
             } else {
                 vec![0u16, 0u16]
             };
-            sidebar.set_selected_path(section_idx, Some(default_path));
+            if let Some(t) = sidebar.tree_mut(section_idx) {
+                t.selected_path = Some(default_path);
+            }
         }
 
         self.pipeline_repo_names = repos;
@@ -6307,12 +6313,15 @@ impl CoordApp {
         // — the default-select-first-row block's own selection stands.
         if let Some((repo, num)) = prev_sel {
             if let Some((section_idx, path, sel)) = self.locate_pipeline_selection(&repo, num) {
-                self.pipeline_sidebar.set_active_section(Some(section_idx));
-                self.pipeline_sidebar
-                    .set_selected_path(section_idx, Some(path));
+                self.pipeline_sidebar.active_section = Some(section_idx);
+                if let Some(t) = self.pipeline_sidebar.tree_mut(section_idx) {
+                    t.selected_path = Some(path);
+                }
                 self.pipeline_sel = sel;
-            } else if let Some(section) = self.pipeline_sidebar.active_section() {
-                self.pipeline_sidebar.set_selected_path(section, None);
+            } else if let Some(section) = self.pipeline_sidebar.active_section {
+                if let Some(t) = self.pipeline_sidebar.tree_mut(section) {
+                    t.selected_path = None;
+                }
             }
         }
         // Sync `pipeline_sel` to the sidebar's actual selection.
@@ -6361,11 +6370,14 @@ impl CoordApp {
         for (i, &state_key) in self.pipeline_state_section_names.iter().enumerate() {
             match prev_state_collapsed.get(state_key) {
                 Some(&was_collapsed) => {
-                    self.pipeline_sidebar
-                        .set_collapsed(i + search_offset, was_collapsed);
+                    if let Some(s) = self.pipeline_sidebar.sections.get_mut(i + search_offset) {
+                        s.collapsed = was_collapsed;
+                    }
                 }
                 None if state_key == "done" => {
-                    self.pipeline_sidebar.set_collapsed(i + search_offset, true);
+                    if let Some(s) = self.pipeline_sidebar.sections.get_mut(i + search_offset) {
+                        s.collapsed = true;
+                    }
                 }
                 None => {}
             }
@@ -6374,7 +6386,7 @@ impl CoordApp {
         // top on every refresh.  Done after selection restore so the active-
         // section's keyboard nav state is set up correctly before scroll is
         // applied.
-        self.pipeline_sidebar.set_panel_scroll(prev_panel_scroll);
+        self.pipeline_sidebar.panel_scroll = prev_panel_scroll.max(0.0);
         // Auto-focus: when the selected issue changes (or on first render
         // with no previous selection), default to the smart stage rather
         // than leaving `pipeline_focused_stage = None`.  When the same
@@ -6390,11 +6402,13 @@ impl CoordApp {
         }
         // Re-apply filter focus after rebuild so the cursor survives auto-refresh.
         if self.pipeline_search.focused {
-            self.pipeline_sidebar.focus_form(0, true);
+            if let Some(s) = self.pipeline_sidebar.sections.get_mut(0) {
+                s.form_focused = true;
+            }
         }
     }
 
-    /// Resolve the SidebarSystem's current selection to a `pipeline_issues`
+    /// Resolve the Pipeline sidebar's current selection to a `pipeline_issues`
     /// index.
     ///
     /// Path depth varies by state:
@@ -6417,13 +6431,13 @@ impl CoordApp {
     pub(crate) fn selected_pipeline_index(&self) -> Option<usize> {
         // Section 0 is the FILTER form; state sections start at search_offset.
         let search_offset = 1usize;
-        let section = self.pipeline_sidebar.active_section()?;
+        let section = self.pipeline_sidebar.active_section?;
         if section < search_offset {
             return None; // search section selected, not a state section
         }
         let state_idx = section - search_offset;
         let &state_key = self.pipeline_state_section_names.get(state_idx)?;
-        let path = self.pipeline_sidebar.selected_path(section)?;
+        let path = self.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref())?;
 
         if state_key == "new" {
             // #668: 3-level path [repo_idx, milestone_idx, issue_idx].
@@ -10445,10 +10459,9 @@ impl CoordApp {
     }
 
     /// Height, in main-axis units, of one Pipeline sidebar row. Mirrors
-    /// `mod.rs`'s `board_row_height` exactly — same quadraui
-    /// `sidebar_system::body_measure` rule (`Decoration::Header` rows measure
-    /// `lh * 1.2`, everything else `lh * 1.4`, both rounded) — Pipeline and
-    /// Board share one `SidebarSystem` implementation, so the measurement
+    /// `mod.rs`'s `board_row_height` exactly (`Decoration::Header` rows
+    /// measure `lh * 1.2`, everything else `lh * 1.4`, both rounded) —
+    /// Pipeline and Board are both a quadraui `Sidebar`, so the measurement
     /// rule is identical; only the row data backing it differs.
     fn pipeline_row_height(lh: f32, is_header: bool) -> f32 {
         if is_header {
@@ -10462,7 +10475,7 @@ impl CoordApp {
     /// header row), as quadraui's `ScrollMode::WholePanel` sizing computes
     /// it. Mirrors `board_section_content_height`.
     fn pipeline_section_content_height(&self, s: usize, lh: f32) -> f32 {
-        if self.pipeline_sidebar.is_collapsed(s) {
+        if self.pipeline_sidebar.sections.get(s).is_some_and(|s| s.collapsed) {
             return 0.0;
         }
         if let Some(form) = self.pipeline_sidebar.form(s) {
@@ -10486,7 +10499,7 @@ impl CoordApp {
     /// Board's, so the same reconstruction (row heights + section content
     /// heights, backed by the geometry stashed at paint time) applies
     /// unchanged — see that method's doc comment for why this can't just
-    /// call a `SidebarSystem::reveal` API (it doesn't exist yet).
+    /// call `Sidebar::reveal`.
     ///
     /// Deliberately does NOT replicate Board's `board_reveal_hidden_count`
     /// windowing (the `⋮ N more above` marker-row collapse that keeps the
@@ -10505,10 +10518,10 @@ impl CoordApp {
         if rect.height <= 0.0 || lh <= 0.0 {
             return;
         }
-        let Some(section) = self.pipeline_sidebar.active_section() else {
+        let Some(section) = self.pipeline_sidebar.active_section else {
             return;
         };
-        let Some(path) = self.pipeline_sidebar.selected_path(section).cloned() else {
+        let Some(path) = self.pipeline_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).cloned() else {
             return;
         };
 
@@ -10517,12 +10530,12 @@ impl CoordApp {
         // them), so they cost nothing.
         let mut y = 0.0_f32;
         for s in 0..section {
-            if !self.pipeline_sidebar.is_section_visible(s) {
+            if !self.pipeline_sidebar.sections.get(s).is_none_or(|s| s.visible) {
                 continue;
             }
             y += header_size + self.pipeline_section_content_height(s, lh);
         }
-        if !self.pipeline_sidebar.is_section_visible(section) {
+        if !self.pipeline_sidebar.sections.get(section).is_none_or(|s| s.visible) {
             return;
         }
         y += header_size;
@@ -10544,7 +10557,7 @@ impl CoordApp {
             return;
         };
 
-        let scroll = self.pipeline_sidebar.panel_scroll();
+        let scroll = self.pipeline_sidebar.panel_scroll;
         let new = if y < scroll {
             y
         } else if y + row_h > scroll + rect.height {
@@ -10552,7 +10565,7 @@ impl CoordApp {
         } else {
             return;
         };
-        self.pipeline_sidebar.set_panel_scroll(new.max(0.0));
+        self.pipeline_sidebar.panel_scroll = new.max(0.0);
     }
 
     /// Contract §2f, applied per-scope (#2284 AC 4): select the active

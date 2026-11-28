@@ -58,13 +58,13 @@ impl ShellApp for CoordApp {
             backend
                 .style()
                 .with_status_bar_cell_gap(0.0)
-                .with_status_bar_cell_overflow(quadraui::StatusBarOverflow::Clip),
+                .with_status_bar_cell_overflow(quadraui::CellOverflow::Clip),
         );
         backend.set_editor_font(EDITOR_FONT_FAMILY, EDITOR_FONT_SIZE_PT);
         backend.set_ui_font(&format!("{EDITOR_FONT_FAMILY} {EDITOR_FONT_SIZE_PT}"));
     }
 
-    fn render_content(&self, backend: &mut dyn Backend, layout: &AppShellLayout) {
+    fn render_content(&self, backend: &mut dyn Backend, layout: &ShellLayout) {
         // Push the active theme to the backend at the start of every frame.
         // This ensures (a) content is always painted with the user's chosen
         // palette, and (b) the shell chrome (drawn by ShellAdapter *before*
@@ -112,14 +112,18 @@ impl ShellApp for CoordApp {
             match self.active_view {
                 SidebarView::Board => {
                     // #2282 (ms-65 §2f): stash the tree's painted geometry and
-                    // the backend's own MSV header metric so reveal-on-activate
+                    // the painted section-header height so reveal-on-activate
                     // — which runs on the event path, with no `Backend` handle
                     // — can compute a row's panel offset. Same render-then-act
                     // discipline as `last_main_visible_rows` above.
+                    let layout = draw_sidebar(
+                        backend,
+                        sidebar_rect,
+                        &self.board_sidebar,
+                        &self.board_sidebar_state,
+                    );
                     self.last_sidebar_geom
-                        // TODO(quadraui widget contract): legacy `Backend::msv_metrics` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
-                        .set(Some((sidebar_rect, lh, backend.msv_metrics().header_size)));
-                    self.board_sidebar.render(backend, sidebar_rect);
+                        .set(Some((sidebar_rect, lh, sidebar_header_size(&layout))));
                 }
                 SidebarView::Machines => {
                     draw_list_view(backend, sidebar_rect, &self.machines_list(true));
@@ -130,10 +134,14 @@ impl ShellApp for CoordApp {
                     // into_view` runs on the event path (no `Backend`
                     // handle), so this render-then-act stash is its only
                     // source for the metrics its scroll-offset math needs.
+                    let layout = draw_sidebar(
+                        backend,
+                        sidebar_rect,
+                        &self.pipeline_sidebar,
+                        &self.pipeline_sidebar_state,
+                    );
                     self.last_pipeline_sidebar_geom
-                        // TODO(quadraui widget contract): legacy `Backend::msv_metrics` — move to `DrawsPrimitives` when quadraui ports MultiSectionView (multi-section-view group).
-                        .set(Some((sidebar_rect, lh, backend.msv_metrics().header_size)));
-                    self.pipeline_sidebar.render(backend, sidebar_rect);
+                        .set(Some((sidebar_rect, lh, sidebar_header_size(&layout))));
                 }
                 SidebarView::Settings => {
                     // #237: settings is one full-width form — no category
@@ -246,8 +254,7 @@ impl ShellApp for CoordApp {
                 // non-split case".
                 let panes = self.board_panes();
                 let tree = panes.split_tree(PanelScope::Board);
-                // TODO(quadraui widget contract): legacy `Backend::split_tree_layout` — move to `DrawsPrimitives` when quadraui ports SplitTree (split group).
-                let split_layout = backend.split_tree_layout(m, &tree);
+                let split_layout = backend.layout_primitive(m, &tree);
                 let leaves: Vec<Rect> = split_layout
                     .leaves
                     .iter()
@@ -288,12 +295,13 @@ impl ShellApp for CoordApp {
                 self.render_machine_sparklines(backend, chart_rect, lh);
             }
             SidebarView::Settings => {
-                // Build form for the current category and render via
-                // FormController (handles scrollbar + layout).
-                let form = self.build_settings_form();
-                let mut fc = self.settings_form.borrow_mut();
-                fc.set_form(form);
-                fc.render_and_cache(backend, m);
+                // Build the form for the current category and paint it as
+                // a `ScrolledForm` (the form plus its scrollbar).
+                ScrolledForm::new(self.build_settings_form()).draw(
+                    &self.settings_form_state.borrow(),
+                    backend,
+                    m,
+                );
             }
             SidebarView::Pipeline => {
                 // Watch overlay takes over the entire main panel when active —
@@ -348,8 +356,7 @@ impl ShellApp for CoordApp {
                         };
                         let strip_rect = pipeline_detail_pv_rect_strip(cr, lh);
                         let render_view = pipeline_view_for_render(&pv);
-                        // TODO(quadraui widget contract): legacy `Backend::draw_pipeline_view` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
-                        backend.draw_pipeline_view(strip_rect, &render_view);
+                        let _ = draw_unhovered(backend, strip_rect, &render_view);
                         Rect::new(
                             cr.x,
                             cr.y + strip_rect.height,
@@ -398,9 +405,11 @@ impl ShellApp for CoordApp {
                                 backend.draw_dyn(bar_rect, &toolbar, &hover);
                             }
                             if let Some(view) = self.build_pipeline_widget() {
-                                backend
-                                    // TODO(quadraui widget contract): legacy `Backend::draw_pipeline_view` — move to `DrawsPrimitives` when quadraui ports PipelineView (pipeline group).
-                                    .draw_pipeline_view(pv_rect, &pipeline_view_for_render(&view));
+                                let _ = draw_unhovered(
+                                    backend,
+                                    pv_rect,
+                                    &pipeline_view_for_render(&view),
+                                );
                             } else {
                                 draw_list_view(backend, pv_rect, &self.pipeline_placeholder_list());
                             }
@@ -504,8 +513,7 @@ impl ShellApp for CoordApp {
                                     visible as f32,
                                     1.0,
                                 );
-                                // TODO(quadraui widget contract, scrollbar group): `Backend::draw_scrollbar` — `Scrollbar` is on the contract, but its pixel `Primitive::paint` paints at full opacity, dropping the GTK idle fade the legacy paint applies; move to `draw_dyn` once the contract paint honours the fade.
-                                backend.draw_scrollbar(sb_track, &vsb);
+                                let _ = draw_unhovered(backend, sb_track, &vsb);
                                 Some(vsb)
                             } else {
                                 None
@@ -644,6 +652,9 @@ impl ShellApp for CoordApp {
                             items: vec![item],
                             selected_idx: 0,
                             scroll_offset: 0,
+                            items_window: None,
+                            scroll_px: None,
+                            striped: false,
                             has_focus: false,
                             bordered: false,
                             h_scroll: 0,
@@ -658,8 +669,7 @@ impl ShellApp for CoordApp {
             }
             // #638: Kanban view — render the Board widget into the full main rect.
             SidebarView::Kanban => {
-                // TODO(quadraui widget contract): legacy `Backend::draw_board` — move to `DrawsPrimitives` when quadraui ports Board (board group).
-                let layout = backend.draw_board(m, &self.kanban_model);
+                let layout = draw_unhovered(backend, m, &self.kanban_model);
                 *self.kanban_layout.borrow_mut() = Some(layout);
             }
             // #737: Merge Queue panel — render the entry list in the main area.
@@ -722,6 +732,9 @@ impl ShellApp for CoordApp {
                         items: Vec::new(),
                         selected_idx: 0,
                         scroll_offset: 0,
+                        items_window: None,
+                        scroll_px: None,
+                        striped: false,
                         has_focus: false,
                         bordered: true,
                         h_scroll: 0,
@@ -734,7 +747,7 @@ impl ShellApp for CoordApp {
                 // the live overlay width — see `last_chat_panel_cols`'s doc
                 // comment for why "approximately" is fine here.
                 self.last_chat_panel_cols.set(m.width as usize);
-                chat.render(backend, m);
+                chat.draw(backend, m);
             }
         }
 
@@ -830,7 +843,7 @@ impl ShellApp for CoordApp {
     /// Sync `active_view` when the shell switches panels via activity bar click.
     ///
     /// §2 (#782): Settings lives in `with_bottom_items`, so clicking it
-    /// fires `AppShellEvent::BottomItemClicked { id }` rather than
+    /// fires `ShellEvent::BottomItemClicked { id }` rather than
     /// `PanelChanged`.  Both variants are handled here.
     ///
     /// quadraui#1109: this overrides `on_shell_event_ctx` (the
@@ -840,7 +853,7 @@ impl ShellApp for CoordApp {
     /// shell-state mutations. The routing logic itself lives in
     /// `route_panel_changed` so it stays reachable from tests without a
     /// live `ShellContext` (only `ShellAdapter` can construct one).
-    fn on_shell_event_ctx(&mut self, event: &AppShellEvent, _ctx: &ShellContext) {
+    fn on_shell_event_ctx(&mut self, event: &ShellEvent, _ctx: &ShellContext) {
         self.route_panel_changed(event);
     }
 
@@ -930,7 +943,7 @@ impl ShellApp for CoordApp {
                             self.last_chat_panel_cols.get().max(40),
                         );
                         if let Some(ref mut chat) = self.inject_chat {
-                            chat.set_transcript(transcript);
+                            chat.chat.transcript = transcript;
                         }
                         self.chat_transcript_cache_key = Some(key);
                         // Activity stamp drives the busy indicator below.
@@ -1001,7 +1014,7 @@ impl ShellApp for CoordApp {
                         } else {
                             format!("  {} → #{}{}", label, issue_number, suffix)
                         };
-                        chat.set_status(StyledText::plain(target));
+                        chat.chat.status = StyledText::plain(target);
                     }
                 }
             }
@@ -1015,7 +1028,7 @@ impl ShellApp for CoordApp {
                 .map(|t| t.elapsed() < std::time::Duration::from_secs(2))
                 .unwrap_or(false);
             if let Some(ref mut chat) = self.inject_chat {
-                chat.set_busy(busy);
+                chat.chat.busy = busy;
             }
             if busy {
                 self.chat_spinner_throttle = self.chat_spinner_throttle.wrapping_add(1);
@@ -1593,9 +1606,15 @@ pub(crate) fn pipeline_view_for_render(view: &QuiPipelineView) -> QuiPipelineVie
 /// #303: Height of the pipeline button bar strip above the stage row when
 /// any stage has a dispatchable action.  Zero when the bar is empty (no
 /// vertical space stolen from the stage row in that case).
+///
+/// Rounded for the same reason as `detail_tab_bar_height` (#464): the
+/// stage row below it starts where the bar ends, and on a cell grid the
+/// `PipelineView` paints its boxes on whole cells while its click geometry
+/// keeps the rect it was handed — a half-cell origin would put every
+/// box's painted bottom row outside its own hit region.
 pub(crate) fn pipeline_action_bar_height(has_button: bool, lh: f32) -> f32 {
     if has_button {
-        lh * 1.5
+        (lh * 1.5).round()
     } else {
         0.0
     }
@@ -1750,6 +1769,9 @@ pub(crate) fn issue_body_list(
         items,
         selected_idx: 0,
         scroll_offset,
+        items_window: None,
+        scroll_px: None,
+        striped: false,
         has_focus: false,
         bordered: false,
         h_scroll: 0,
@@ -1803,12 +1825,12 @@ impl CoordApp {
     /// can drive it directly with no `ShellContext` in hand (only
     /// `ShellAdapter` can construct one; see
     /// `legacy_panel_usage_id_lands_on_reports_not_a_dead_view`).
-    pub(crate) fn route_panel_changed(&mut self, event: &AppShellEvent) {
+    pub(crate) fn route_panel_changed(&mut self, event: &ShellEvent) {
         // §3 (#782): any activity-bar navigation resets keyboard focus back
         // to Sidebar so Ctrl-W h/l starts from a known state.
         let panel_id_str = match event {
-            AppShellEvent::PanelChanged { panel_id } => panel_id.as_str(),
-            AppShellEvent::BottomItemClicked { id } => id.as_str(),
+            ShellEvent::PanelChanged { panel_id } => panel_id.as_str(),
+            ShellEvent::BottomItemClicked { id } => id.as_str(),
             _ => return,
         };
         self.focused_region = FocusedRegion::Sidebar;
@@ -1881,9 +1903,7 @@ impl CoordApp {
         // an explicit "leave this view" choice (same reasoning as the
         // `terminal_return_view` clear above), so close them rather than
         // let them silently bleed into the newly-active view's screen.
-        if self.help_overlay.is_open() {
-            self.help_overlay.close_action();
-        }
+        self.help_overlay.apply(HelpOverlayAction::Closed);
         self.command_palette = None;
     }
 
@@ -1984,6 +2004,9 @@ impl CoordApp {
             items: vec![activity_item(&msg, color)],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -2049,6 +2072,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -2091,6 +2117,7 @@ impl CoordApp {
                     })
                     .collect(),
                 scroll_offset: 0,
+                items_window: None,
                 // The divider is exactly as tall as its rect, so there is
                 // nothing to scroll — but `auto_scroll` defaults to `true`
                 // and would let the rasteriser re-pin the view, so it is
@@ -2990,6 +3017,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -3144,6 +3174,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: self.pipeline_stage_content_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -4763,6 +4796,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll,
@@ -4892,16 +4928,12 @@ pub(crate) fn log_source_label(a: &Assignment) -> String {
     }
 }
 
-/// Paint a sidebar `tree` at `rect`. On a cell grid it goes through the
-/// `TreeView` contract with no scrollbar column, so every column goes to the
+/// Paint a sidebar `tree` at `rect` through the `TreeView` contract. On a
+/// cell grid it paints no scrollbar column, so every column goes to the
 /// rows, as the legacy TUI paint did.
 fn draw_sidebar_tree(backend: &mut dyn Backend, rect: Rect, mut tree: TreeView) {
     if backend.cell_grid() {
         tree.style.show_scrollbar = false;
-        backend.draw_dyn(rect, &tree, &InteractionState::new());
-    } else {
-        // TODO(quadraui widget contract, list/tree/table group, quadraui #2609, #3038): legacy `Backend::draw_tree` on pixel backends only — the contract `TreeView` pixel layout reads `Style::default()` instead of the backend's live style and row height, and its contract scrollbar paints without the idle fade; move once both match the legacy GTK paint.
-        #[allow(deprecated)]
-        backend.draw_tree(rect, &tree);
     }
+    backend.draw_dyn(rect, &tree, &InteractionState::new());
 }

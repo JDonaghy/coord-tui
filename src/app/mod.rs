@@ -38,16 +38,18 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 
-use quadraui::compose::app_shell::{AppShellEvent, AppShellLayout, PanelDefinition};
-use quadraui::compose::form_controller::{FormController, FormControllerAction};
-use quadraui::compose::sidebar_system::{
-    NavigationMode, SidebarEvent, SidebarSectionDef, SidebarSystem,
+use quadraui::compose::app_shell::{PanelDefinition, ShellEvent, ShellLayout};
+use quadraui::compose::{
+    ChatEvent, HelpOverlay, NavigationMode, Sidebar, SidebarAction, SidebarLayout,
+    SidebarSectionDef, SidebarState,
 };
 use quadraui::primitives::context_menu::{
     ContextMenu, ContextMenuHit, ContextMenuItem as QuiContextMenuItem, ContextMenuItemMeasure,
     ContextMenuLayout, ContextMenuPlacement,
 };
-use quadraui::primitives::form::{FieldKind, Form, FormEvent, FormField};
+use quadraui::primitives::form::{
+    FieldKind, Form, FormEvent, FormField, FormState, ScrolledForm,
+};
 use quadraui::primitives::toast::{Toast, ToastCorner, ToastOverlay, ToastSeverity};
 
 use crate::settings::{
@@ -55,7 +57,7 @@ use crate::settings::{
 };
 use quadraui::accelerator::{parse_key_binding, ParsedBinding};
 use quadraui::{
-    Backend, Badge, Chart, ChartKind, ChatController, ChatControllerAction, ChatRole, ChatTurn,
+    Backend, Badge, Chart, ChartKind, ChatRole, ChatTurn,
     Color, Decoration,
     Dialog, DialogButton, DialogHit, DialogInput, DialogLayout, DialogMeasure,
     DialogSeverity, DialogTextInput,
@@ -103,11 +105,11 @@ use quadraui::{
     // upstream — this feature adds nothing to quadraui.
     FileDialogOptions, HeaderAction, Icon,
     // #953: Terminal-view left-pane machine tree — the app's first direct
-    // `TreeView` sidebar (bypassing `SidebarSystem`).
+    // `TreeView` sidebar (bypassing the `Sidebar` widget).
     SelectionMode, TreePath, TreeStyle, TreeView,
     // #1124: reusable quadraui help layer (#431) — `?` cheatsheet registry
     // + `/` command palette. See `plans.rs` module docs.
-    DualModePaletteAction, DualModePaletteController, HelpAction, HelpNote, HelpOverlayController,
+    DualModePaletteAction, HelpAction, HelpNote,
     Handled, HelpOverlayAction, HelpRegistry, ViewHelp, filter_help_actions, help_actions_to_palette_items,
     PALETTE_CHROME_ROWS,
     // #2288 (ms-65 §9): the side-by-side pane split. `SplitTreeLayout` is
@@ -195,8 +197,8 @@ use self::doc_tabs::{
 };
 #[allow(unused_imports)]
 use self::contract::{
-    draw_list_view, draw_placed_context_menu, draw_placed_dialog, native_column_width,
-    toolbar_hover,
+    data_table_layout, draw_data_table, draw_list_view, draw_placed_context_menu,
+    draw_placed_dialog, draw_unhovered, toolbar_hover, InjectChat, PaletteModal,
 };
 #[allow(unused_imports)]
 use quadraui::DrawsPrimitives;
@@ -609,7 +611,7 @@ impl SidebarFilter {
 // ─── #2642: Ctrl+E doc-tab open-tabs picker ────────────────────────────────────
 
 /// State for the Ctrl+E "open tabs" quick-pick — composes quadraui's
-/// `Palette` primitive via `DualModePaletteController`, the same wrapper
+/// `Palette` primitive via `DualModePalette`, the same wrapper
 /// `command_palette` (see `plans.rs`) and, since #16, the Ctrl+P issue
 /// finder (`CoordApp::issue_finder` below) drive too — one shared modal
 /// primitive behind every quick-pick overlay in this app instead of a
@@ -627,7 +629,7 @@ struct DocTabPickerState {
     /// callback act on the SAME pane the rows were built from. Meaningless
     /// for Pipeline (`PaneSet` never splits there) — always `0`.
     pane: usize,
-    palette: DualModePaletteController,
+    palette: PaletteModal,
 }
 
 // ─── Detail panel tabs ────────────────────────────────────────────────────────
@@ -1563,6 +1565,9 @@ fn plain_list(id: &str, msg: &str, scroll_offset: usize) -> ListView {
         items: vec![item],
         selected_idx: 0,
         scroll_offset,
+        items_window: None,
+        scroll_px: None,
+        striped: false,
         has_focus: false,
         bordered: true,
         h_scroll: 0,
@@ -1707,6 +1712,9 @@ fn build_summary_list_view(summaries: Vec<SessionSummary>, scroll_offset: usize)
         items,
         selected_idx: 0,
         scroll_offset,
+        items_window: None,
+        scroll_px: None,
+        striped: false,
         has_focus: false,
         bordered: true,
         h_scroll: 0,
@@ -2454,8 +2462,15 @@ pub struct CoordApp {
     workspace: Workspace,
     /// Which top-level view is currently shown in the content area.
     active_view: SidebarView,
-    /// SidebarSystem for the Board view — repo sections with issue rows.
-    board_sidebar: SidebarSystem,
+    /// The Board view's sidebar — repo sections with issue rows. A
+    /// controlled `Sidebar`: every change a gesture asks for comes back as a
+    /// `SidebarAction` that `drive_sidebar` stores onto it.
+    board_sidebar: Sidebar,
+    /// The interaction state quadraui's `Sidebar` keeps for
+    /// `board_sidebar` (each body widget's cursor latches, a scrollbar drag
+    /// in flight). A `RefCell` so the `&self` paint path can lend it to
+    /// the widget.
+    board_sidebar_state: std::cell::RefCell<SidebarState>,
     /// Ordered list of repo names used as section IDs in the sidebar.
     /// Rebuilt on each data refresh to stay in sync with `board_sidebar`.
     board_repo_names: Vec<String>,
@@ -2553,15 +2568,11 @@ pub struct CoordApp {
     /// whether it is a `Decoration::Header` row (which quadraui's MSV measures
     /// at `lh * 1.2` rather than `lh * 1.4`).
     ///
-    /// `SidebarSystem` exposes no `rows()` getter, so reveal-on-activate has
-    /// no other way to work out how far down the panel a given row sits.
+    /// Reveal-on-activate reads this, not the rebuilt tree, to work out how
+    /// far down the panel a given row sits.
     /// Sections whose body is a `Form` (the FILTER box) hold an empty vec —
     /// their height comes from the form's field count instead.
     board_section_rows: Vec<Vec<(TreePath, bool)>>,
-    /// Indent of each branch row (`is_expanded.is_some()`) of the last
-    /// `rebuild_board_sidebar` pass, keyed by `(section, path)` — what
-    /// `tui_chevron_click_guard` sizes a cell-backend chevron hit region from.
-    board_branch_indents: std::collections::HashMap<(usize, TreePath), u16>,
     /// #2282 (ms-65 §2f): per-repo tree windowing for reveal-on-activate.
     ///
     /// Contract §2f pins that the `⌕ Filter issues…` box "stays fixed at the
@@ -2572,7 +2583,6 @@ pub struct CoordApp {
     /// collapsed into a single `⋮ N more above` marker row, computed by
     /// [`Self::board_reveal_hidden_count`] so the target row lands inside the
     /// viewport with the panel unscrolled. Absent key ⇒ no windowing.
-    /// (quadraui#595's `SidebarSystem::reveal` will subsume this once landed.)
     board_tree_hidden_above: std::collections::HashMap<String, usize>,
     /// #2282 (ms-65 §2f): the Board sidebar tree's last-painted geometry —
     /// `(rect, line_height, msv_header_size)`.
@@ -2584,8 +2594,11 @@ pub struct CoordApp {
     /// assumed so the arithmetic stays exact on GTK/macOS, not just TUI.
     last_sidebar_geom: std::cell::Cell<Option<(Rect, f32, f32)>>,
     // ── Pipeline panel state ────────────────────────────────────────────
-    /// SidebarSystem listing tracked issues grouped by state → (optionally) repo.
-    pipeline_sidebar: SidebarSystem,
+    /// The Pipeline view's sidebar, listing tracked issues grouped by state →
+    /// (optionally) repo. Controlled the same way as `board_sidebar`.
+    pipeline_sidebar: Sidebar,
+    /// `pipeline_sidebar`'s interaction state; see `board_sidebar_state`.
+    pipeline_sidebar_state: std::cell::RefCell<SidebarState>,
     /// Ordered list of repo keys (coord_repo or repo_slug) present in the
     /// current pipeline.  Used by `pipeline_groups_for_repo` and helpers;
     /// no longer maps 1-to-1 to sidebar section indices (that is
@@ -2640,13 +2653,9 @@ pub struct CoordApp {
     pipeline_epic_row_keys: std::collections::HashMap<(usize, TreePath), (String, u64)>,
     /// #2452: row shape of the last `rebuild_pipeline_sidebar` pass, indexed
     /// by sidebar section — mirrors `board_section_rows` exactly (same
-    /// `(TreePath, is_header)` shape, same reason: `SidebarSystem` exposes no
-    /// `rows()` getter, so `reveal_pipeline_active_doc`'s scroll-into-view has
-    /// no other way to work out how far down the panel a given row sits).
+    /// `(TreePath, is_header)` shape, read by `reveal_pipeline_active_doc`'s
+    /// scroll-into-view the same way).
     pipeline_section_rows: Vec<Vec<(TreePath, bool)>>,
-    /// Branch rows of the last `rebuild_pipeline_sidebar` pass — the
-    /// Pipeline counterpart of `board_branch_indents`.
-    pipeline_branch_indents: std::collections::HashMap<(usize, TreePath), u16>,
     /// #2452: the Pipeline sidebar tree's last-painted geometry —
     /// `(rect, line_height, msv_header_size)`. Mirrors `last_sidebar_geom`
     /// (Board's own copy); kept separate because the two panels paint on
@@ -2682,7 +2691,7 @@ pub struct CoordApp {
     /// Log tab so j/k scroll falls through to the Log-tab arms (#308).
     inject_opened_from_log_tab: bool,
     /// Chat overlay for mid-flight worker guidance. `None` when closed.
-    inject_chat: Option<ChatController>,
+    inject_chat: Option<InjectChat>,
     /// Animation frame counter for the inject chat spinner.
     inject_spinner_frame: usize,
     /// Which tab is active in the Pipeline detail pane.
@@ -2947,7 +2956,7 @@ pub struct CoordApp {
     /// bar's "Fleet health…" right-click menu entry (`fleet_health.rs`).
     /// Owns ALL input while open (Esc closes it; see `events.rs`), same
     /// posture as `help_overlay` below. A plain `bool` rather than a
-    /// quadraui `HelpOverlayController`: the content here (per-machine check
+    /// quadraui `HelpOverlay`: the content here (per-machine check
     /// rows grouped under a machine header, sourced from `self.data.
     /// fleet_health`) doesn't fit that controller's notes/actions shape.
     fleet_health_overlay_open: bool,
@@ -3241,7 +3250,7 @@ pub struct CoordApp {
     /// frame.  Defaults to 120.  Read back by `chat_transcript_from_pool`'s
     /// callers so assistant markdown prose is wrapped through
     /// `render_markdown_to_styled_wrapped` at (approximately) the live
-    /// overlay width instead of the unwrapped variant — the `ChatController`
+    /// overlay width instead of the unwrapped variant — the `Chat`
     /// itself re-wraps every row to its exact rect at paint time regardless,
     /// so this only needs to be in the right ballpark, matching the
     /// `last_stage_content_cols` / `last_log_panel_cols` lag-one-frame
@@ -3289,11 +3298,14 @@ pub struct CoordApp {
     /// Pre-parsed keybindings from `settings.keybindings`. Rebuilt whenever
     /// settings are saved so lookups are O(n) equality checks, not string parses.
     parsed_keybindings: Vec<(String, ParsedBinding)>,
-    /// FormController backing the settings form (right pane).
+    /// The settings form's (right pane) interaction state — its scroll
+    /// offset, caret and in-flight scrollbar drag — which quadraui's
+    /// `ScrolledForm` keeps while the app rebuilds the form every frame
+    /// (`build_settings_form`).
     ///
-    /// `RefCell` is used so the form can be rebuilt and rendered from the
-    /// `&self` render path (same pattern as `remote_log_cache`).
-    settings_form: std::cell::RefCell<FormController>,
+    /// `RefCell` so the `&self` render path can paint from it (same pattern
+    /// as `remote_log_cache`).
+    settings_form_state: std::cell::RefCell<FormState>,
     /// Which category row is selected in the settings sidebar (left pane).
     // #237: removed `settings_category_sel` — settings render as one
     // unified scrollable form; there are no categories to select.
@@ -3900,12 +3912,12 @@ pub struct CoordApp {
     /// `?`-triggered cheatsheet overlay state machine, shared across every
     /// view that registers help content — only one can be open at a time.
     /// Painted by `plans.rs::render_help_overlay` rather than
-    /// [`HelpOverlayController::render`] — see that function's doc comment
+    /// `HelpOverlay`'s own card paint — see that function's doc comment
     /// for why (contract §5b's exact title-string ordering).
-    help_overlay: HelpOverlayController,
+    help_overlay: HelpOverlay,
     /// `/`-triggered command palette, shared the same way as
     /// `help_overlay` above. `None` when closed.
-    command_palette: Option<DualModePaletteController>,
+    command_palette: Option<PaletteModal>,
 
     // ── #975: Plans ActivityBar panel ────────────────────────────────────────
     /// Selected plan-roster index (0-based) into `plans_visible_entries()`'s
@@ -4254,7 +4266,7 @@ pub struct CoordApp {
     /// with Esc or Enter (Enter also navigates to the selected issue).
     ///
     /// #16: rebuilt on quadraui's shipped `Palette` primitive (via
-    /// `DualModePaletteController`, the same wrapper `command_palette` and
+    /// `DualModePalette`, the same wrapper `command_palette` and
     /// `doc_tab_picker` already drive) — replaces the former hand-rolled
     /// `IssueFinder` state + `render_issue_finder`'s hand-drawn `ListView`
     /// box, deleting ~430 LOC including a copy-pasted `match_fg` theme
@@ -4262,7 +4274,7 @@ pub struct CoordApp {
     /// in name only (same literal, no shared source of truth). See
     /// `dialogs.rs`'s `finder_matches` / `issue_finder_items` /
     /// `render_issue_finder` and `events.rs`'s Ctrl+P block.
-    issue_finder: Option<DualModePaletteController>,
+    issue_finder: Option<PaletteModal>,
 
     // ── #2642: Ctrl+E doc-tab open-tabs picker ────────────────────────────
     /// Active state of the doc-tab quick-pick. `None` when closed. Opened
@@ -4459,12 +4471,8 @@ impl CoordApp {
     /// immediately.  The status bar shows "↻ loading…" until the first
     /// load completes.
     pub fn new() -> Self {
-        let mut sidebar = SidebarSystem::new(Vec::new());
-        sidebar.set_navigation_mode(NavigationMode::Selection);
-        sidebar.set_allow_collapse(true);
-        let mut pipeline_sidebar = SidebarSystem::new(Vec::new());
-        pipeline_sidebar.set_navigation_mode(NavigationMode::Selection);
-        pipeline_sidebar.set_allow_collapse(true);
+        let sidebar = selection_sidebar(BOARD_SIDEBAR_ID, &[]);
+        let pipeline_sidebar = selection_sidebar(PIPELINE_SIDEBAR_ID, &[]);
         let (inject_fallback_tx, inject_fallback_rx) = std::sync::mpsc::channel();
         let mut app = Self {
             data: BoardData::default(),
@@ -4480,6 +4488,7 @@ impl CoordApp {
             // board data.
             active_view: SidebarView::default(),
             board_sidebar: sidebar,
+            board_sidebar_state: Default::default(),
             board_repo_names: Vec::new(),
             board_issues_cache: Vec::new(),
             has_proposals_section: false,
@@ -4502,10 +4511,10 @@ impl CoordApp {
             board_split_layout: std::cell::RefCell::new(None),
             board_pane_chord: None,
             board_section_rows: Vec::new(),
-            board_branch_indents: std::collections::HashMap::new(),
             board_tree_hidden_above: std::collections::HashMap::new(),
             last_sidebar_geom: std::cell::Cell::new(None),
             pipeline_sidebar,
+            pipeline_sidebar_state: Default::default(),
             pipeline_repo_names: Vec::new(),
             pipeline_state_section_names: Vec::new(),
             pipeline_search: SidebarFilter::default(),
@@ -4514,7 +4523,6 @@ impl CoordApp {
             pipeline_epic_expanded: std::collections::HashMap::new(),
             pipeline_epic_row_keys: std::collections::HashMap::new(),
             pipeline_section_rows: Vec::new(),
-            pipeline_branch_indents: std::collections::HashMap::new(),
             last_pipeline_sidebar_geom: std::cell::Cell::new(None),
             pipeline_issues: Vec::new(),
             pipeline_sel: None,
@@ -4618,7 +4626,7 @@ impl CoordApp {
             pipeline_stage_content_scroll: 0,
             settings: TuiSettings::load(),
             parsed_keybindings: parse_keybindings(&TuiSettings::load()),
-            settings_form: std::cell::RefCell::new(FormController::new("settings".to_string())),
+            settings_form_state: Default::default(),
             settings_field_sel: 0,
             audio_prev_running: std::collections::HashSet::new(),
             test_build_jobs: std::collections::HashMap::new(),
@@ -4793,7 +4801,7 @@ impl CoordApp {
                 registry.register("panel:board", CoordApp::board_view_help());
                 registry
             },
-            help_overlay: HelpOverlayController::new(),
+            help_overlay: HelpOverlay::new(WidgetId::new("help-cheatsheet")),
             command_palette: None,
             // #975: Plans panel — selection starts at the top.
             plans_sel: 0,
@@ -5742,6 +5750,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: true,
             h_scroll: 0,
@@ -5849,7 +5860,7 @@ impl CoordApp {
             }
             // Clear the input field.
             if let Some(ref mut chat) = self.inject_chat {
-                chat.clear_input();
+                chat.chat.clear_input();
             }
             // Dispatch the resume in a background thread.
             let config_path = self.command_runner.config_path.clone();
@@ -5949,8 +5960,8 @@ impl CoordApp {
                 .map(|ctx| chat_transcript_from_pool(ctx, chat_wrap_width))
                 .unwrap_or_else(|| self.focused_transcript().to_vec());
             if let Some(ref mut chat) = self.inject_chat {
-                chat.set_transcript(transcript);
-                chat.clear_input();
+                chat.chat.transcript = transcript;
+                chat.chat.clear_input();
             }
             self.pipeline_status = Some((
                 format!("asked worker #{}: {}", issue_number, text),
@@ -6789,7 +6800,7 @@ impl CoordApp {
         })
     }
 
-    /// Rebuild the SidebarSystem from current data.
+    /// Rebuild the Board `Sidebar` from current data.
     ///
     /// Layout:
     /// - Section 0: search form (always present)
@@ -6812,7 +6823,7 @@ impl CoordApp {
         // issue it actually pointed at; see that method's doc comment for
         // the silent-wrong-issue failure mode this avoids.
         let prev_selection = self.board_selected_issue_unfiltered();
-        let prev_panel_scroll = self.board_sidebar.panel_scroll();
+        let prev_panel_scroll = self.board_sidebar.panel_scroll;
 
         // Save per-section collapse state keyed by section name.
         let search_offset = 1usize; // always one search section
@@ -6822,12 +6833,12 @@ impl CoordApp {
             if self.has_proposals_section {
                 map.insert(
                     "__proposals__".to_string(),
-                    self.board_sidebar.is_collapsed(search_offset),
+                    self.board_sidebar.sections.get(search_offset).is_some_and(|s| s.collapsed),
                 );
             }
             let old_names: Vec<String> = self.board_repo_names.clone();
             for (i, name) in old_names.into_iter().enumerate() {
-                map.insert(name, self.board_sidebar.is_collapsed(i + offset));
+                map.insert(name, self.board_sidebar.sections.get(i + offset).is_some_and(|s| s.collapsed));
             }
             map
         };
@@ -6862,23 +6873,19 @@ impl CoordApp {
 
         self.board_repo_names = grouped.iter().map(|(r, _)| r.clone()).collect();
 
-        // #2282: captured before `defs` is moved into the new SidebarSystem —
+        // #2282: captured up front —
         // `board_section_rows` is indexed by section, so it has to cover every
         // section, form sections included.
         let defs_len = defs.len();
-        self.board_sidebar = SidebarSystem::new(defs);
-        self.board_sidebar
-            .set_navigation_mode(NavigationMode::Selection);
-        self.board_sidebar.set_allow_collapse(true);
-        self.board_sidebar.set_scroll_mode(ScrollMode::WholePanel);
+        self.board_sidebar = selection_sidebar(BOARD_SIDEBAR_ID, &defs);
+        self.board_sidebar.scroll_mode = ScrollMode::WholePanel;
 
         // Populate search form (section 0).
-        self.board_sidebar
-            .set_form(
-                0,
-                self.board_search
-                    .form("board-search", "Filter issues… (#4 = number only)"),
-            );
+        if let Some(f) = self.board_sidebar.form_mut(0) {
+            *f = self
+                .board_search
+                .form("board-search", "Filter issues… (#4 = number only)");
+        }
 
         let offset = search_offset + if self.has_proposals_section { 1 } else { 0 };
 
@@ -6918,13 +6925,9 @@ impl CoordApp {
                 })
                 .collect();
             self.board_sidebar.set_rows(search_offset, rows);
-            self.board_sidebar.set_section_badge(
-                search_offset,
-                Some(StyledText::plain(format!(
-                    "({})",
-                    self.data.proposals.len()
-                ))),
-            );
+            if let Some(s) = self.board_sidebar.sections.get_mut(search_offset) {
+                s.badge = Some(StyledText::plain(format!("({})", self.data.proposals.len())));
+            }
         }
 
         // #1270: every child issue nested under some epic, computed once up
@@ -6949,7 +6952,6 @@ impl CoordApp {
         // offset arithmetic. Grown to `defs.len()` up front so a Form section
         // (the FILTER box, section 0) still occupies its slot.
         let mut section_rows: Vec<Vec<(TreePath, bool)>> = vec![Vec::new(); defs_len];
-        let mut branch_indents = std::collections::HashMap::new();
 
         // #410: Build per-repo milestone > issue rows (status sub-group removed).
         //
@@ -7152,13 +7154,14 @@ impl CoordApp {
 
             // Phase 2: apply mutations now that milestones is dropped.
             if total > 0 {
-                self.board_sidebar.set_section_badge(
-                    section_idx,
-                    Some(StyledText::plain(format!("({})", total))),
-                );
+                if let Some(s) = self.board_sidebar.sections.get_mut(section_idx) {
+                    s.badge = Some(StyledText::plain(format!("({})", total)));
+                }
             }
             if total == 0 {
-                self.board_sidebar.set_collapsed(section_idx, true);
+                if let Some(s) = self.board_sidebar.sections.get_mut(section_idx) {
+                    s.collapsed = true;
+                }
             }
             // #2282 (ms-65 §2f): remember this section's row shape before the
             // rows are handed to the sidebar (which offers no way to read them
@@ -7169,25 +7172,19 @@ impl CoordApp {
                     .map(|r| (r.path.clone(), matches!(r.decoration, Decoration::Header)))
                     .collect();
             }
-            branch_indents.extend(
-                rows.iter()
-                    .filter(|r| r.is_expanded.is_some())
-                    .map(|r| ((section_idx, r.path.clone()), r.indent)),
-            );
             self.board_sidebar.set_rows(section_idx, rows);
         }
         self.board_epic_row_keys = epic_row_keys;
         self.board_section_rows = section_rows;
-        self.board_branch_indents = branch_indents;
 
         // Activate first non-empty repo section.
-        if self.board_sidebar.active_section().is_none() {
+        if self.board_sidebar.active_section.is_none() {
             if self.has_proposals_section {
-                self.board_sidebar.set_active_section(Some(search_offset));
+                self.board_sidebar.active_section = Some(search_offset);
             } else {
                 for (i, (_repo, issues)) in grouped.iter().enumerate() {
                     if !issues.is_empty() {
-                        self.board_sidebar.set_active_section(Some(i + offset));
+                        self.board_sidebar.active_section = Some(i + offset);
                         break;
                     }
                 }
@@ -7199,28 +7196,32 @@ impl CoordApp {
             self.select_issue(&prev_repo, prev_issue);
         }
 
-        self.board_sidebar.set_panel_scroll(prev_panel_scroll);
+        self.board_sidebar.panel_scroll = prev_panel_scroll.max(0.0);
 
         // Restore collapsed state by section name.
         {
             let new_offset = search_offset + if self.has_proposals_section { 1 } else { 0 };
             if self.has_proposals_section {
                 if let Some(&was_collapsed) = prev_collapsed.get("__proposals__") {
-                    self.board_sidebar
-                        .set_collapsed(search_offset, was_collapsed);
+                    if let Some(s) = self.board_sidebar.sections.get_mut(search_offset) {
+                        s.collapsed = was_collapsed;
+                    }
                 }
             }
             let new_names: Vec<String> = self.board_repo_names.clone();
             for (i, name) in new_names.into_iter().enumerate() {
                 if let Some(&was_collapsed) = prev_collapsed.get(&name) {
-                    self.board_sidebar
-                        .set_collapsed(i + new_offset, was_collapsed);
+                    if let Some(s) = self.board_sidebar.sections.get_mut(i + new_offset) {
+                        s.collapsed = was_collapsed;
+                    }
                 }
             }
         }
         // Re-apply filter focus after rebuild so the cursor survives auto-refresh.
         if self.board_search.focused {
-            self.board_sidebar.focus_form(0, true);
+            if let Some(s) = self.board_sidebar.sections.get_mut(0) {
+                s.form_focused = true;
+            }
         }
 
         // #638: Keep Kanban model in sync with new board data.
@@ -7404,6 +7405,9 @@ impl CoordApp {
             items: vec![],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -7414,7 +7418,7 @@ impl CoordApp {
 
     /// Return the repo name for the active sidebar section, if any.
     fn board_active_repo(&self) -> Option<&str> {
-        let section = self.board_sidebar.active_section()?;
+        let section = self.board_sidebar.active_section?;
         let offset = self.board_repo_offset();
         if section < offset {
             return None;
@@ -7492,12 +7496,12 @@ impl CoordApp {
     /// itself synced into `open_issues`) — such a row exists for nested
     /// display only, same as the Pipeline equivalent.
     fn board_selected_issue_group(&self) -> Option<&IssueGroup> {
-        let section = self.board_sidebar.active_section()?;
+        let section = self.board_sidebar.active_section?;
         let offset = self.board_repo_offset();
         if section < offset {
             return None;
         }
-        let path = self.board_sidebar.selected_path(section)?;
+        let path = self.board_sidebar.tree(section).and_then(|t| t.selected_path.as_ref())?;
         // #410: issue rows are at path depth 2 — [milestone_idx, issue_idx].
         if path.len() < 2 {
             return None;
@@ -7561,12 +7565,12 @@ impl CoordApp {
     /// avoids that: the coordinate space doesn't shift out from under the
     /// path just because a keystroke changed the filter.
     fn board_selected_issue_unfiltered(&self) -> Option<(String, u64)> {
-        let section = self.board_sidebar.active_section()?;
+        let section = self.board_sidebar.active_section?;
         let offset = self.board_repo_offset();
         if section < offset {
             return None;
         }
-        let path = self.board_sidebar.selected_path(section)?;
+        let path = self.board_sidebar.tree(section).and_then(|t| t.selected_path.as_ref())?;
         if path.len() < 2 {
             return None;
         }
@@ -7880,7 +7884,7 @@ impl CoordApp {
             return;
         };
         let popup = Self::doc_tab_picker_popup_rect(main);
-        picker.palette.render(popup, backend);
+        picker.palette.draw(popup, backend);
     }
 
     /// Open the picker for `scope` (contract: `Ctrl+E`). No-op — and no
@@ -7898,8 +7902,7 @@ impl CoordApp {
         self.doc_tab_picker = Some(DocTabPickerState {
             scope,
             pane,
-            palette: DualModePaletteController::new("Open tabs", None, items)
-                .with_id("doc-tab-picker"),
+            palette: PaletteModal::new("doc-tab-picker", "Open tabs", items),
         });
     }
 
@@ -8400,13 +8403,13 @@ impl CoordApp {
         // box is pinned to the top of the sidebar, so the reveal windows the
         // repo's own tree (leading rows collapse into a `⋮ N more above`
         // marker) rather than calling `set_panel_scroll`.
-        self.board_sidebar.set_panel_scroll(0.0);
+        self.board_sidebar.panel_scroll = 0.0;
         let hidden = self.board_reveal_hidden_count();
         if hidden > 0 {
             self.board_tree_hidden_above.insert(repo.clone(), hidden);
             self.rebuild_board_sidebar();
             self.select_issue(&repo, number);
-            self.board_sidebar.set_panel_scroll(0.0);
+            self.board_sidebar.panel_scroll = 0.0;
         }
         // Degenerate fallback (windowing alone cannot lift the row above the
         // fold when the sections ABOVE the target repo already overflow the
@@ -8419,8 +8422,7 @@ impl CoordApp {
     /// section's tree must collapse into the `⋮ N more above` marker for the
     /// currently-selected row's bottom edge to sit inside the viewport with
     /// the panel unscrolled. `0` ⇒ the row already fits un-windowed. Uses the
-    /// same reconstructed row model as [`Self::scroll_board_selection_into_view`]
-    /// (quadraui#595's `SidebarSystem::reveal` will replace both once landed).
+    /// same reconstructed row model as [`Self::scroll_board_selection_into_view`].
     fn board_reveal_hidden_count(&self) -> usize {
         let Some((rect, lh, header_size)) = self.last_sidebar_geom.get() else {
             return 0;
@@ -8428,20 +8430,20 @@ impl CoordApp {
         if rect.height <= 0.0 || lh <= 0.0 {
             return 0;
         }
-        let Some(section) = self.board_sidebar.active_section() else {
+        let Some(section) = self.board_sidebar.active_section else {
             return 0;
         };
-        let Some(path) = self.board_sidebar.selected_path(section) else {
+        let Some(path) = self.board_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()) else {
             return 0;
         };
-        if !self.board_sidebar.is_section_visible(section) {
+        if !self.board_sidebar.sections.get(section).is_none_or(|s| s.visible) {
             return 0;
         }
 
         // Fixed content above the target section's body (panel scroll 0).
         let mut base = 0.0_f32;
         for s in 0..section {
-            if !self.board_sidebar.is_section_visible(s) {
+            if !self.board_sidebar.sections.get(s).is_none_or(|s| s.visible) {
                 continue;
             }
             base += header_size + self.board_section_content_height(s, lh);
@@ -8511,9 +8513,10 @@ impl CoordApp {
 
     /// Height, in main-axis units, of one Board sidebar row.
     ///
-    /// Mirrors quadraui's `sidebar_system::body_measure`: a
-    /// `Decoration::Header` row measures `lh * 1.2`, everything else
-    /// `lh * 1.4`, both rounded. Getting this wrong does not misplace the row
+    /// The pitch quadraui's retired `SidebarSystem` measured rows at: a
+    /// `Decoration::Header` row `lh * 1.2`, everything else `lh * 1.4`, both
+    /// rounded — one cell per row on a cell grid, which is what the
+    /// `Sidebar`'s trees lay rows out at there. Getting this wrong does not misplace the row
     /// visually — quadraui still owns the paint — it just makes
     /// reveal-on-activate scroll to the wrong offset.
     fn board_row_height(lh: f32, is_header: bool) -> f32 {
@@ -8527,7 +8530,7 @@ impl CoordApp {
     /// Content height of Board sidebar section `s` (excluding its own header
     /// row), as quadraui's `ScrollMode::WholePanel` sizing computes it.
     fn board_section_content_height(&self, s: usize, lh: f32) -> f32 {
-        if self.board_sidebar.is_collapsed(s) {
+        if self.board_sidebar.sections.get(s).is_some_and(|s| s.collapsed) {
             return 0.0;
         }
         if let Some(form) = self.board_sidebar.form(s) {
@@ -8547,12 +8550,11 @@ impl CoordApp {
     /// the Board sidebar so the currently-selected row is inside the viewport.
     ///
     /// The Board sidebar runs in `ScrollMode::WholePanel`, so the whole
-    /// section stack scrolls as one and `SidebarSystem::set_panel_scroll` is
-    /// the only lever — there is no per-tree scroll setter on `SidebarSystem`
-    /// (that is quadraui#595's `SidebarSystem::reveal`, which is not landed at
-    /// any pushed quadraui rev; when it is, this method becomes a delegation).
-    /// The offset is therefore reconstructed here from the panel's own row
-    /// model plus the backend metrics stashed at paint time.
+    /// section stack scrolls as one and `Sidebar::panel_scroll` is the only
+    /// lever — `Sidebar::reveal` scrolls a section's own tree, which
+    /// `WholePanel` does not use. The offset is therefore reconstructed here
+    /// from the panel's own row model plus the geometry stashed at paint
+    /// time.
     ///
     /// Scrolls the minimum distance that makes the row visible — down to the
     /// row's bottom edge when it is below the fold, up to its top edge when it
@@ -8566,10 +8568,10 @@ impl CoordApp {
         if rect.height <= 0.0 || lh <= 0.0 {
             return;
         }
-        let Some(section) = self.board_sidebar.active_section() else {
+        let Some(section) = self.board_sidebar.active_section else {
             return;
         };
-        let Some(path) = self.board_sidebar.selected_path(section).cloned() else {
+        let Some(path) = self.board_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()).cloned() else {
             return;
         };
 
@@ -8578,12 +8580,12 @@ impl CoordApp {
         // them), so they cost nothing.
         let mut y = 0.0_f32;
         for s in 0..section {
-            if !self.board_sidebar.is_section_visible(s) {
+            if !self.board_sidebar.sections.get(s).is_none_or(|s| s.visible) {
                 continue;
             }
             y += header_size + self.board_section_content_height(s, lh);
         }
-        if !self.board_sidebar.is_section_visible(section) {
+        if !self.board_sidebar.sections.get(section).is_none_or(|s| s.visible) {
             return;
         }
         y += header_size;
@@ -8605,7 +8607,7 @@ impl CoordApp {
             return;
         };
 
-        let scroll = self.board_sidebar.panel_scroll();
+        let scroll = self.board_sidebar.panel_scroll;
         let new = if y < scroll {
             y
         } else if y + row_h > scroll + rect.height {
@@ -8613,7 +8615,7 @@ impl CoordApp {
         } else {
             return;
         };
-        self.board_sidebar.set_panel_scroll(new.max(0.0));
+        self.board_sidebar.panel_scroll = new.max(0.0);
     }
 
     /// Return the Proposal currently selected in the sidebar's PROPOSALS section.
@@ -8621,12 +8623,12 @@ impl CoordApp {
         if !self.has_proposals_section {
             return None;
         }
-        let section = self.board_sidebar.active_section()?;
+        let section = self.board_sidebar.active_section?;
         // Proposals section is at index 1 (after the search form).
         if section != 1 {
             return None;
         }
-        let path = self.board_sidebar.selected_path(1)?;
+        let path = self.board_sidebar.tree(1).and_then(|t| t.selected_path.as_ref())?;
         if path.is_empty() {
             return None;
         }
@@ -8647,7 +8649,7 @@ impl CoordApp {
     /// only available when the user has navigated into the Done section,
     /// preventing accidental purges from other views.
     fn board_selection_in_completed_group(&self) -> bool {
-        let section = match self.board_sidebar.active_section() {
+        let section = match self.board_sidebar.active_section {
             Some(s) => s,
             None => return false,
         };
@@ -8655,7 +8657,7 @@ impl CoordApp {
         if section < offset {
             return false;
         }
-        let path = match self.board_sidebar.selected_path(section) {
+        let path = match self.board_sidebar.tree(section).and_then(|t| t.selected_path.as_ref()) {
             Some(p) => p,
             None => return false,
         };
@@ -8721,11 +8723,10 @@ impl CoordApp {
         for (milestone_idx, (_, _, group_issues)) in milestones.iter().enumerate() {
             for (issue_idx, (_, g)) in group_issues.iter().enumerate() {
                 if g.issue_number == issue_number {
-                    self.board_sidebar.set_active_section(Some(section_idx));
-                    self.board_sidebar.set_selected_path(
-                        section_idx,
-                        Some(vec![milestone_idx as u16, issue_idx as u16]),
-                    );
+                    self.board_sidebar.active_section = Some(section_idx);
+                    if let Some(t) = self.board_sidebar.tree_mut(section_idx) {
+                        t.selected_path = Some(vec![milestone_idx as u16, issue_idx as u16]);
+                    }
                     return;
                 }
                 // #1270: `issue_number` might be a child nested under this
@@ -8735,11 +8736,10 @@ impl CoordApp {
                 // nested child before giving up on this repo.
                 let children = self.epic_child_rows_for(repo, g.issue_number);
                 if let Some(child_idx) = children.iter().position(|c| c.number == issue_number) {
-                    self.board_sidebar.set_active_section(Some(section_idx));
-                    self.board_sidebar.set_selected_path(
-                        section_idx,
-                        Some(vec![milestone_idx as u16, issue_idx as u16, child_idx as u16]),
-                    );
+                    self.board_sidebar.active_section = Some(section_idx);
+                    if let Some(t) = self.board_sidebar.tree_mut(section_idx) {
+                        t.selected_path = Some(vec![milestone_idx as u16, issue_idx as u16, child_idx as u16]);
+                    }
                     return;
                 }
             }
@@ -8750,7 +8750,7 @@ impl CoordApp {
         // visible/focused section always agrees with the active document —
         // and clear ITS selection explicitly by index, never by reading back
         // whatever `active_section()` was before this call.
-        self.board_sidebar.set_active_section(Some(section_idx));
+        self.board_sidebar.active_section = Some(section_idx);
         self.clear_board_tree_selection(section_idx);
     }
 
@@ -8765,7 +8765,9 @@ impl CoordApp {
     /// through, always after `set_active_section(Some(section))` so focus
     /// and clearing agree on the same section.
     fn clear_board_tree_selection(&mut self, section: usize) {
-        self.board_sidebar.set_selected_path(section, None);
+        if let Some(t) = self.board_sidebar.tree_mut(section) {
+            t.selected_path = None;
+        }
     }
 
     /// Clamp `machine_scroll` so that `machine_sel` is inside the visible window.
@@ -8979,6 +8981,9 @@ impl CoordApp {
             items,
             selected_idx: if n > 0 { self.machine_sel } else { 0 },
             scroll_offset: self.machine_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus,
             bordered: false,
             h_scroll: 0,
@@ -9038,6 +9043,9 @@ impl CoordApp {
                 items,
                 selected_idx: 0,
                 scroll_offset: self.detail_scroll,
+                items_window: None,
+                scroll_px: None,
+                striped: false,
                 has_focus: false,
                 bordered: false,
                 h_scroll: 0,
@@ -9200,6 +9208,9 @@ impl CoordApp {
             // #2288 (§9): a background pane scrolls independently of the
             // focused one — see `board_pane_detail_scroll`.
             scroll_offset: self.board_pane_detail_scroll(),
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -9520,6 +9531,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: self.machine_detail_scroll,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -9586,6 +9600,9 @@ impl CoordApp {
             items,
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -9727,6 +9744,9 @@ impl CoordApp {
             }],
             selected_idx: 0,
             scroll_offset: 0,
+            items_window: None,
+            scroll_px: None,
+            striped: false,
             has_focus: false,
             bordered: false,
             h_scroll: 0,
@@ -9788,6 +9808,8 @@ impl CoordApp {
 
         let chart = Chart {
             id: WidgetId::new(format!("metric-chart-{}", label.to_lowercase())),
+            hovered_point: None,
+            crosshair_x: None,
             kind: ChartKind::Line,
             series: vec![Series {
                 label: label.to_string(),
@@ -9806,8 +9828,7 @@ impl CoordApp {
             x_ticks: None,
             show_grid: true,
         };
-        // TODO(quadraui widget contract): legacy `Backend::draw_chart` — move to `DrawsPrimitives` when quadraui ports Chart (chart group).
-        backend.draw_chart(area, &chart, None, None);
+        let _ = backend.draw_primitive(area, &chart);
     }
 
 
@@ -10189,7 +10210,7 @@ impl CoordApp {
                 attn
             )
         } else if self.active_view.help_view_id().is_some()
-            && (self.help_overlay.is_open() || self.command_palette.is_some())
+            && (self.help_overlay.open || self.command_palette.is_some())
         {
             // #1124 contract §5i: both the `?` cheatsheet and the `/`
             // command palette are modal overlays over whichever panel has
@@ -10519,8 +10540,8 @@ pub(crate) fn first_meaningful_stderr_line(stderr: &str) -> Option<String> {
 /// returned by `build_pipeline_widget` (used by `dispatch_pipeline_active_go`
 /// and `pipeline_action_button`); the visible buttons move to the bar above.
 ///
-/// Pass the *stripped* view to both `draw_pipeline_view` AND
-/// `Backend::pipeline_view_layout` so paint and hit-test agree on the
+/// Pass the *stripped* view to both the paint AND the click path's
+/// `layout_primitive` so paint and hit-test agree on the
 /// (now-shrunk) stage-box bounds — quadraui drops the action row when no
 /// stage has one.
 
